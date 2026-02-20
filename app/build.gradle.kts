@@ -49,6 +49,5 @@ dependencies {
     implementation("com.google.android.gms:play-services-cast-framework:21.4.0")
     implementation("org.nanohttpd:nanohttpd:2.3.1")
     implementation("com.arthenica:ffmpeg-kit-full:6.0-2")
-    implementation("com.google.android.exoplayer:exoplayer:2.19.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 }
