@@ -176,15 +176,13 @@ class MainActivity : AppCompatActivity() {
             // Couldn't query metadata; use defaults
         }
 
-        if (filePath == null) {
-            filePath = uri.path ?: uri.toString()
-        }
+        val resolvedPath = filePath ?: uri.path ?: uri.toString()
 
         return VideoItem(
-            id = uri.hashCode().toLong(),
+            id = uri.toString().hashCode().toLong(),
             title = displayName,
             uri = uri,
-            path = filePath!!,
+            path = resolvedPath,
             duration = 0L,
             size = size,
             mimeType = mimeType
