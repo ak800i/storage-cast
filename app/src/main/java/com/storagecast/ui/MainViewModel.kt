@@ -5,9 +5,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.viewModelScope
-import com.storagecast.model.SubtitleTrack
+import com.storagecast.model.BrowseItem
 import com.storagecast.model.VideoItem
-import com.storagecast.subtitle.SubtitleExtractor
 import com.storagecast.video.VideoRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -17,21 +16,19 @@ import java.io.File
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val videoRepository = VideoRepository(application.contentResolver)
-    private val subtitleExtractor = SubtitleExtractor()
 
     private var allVideos: List<VideoItem> = emptyList()
+    private var currentPath: String? = null
+    private var isSearching = false
 
-    private val _videos = MutableLiveData<List<VideoItem>>()
-    val videos: LiveData<List<VideoItem>> = _videos
+    private val _browseItems = MutableLiveData<List<BrowseItem>>()
+    val browseItems: LiveData<List<BrowseItem>> = _browseItems
 
     private val _loading = MutableLiveData<Boolean>()
     val loading: LiveData<Boolean> = _loading
 
-    private val _subtitleTracks = MutableLiveData<Pair<VideoItem, List<SubtitleTrack>>>()
-    val subtitleTracks: LiveData<Pair<VideoItem, List<SubtitleTrack>>> = _subtitleTracks
-
-    private val _extractedSubtitle = MutableLiveData<File?>()
-    val extractedSubtitle: LiveData<File?> = _extractedSubtitle
+    private val _currentFolder = MutableLiveData<String?>()
+    val currentFolder: LiveData<String?> = _currentFolder
 
     fun loadVideos() {
         viewModelScope.launch {
@@ -40,41 +37,105 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 videoRepository.getVideos()
             }
             allVideos = videoList
-            _videos.value = videoList
+            currentPath = null
+            isSearching = false
+            updateBrowseItems()
             _loading.value = false
         }
+    }
+
+    fun navigateToFolder(folderPath: String) {
+        currentPath = folderPath
+        isSearching = false
+        updateBrowseItems()
+    }
+
+    fun navigateUp(): Boolean {
+        if (isSearching) {
+            isSearching = false
+            updateBrowseItems()
+            return true
+        }
+        val path = currentPath ?: return false
+        val basePath = computeBasePath()
+        if (path == basePath) {
+            currentPath = null
+            updateBrowseItems()
+            return true
+        }
+        val parent = File(path).parent
+        currentPath = if (parent != null && parent.startsWith(basePath)) parent else null
+        updateBrowseItems()
+        return true
     }
 
     fun filterVideos(query: String?) {
         if (query.isNullOrBlank()) {
-            _videos.value = allVideos
+            isSearching = false
+            updateBrowseItems()
         } else {
+            isSearching = true
             val lowerQuery = query.lowercase()
-            _videos.value = allVideos.filter { it.title.lowercase().contains(lowerQuery) }
+            val filtered = allVideos.filter { it.title.lowercase().contains(lowerQuery) }
+            _browseItems.value = filtered.map { BrowseItem.Video(it) }
+            _currentFolder.value = null
         }
     }
 
-    fun loadSubtitleTracks(video: VideoItem) {
-        viewModelScope.launch {
-            _loading.value = true
-            val tracks = withContext(Dispatchers.IO) {
-                subtitleExtractor.getSubtitleTracks(video.path)
-            }
-            _subtitleTracks.value = Pair(video, tracks)
-            _loading.value = false
+    private fun updateBrowseItems() {
+        val path = currentPath
+        if (path == null) {
+            _browseItems.value = buildTopLevelItems()
+            _currentFolder.value = null
+        } else {
+            _browseItems.value = buildItemsForPath(path)
+            _currentFolder.value = File(path).name
         }
     }
 
-    fun extractSubtitle(videoPath: String, trackIndex: Int) {
-        viewModelScope.launch {
-            _loading.value = true
-            val subtitleFile = withContext(Dispatchers.IO) {
-                val outputDir = File(getApplication<Application>().cacheDir, "subtitles")
-                outputDir.mkdirs()
-                subtitleExtractor.extractSubtitleAsVtt(videoPath, trackIndex, outputDir)
+    private fun computeBasePath(): String {
+        val paths = allVideos.map { File(it.path).parent ?: "" }.filter { it.isNotEmpty() }
+        if (paths.isEmpty()) return ""
+        var common = paths[0]
+        for (p in paths) {
+            while (!p.startsWith(common)) {
+                common = File(common).parent ?: ""
             }
-            _extractedSubtitle.value = subtitleFile
-            _loading.value = false
         }
+        return common
+    }
+
+    private fun buildTopLevelItems(): List<BrowseItem> {
+        if (allVideos.isEmpty()) return emptyList()
+        val basePath = computeBasePath()
+        return buildItemsForPath(basePath)
+    }
+
+    private fun buildItemsForPath(path: String): List<BrowseItem> {
+        val items = mutableListOf<BrowseItem>()
+        val folders = mutableMapOf<String, Int>()
+        val videosHere = mutableListOf<VideoItem>()
+
+        for (video in allVideos) {
+            val videoDir = File(video.path).parent ?: continue
+            if (videoDir == path) {
+                videosHere.add(video)
+            } else if (videoDir.startsWith("$path/")) {
+                val relative = videoDir.removePrefix("$path/")
+                val topFolder = relative.split("/")[0]
+                val folderPath = "$path/$topFolder"
+                folders[folderPath] = (folders[folderPath] ?: 0) + 1
+            }
+        }
+
+        folders.entries.sortedBy { File(it.key).name.lowercase() }.forEach { (folderPath, count) ->
+            items.add(BrowseItem.Folder(File(folderPath).name, folderPath, count))
+        }
+
+        videosHere.sortedBy { it.title.lowercase() }.forEach { video ->
+            items.add(BrowseItem.Video(video))
+        }
+
+        return items
     }
 }
