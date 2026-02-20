@@ -11,4 +11,6 @@
     <string name="error_subtitle">Failed to extract subtitles</string>
     <string name="no_subtitles">No embedded subtitles found</string>
     <string name="subtitle_track">Subtitle track %d: %s</string>
+    <string name="search_videos">Search videos</string>
+    <string name="no_search_results">No matching videos found</string>
 </resources>
