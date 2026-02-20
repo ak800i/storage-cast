@@ -17,7 +17,7 @@ An Android app that casts videos from your device's local storage to Google Cast
 - **MediaStore API** — discovers videos on the device
 - **Google Cast SDK** — discovers Cast devices and controls playback
 - **NanoHTTPD** — serves video and subtitle files over HTTP to the Cast device
-- **FFmpeg Kit** — probes video files for embedded subtitle tracks and extracts them as WebVTT
+- **MediaExtractor** — probes video files for embedded subtitle tracks and extracts them as WebVTT
 
 ## Building
 
