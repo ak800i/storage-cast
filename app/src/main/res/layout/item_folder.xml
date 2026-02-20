@@ -50,7 +50,7 @@
         <ImageView
             android:layout_width="24dp"
             android:layout_height="24dp"
-            android:src="@android:drawable/ic_media_play"
+            android:src="@android:drawable/ic_menu_more"
             android:contentDescription="Open folder"
             android:tint="?android:attr/textColorSecondary" />
     </LinearLayout>

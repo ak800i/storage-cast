@@ -154,7 +154,8 @@ class VideoDetailActivity : AppCompatActivity() {
                 return@setOnClickListener
             }
             session.remoteMediaClient?.play()
-            Toast.makeText(this, R.string.video_playing, Toast.LENGTH_SHORT).show()
+            val video = videoItem
+            Toast.makeText(this, getString(R.string.video_playing, video?.title ?: ""), Toast.LENGTH_SHORT).show()
         }
 
         binding.pauseButton.setOnClickListener {

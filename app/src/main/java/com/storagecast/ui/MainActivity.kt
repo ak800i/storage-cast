@@ -10,6 +10,7 @@ import android.provider.OpenableColumns
 import android.view.Menu
 import android.view.View
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SearchView
@@ -50,6 +51,7 @@ class MainActivity : AppCompatActivity() {
         observeViewModel()
         setupCast()
         checkPermissionsAndLoad()
+        setupBackNavigation()
 
         handleIncomingIntent(intent)
     }
@@ -206,10 +208,14 @@ class MainActivity : AppCompatActivity() {
         return true
     }
 
-    @Suppress("DEPRECATION")
-    override fun onBackPressed() {
-        if (!viewModel.navigateUp()) {
-            super.onBackPressed()
-        }
+    private fun setupBackNavigation() {
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (!viewModel.navigateUp()) {
+                    isEnabled = false
+                    onBackPressedDispatcher.onBackPressed()
+                }
+            }
+        })
     }
 }
