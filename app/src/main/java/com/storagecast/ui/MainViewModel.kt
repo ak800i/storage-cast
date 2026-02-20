@@ -19,6 +19,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val videoRepository = VideoRepository(application.contentResolver)
     private val subtitleExtractor = SubtitleExtractor()
 
+    private var allVideos: List<VideoItem> = emptyList()
+
     private val _videos = MutableLiveData<List<VideoItem>>()
     val videos: LiveData<List<VideoItem>> = _videos
 
@@ -37,8 +39,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val videoList = withContext(Dispatchers.IO) {
                 videoRepository.getVideos()
             }
+            allVideos = videoList
             _videos.value = videoList
             _loading.value = false
+        }
+    }
+
+    fun filterVideos(query: String?) {
+        if (query.isNullOrBlank()) {
+            _videos.value = allVideos
+        } else {
+            val lowerQuery = query.lowercase()
+            _videos.value = allVideos.filter { it.title.lowercase().contains(lowerQuery) }
         }
     }
 
