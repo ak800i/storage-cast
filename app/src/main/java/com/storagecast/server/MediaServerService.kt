@@ -37,17 +37,17 @@ class MediaServerService : Service() {
     fun startServer(port: Int = 8080): Int {
         installNanoHttpdLogHandler()
         if (server?.isAlive == true) {
-            AppLogger.log("MediaServer", "Server already running on port ${server!!.listeningPort}")
+            AppLogger.info("MediaServer", "Server already running on port ${server!!.listeningPort}")
             return server!!.listeningPort
         }
         return try {
             server = MediaServer(port, contentResolver)
             server?.start()
             val actualPort = server!!.listeningPort
-            AppLogger.log("MediaServer", "Server started on port $actualPort")
+            AppLogger.info("MediaServer", "Server started on port $actualPort")
             actualPort
         } catch (e: Exception) {
-            AppLogger.log("MediaServer", "Failed to start server on port $port: ${e.message}")
+            AppLogger.error("MediaServer", "Failed to start server on port $port: ${e.message}")
             throw e
         }
     }
@@ -62,23 +62,23 @@ class MediaServerService : Service() {
                     val msg = record.message ?: return
                     val thrown = record.thrown
                     if (thrown != null) {
-                        AppLogger.log("NanoHTTPD", "$msg: ${thrown.javaClass.simpleName}: ${thrown.message}")
+                        AppLogger.warn("NanoHTTPD", "$msg: ${thrown.javaClass.simpleName}: ${thrown.message}")
                     } else {
-                        AppLogger.log("NanoHTTPD", msg)
+                        AppLogger.info("NanoHTTPD", msg)
                     }
                 }
                 override fun flush() {}
                 override fun close() {}
             })
         } catch (e: Exception) {
-            AppLogger.log("MediaServer", "Failed to install NanoHTTPD log handler: ${e.message}")
+            AppLogger.error("MediaServer", "Failed to install NanoHTTPD log handler: ${e.message}")
         }
     }
 
     fun stopServer() {
         server?.stop()
         server = null
-        AppLogger.log("MediaServer", "Server stopped")
+        AppLogger.info("MediaServer", "Server stopped")
     }
 
     fun isServerRunning(): Boolean = server?.isAlive == true
@@ -88,14 +88,14 @@ class MediaServerService : Service() {
         val id = file.name.hashCode().toUInt().toString()
         val serverActive = server != null
         server?.registerFile(id, file, mimeType, uri)
-        AppLogger.log("MediaServer", "Register file: path=$path, id=$id, uri=$uri, exists=${file.exists()}, size=${file.length()}, serverActive=$serverActive")
+        AppLogger.info("MediaServer", "Register file: path=$path, id=$id, uri=$uri, exists=${file.exists()}, size=${file.length()}, serverActive=$serverActive")
         return "/media/$id"
     }
 
     fun registerSubtitle(subtitleFile: File): String {
         val id = subtitleFile.name.hashCode().toUInt().toString()
         server?.registerFile(id, subtitleFile, "text/vtt", null)
-        AppLogger.log("MediaServer", "Register subtitle: ${subtitleFile.name}, id=$id, exists=${subtitleFile.exists()}")
+        AppLogger.info("MediaServer", "Register subtitle: ${subtitleFile.name}, id=$id, exists=${subtitleFile.exists()}")
         return "/media/$id"
     }
 
@@ -132,7 +132,7 @@ class MediaServerService : Service() {
             val result = try {
                 delegate.read(b, off, len)
             } catch (e: IOException) {
-                AppLogger.log("MediaServer", "READ ERROR for $fileName after $totalBytesRead bytes: ${e.javaClass.simpleName}: ${e.message}")
+                AppLogger.error("MediaServer", "READ ERROR for $fileName after $totalBytesRead bytes: ${e.javaClass.simpleName}: ${e.message}")
                 throw e
             }
 
@@ -143,12 +143,12 @@ class MediaServerService : Service() {
                     val previewLen = minOf(result, 16)
                     val hex = b.slice(off until off + previewLen)
                         .joinToString(" ") { "%02x".format(it) }
-                    AppLogger.log("MediaServer", "First bytes of $fileName: $hex (read $result bytes)")
+                    AppLogger.info("MediaServer", "First bytes of $fileName: $hex (read $result bytes)")
                 }
             }
 
             if (result <= 0) {
-                AppLogger.log("MediaServer", "Stream ended for $fileName: read()=$result, totalBytesRead=$totalBytesRead")
+                AppLogger.info("MediaServer", "Stream ended for $fileName: read()=$result, totalBytesRead=$totalBytesRead")
             }
 
             return result
@@ -163,7 +163,7 @@ class MediaServerService : Service() {
         }
 
         override fun close() {
-            AppLogger.log("MediaServer", "Stream closed for $fileName, totalBytesRead=$totalBytesRead")
+            AppLogger.info("MediaServer", "Stream closed for $fileName, totalBytesRead=$totalBytesRead")
             delegate.close()
         }
     }
@@ -178,7 +178,7 @@ class MediaServerService : Service() {
         override fun serve(session: IHTTPSession): Response {
             val uri = session.uri
             Log.d("MediaServer", "Request: $uri")
-            AppLogger.log("MediaServer", "HTTP ${session.method} $uri (headers: ${session.headers.filterKeys { it in listOf("range", "accept", "user-agent") }})")
+            AppLogger.info("MediaServer", "HTTP ${session.method} $uri (headers: ${session.headers.filterKeys { it in listOf("range", "accept", "user-agent") }})")
 
             // Handle CORS preflight requests
             if (session.method == Method.OPTIONS) {
@@ -194,14 +194,14 @@ class MediaServerService : Service() {
                 val id = uri.removePrefix("/media/")
                 val entry = fileMap[id]
                 if (entry == null) {
-                    AppLogger.log("MediaServer", "404 Not found: id=$id, registered ids=${fileMap.keys}")
+                    AppLogger.warn("MediaServer", "404 Not found: id=$id, registered ids=${fileMap.keys}")
                     return newFixedLengthResponse(
                         Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Not found"
                     )
                 }
 
                 if (!entry.file.exists()) {
-                    AppLogger.log("MediaServer", "404 File not found on disk: ${entry.file.absolutePath}")
+                    AppLogger.warn("MediaServer", "404 File not found on disk: ${entry.file.absolutePath}")
                     return newFixedLengthResponse(
                         Response.Status.NOT_FOUND, MIME_PLAINTEXT, "File not found"
                     )
@@ -209,15 +209,15 @@ class MediaServerService : Service() {
 
                 val rangeHeader = session.headers["range"]
                 return if (rangeHeader != null) {
-                    AppLogger.log("MediaServer", "Serving partial: ${entry.file.name} (${entry.file.length()} bytes), range=$rangeHeader")
+                    AppLogger.info("MediaServer", "Serving partial: ${entry.file.name} (${entry.file.length()} bytes), range=$rangeHeader")
                     servePartialContent(entry, rangeHeader)
                 } else {
-                    AppLogger.log("MediaServer", "Serving full: ${entry.file.name} (${entry.file.length()} bytes)")
+                    AppLogger.info("MediaServer", "Serving full: ${entry.file.name} (${entry.file.length()} bytes)")
                     serveFullContent(entry)
                 }
             }
 
-            AppLogger.log("MediaServer", "404 Unknown path: $uri")
+            AppLogger.warn("MediaServer", "404 Unknown path: $uri")
             return newFixedLengthResponse(
                 Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Not found"
             )
@@ -229,18 +229,18 @@ class MediaServerService : Service() {
                 try {
                     val pfd = resolver.openFileDescriptor(entry.uri, "r")
                     if (pfd != null) {
-                        AppLogger.log("MediaServer", "Opened file via ContentResolver: ${entry.file.name}")
+                        AppLogger.info("MediaServer", "Opened file via ContentResolver: ${entry.file.name}")
                         return MonitoredInputStream(
                             ParcelFileDescriptor.AutoCloseInputStream(pfd),
                             entry.file.name
                         )
                     }
                 } catch (e: Exception) {
-                    AppLogger.log("MediaServer", "ContentResolver failed for ${entry.file.name}: ${e.message}, falling back to FileInputStream")
+                    AppLogger.warn("MediaServer", "ContentResolver failed for ${entry.file.name}: ${e.message}, falling back to FileInputStream")
                 }
             }
             // Fall back to direct file access
-            AppLogger.log("MediaServer", "Opened file via FileInputStream: ${entry.file.name}")
+            AppLogger.info("MediaServer", "Opened file via FileInputStream: ${entry.file.name}")
             return MonitoredInputStream(FileInputStream(entry.file), entry.file.name)
         }
 
@@ -254,7 +254,7 @@ class MediaServerService : Service() {
                 response.addHeader("Access-Control-Allow-Origin", "*")
                 response
             } catch (e: Exception) {
-                AppLogger.log("MediaServer", "Error serving file ${entry.file.name}: ${e.message}")
+                AppLogger.error("MediaServer", "Error serving file ${entry.file.name}: ${e.message}")
                 newFixedLengthResponse(
                     Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "Error: ${e.message}"
                 )
@@ -292,7 +292,7 @@ class MediaServerService : Service() {
                 response.addHeader("Access-Control-Allow-Origin", "*")
                 response
             } catch (e: Exception) {
-                AppLogger.log("MediaServer", "Error serving partial content ${entry.file.name}: ${e.message}")
+                AppLogger.error("MediaServer", "Error serving partial content ${entry.file.name}: ${e.message}")
                 newFixedLengthResponse(
                     Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "Error: ${e.message}"
                 )

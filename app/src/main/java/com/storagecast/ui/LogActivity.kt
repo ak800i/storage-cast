@@ -3,7 +3,11 @@ package com.storagecast.ui
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.graphics.Color
 import android.os.Bundle
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.style.ForegroundColorSpan
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.storagecast.R
@@ -46,8 +50,31 @@ class LogActivity : AppCompatActivity() {
     }
 
     private fun refreshLogs() {
-        val logs = AppLogger.getFormattedLogs()
-        binding.logTextView.text = logs.ifEmpty { getString(R.string.no_logs) }
+        val entries = AppLogger.getEntries()
+        if (entries.isEmpty()) {
+            binding.logTextView.text = getString(R.string.no_logs)
+        } else {
+            val spannable = SpannableStringBuilder()
+            entries.forEachIndexed { index, entry ->
+                val start = spannable.length
+                spannable.append(entry.format())
+                val end = spannable.length
+                val color = when (entry.level) {
+                    AppLogger.LogLevel.WARNING -> Color.parseColor("#FF9800")
+                    AppLogger.LogLevel.ERROR -> Color.parseColor("#F44336")
+                    AppLogger.LogLevel.INFO -> Color.parseColor("#9E9E9E")
+                }
+                spannable.setSpan(
+                    ForegroundColorSpan(color),
+                    start, end,
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+                if (index < entries.size - 1) {
+                    spannable.append("\n")
+                }
+            }
+            binding.logTextView.text = spannable
+        }
         binding.logScrollView.post {
             binding.logScrollView.fullScroll(android.view.View.FOCUS_DOWN)
         }
