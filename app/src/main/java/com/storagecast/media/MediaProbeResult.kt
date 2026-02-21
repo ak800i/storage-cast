@@ -31,4 +31,8 @@ data class AudioTrackInfo(
     val channelCount: Int,
     val bitrate: Int,
     val language: String
-)
+) {
+    companion object {
+        const val LANGUAGE_UNDETERMINED = "und"
+    }
+}

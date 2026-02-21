@@ -473,8 +473,9 @@ class VideoDetailActivity : AppCompatActivity() {
             options.add(formatAudioTrackLabel(index + 1, track))
         }
 
-        val currentSelection = if (selectedAudioTrack == null) 0
-            else tracks.indexOfFirst { it.trackIndex == selectedAudioTrack!!.trackIndex } + 1
+        val foundIndex = if (selectedAudioTrack == null) -1
+            else tracks.indexOfFirst { it.trackIndex == selectedAudioTrack!!.trackIndex }
+        val currentSelection = if (foundIndex >= 0) foundIndex + 1 else 0
 
         AlertDialog.Builder(this)
             .setTitle(R.string.audio_track_title)
@@ -497,7 +498,7 @@ class VideoDetailActivity : AppCompatActivity() {
     }
 
     private fun formatAudioTrackLabel(number: Int, track: AudioTrackInfo): String {
-        val lang = if (track.language != "und") track.language else ""
+        val lang = if (track.language != AudioTrackInfo.LANGUAGE_UNDETERMINED) track.language else ""
         val channels = when (track.channelCount) {
             1 -> "Mono"
             2 -> "Stereo"

@@ -115,7 +115,7 @@ class MediaProber {
         val sampleRate = format.getIntSafe(MediaFormat.KEY_SAMPLE_RATE, 0)
         val channelCount = format.getIntSafe(MediaFormat.KEY_CHANNEL_COUNT, 0)
         val bitrate = format.getIntSafe(MediaFormat.KEY_BIT_RATE, 0)
-        val language = format.getStringSafe(MediaFormat.KEY_LANGUAGE, "und")
+        val language = format.getStringSafe(MediaFormat.KEY_LANGUAGE, AudioTrackInfo.LANGUAGE_UNDETERMINED)
 
         return AudioTrackInfo(
             trackIndex = index,
