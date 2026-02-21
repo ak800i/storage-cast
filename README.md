@@ -44,7 +44,7 @@ The APK will be at `app/build/outputs/apk/debug/app-debug.apk`.
 
 ## CI
 
-A GitHub Actions workflow (`.github/workflows/build.yml`) builds the debug APK on every push and pull request to `main` and uploads it as an artifact.
+A GitHub Actions workflow (`.github/workflows/release.yml`) builds the debug APK on every pull request to `main` and uploads it as an artifact. A signed release APK can be built and published via manual workflow dispatch.
 
 ## License
 
