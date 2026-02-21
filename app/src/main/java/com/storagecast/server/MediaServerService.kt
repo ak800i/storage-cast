@@ -49,9 +49,9 @@ class MediaServerService : Service() {
     fun registerFile(path: String, mimeType: String): String {
         val file = File(path)
         val id = file.name.hashCode().toUInt().toString()
-        val registered = server != null
+        val serverActive = server != null
         server?.registerFile(id, file, mimeType)
-        AppLogger.log("MediaServer", "Register file: path=$path, id=$id, exists=${file.exists()}, size=${file.length()}, serverActive=$registered")
+        AppLogger.log("MediaServer", "Register file: path=$path, id=$id, exists=${file.exists()}, size=${file.length()}, serverActive=$serverActive")
         return "/media/$id"
     }
 

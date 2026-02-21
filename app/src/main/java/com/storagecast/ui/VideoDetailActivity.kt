@@ -160,9 +160,8 @@ class VideoDetailActivity : AppCompatActivity() {
             intent.getParcelableExtra(EXTRA_VIDEO)
         }
 
-        val video = videoItem
-        if (video != null) {
-            AppLogger.log(TAG, "Opened video: title=${video.title}, path=${video.path}, mime=${video.mimeType}, size=${video.size}")
+        if (videoItem != null) {
+            AppLogger.log(TAG, "Opened video: title=${videoItem!!.title}, path=${videoItem!!.path}, mime=${videoItem!!.mimeType}, size=${videoItem!!.size}")
         } else {
             AppLogger.log(TAG, "ERROR: No video item in intent extras")
         }
