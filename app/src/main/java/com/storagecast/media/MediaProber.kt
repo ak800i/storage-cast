@@ -115,6 +115,7 @@ class MediaProber {
         val sampleRate = format.getIntSafe(MediaFormat.KEY_SAMPLE_RATE, 0)
         val channelCount = format.getIntSafe(MediaFormat.KEY_CHANNEL_COUNT, 0)
         val bitrate = format.getIntSafe(MediaFormat.KEY_BIT_RATE, 0)
+        val language = format.getStringSafe(MediaFormat.KEY_LANGUAGE, AudioTrackInfo.LANGUAGE_UNDETERMINED)
 
         return AudioTrackInfo(
             trackIndex = index,
@@ -122,7 +123,8 @@ class MediaProber {
             mime = mime,
             sampleRate = sampleRate,
             channelCount = channelCount,
-            bitrate = bitrate
+            bitrate = bitrate,
+            language = language
         )
     }
 
@@ -190,6 +192,12 @@ class MediaProber {
     private fun MediaFormat.getFloatSafe(key: String, default: Float): Float {
         return try {
             if (containsKey(key)) getFloat(key) else default
+        } catch (e: Exception) { default }
+    }
+
+    private fun MediaFormat.getStringSafe(key: String, default: String): String {
+        return try {
+            if (containsKey(key)) getString(key) ?: default else default
         } catch (e: Exception) { default }
     }
 }

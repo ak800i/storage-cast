@@ -49,7 +49,8 @@ class VideoTranscoder {
         inputPath: String,
         outputDir: File,
         probeResult: MediaProbeResult,
-        listener: ProgressListener
+        listener: ProgressListener,
+        selectedAudioTrack: AudioTrackInfo? = null
     ) {
         isCancelled = false
         val outputFile = File(outputDir, "transcode_${System.currentTimeMillis()}.mp4")
@@ -59,7 +60,7 @@ class VideoTranscoder {
             extractor.setDataSource(inputPath)
 
             val videoTrack = probeResult.primaryVideo
-            val audioTrack = probeResult.primaryAudio
+            val audioTrack = selectedAudioTrack ?: probeResult.primaryAudio
 
             if (videoTrack == null && audioTrack == null) {
                 listener.onError("No video or audio tracks found")
