@@ -136,6 +136,6 @@ class SubtitleConverter {
         val m = parts[1].toIntOrNull() ?: 0
         val s = parts[2].toIntOrNull() ?: 0
         val cs = parts[3].toIntOrNull() ?: 0
-        return String.format("%02d:%02d:%02d.%03d", h, m, s, cs * 10)
+        return String.format("%02d:%02d:%02d.%03d", h, m, s, minOf(cs * 10, 999))
     }
 }

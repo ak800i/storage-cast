@@ -333,7 +333,7 @@ class VideoDetailActivity : AppCompatActivity() {
         if (tracks.isNotEmpty()) {
             options.add(getString(R.string.subtitle_embedded_header))
             tracks.forEach { track ->
-                options.add("  ${track.language} - ${track.title} (${track.codec})")
+                options.add("    ${track.language} - ${track.title} (${track.codec})")
             }
         }
 
@@ -354,7 +354,14 @@ class VideoDetailActivity : AppCompatActivity() {
                         // Header item tapped, ignore
                     }
                     which == fileOptionIndex -> {
-                        subtitleFilePicker.launch(arrayOf("*/*"))
+                        subtitleFilePicker.launch(arrayOf(
+                            "text/plain",
+                            "text/vtt",
+                            "application/x-subrip",
+                            "text/x-ssa",
+                            "text/x-ass",
+                            "application/octet-stream"
+                        ))
                     }
                     tracks.isNotEmpty() && which > headerIndex && which < fileOptionIndex -> {
                         val trackIndex = which - headerIndex - 1

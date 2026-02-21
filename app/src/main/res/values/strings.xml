@@ -14,7 +14,7 @@
     <string name="subtitle_source_none">No subtitles</string>
     <string name="subtitle_source_file">Choose subtitle file…</string>
     <string name="subtitle_embedded_header">── Embedded tracks ──</string>
-    <string name="subtitle_file_selected">Subtitle: file</string>
+    <string name="subtitle_file_selected">Subtitle: local file loaded</string>
     <string name="subtitle_file_error">Failed to load subtitle file</string>
     <string name="subtitle_track" formatted="false">Subtitle track %d: %s</string>
     <string name="search_videos">Search videos</string>
