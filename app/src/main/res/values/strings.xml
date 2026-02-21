@@ -24,4 +24,12 @@
     <string name="video_playing">Playing: %s</string>
     <string name="video_paused">Paused</string>
     <string name="video_stopped">Stopped</string>
+    <string name="view_logs">Logs</string>
+    <string name="copy_logs">Copy All</string>
+    <string name="clear_logs">Clear</string>
+    <string name="logs_copied">Logs copied to clipboard</string>
+    <string name="logs_cleared">Logs cleared</string>
+    <string name="no_logs">No logs yet</string>
+    <string name="cast_load_failed">Cast load failed: %s</string>
+    <string name="server_not_ready">Media server not ready</string>
 </resources>
