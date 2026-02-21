@@ -426,7 +426,16 @@ class VideoDetailActivity : AppCompatActivity() {
         activityScope.launch {
             withContext(Dispatchers.IO) {
                 val outputDir = File(cacheDir, "transcode")
-                outputDir.mkdirs()
+                if (!outputDir.exists() && !outputDir.mkdirs()) {
+                    runOnUiThread {
+                        Toast.makeText(
+                            this@VideoDetailActivity,
+                            getString(R.string.transcode_failed, "Cannot create output directory"),
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                    return@withContext
+                }
 
                 transcoder.transcode(video.path, outputDir, probeResult,
                     object : VideoTranscoder.ProgressListener {

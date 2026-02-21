@@ -101,10 +101,14 @@ class VideoTranscoder {
             } finally {
                 try {
                     muxer.stop()
-                } catch (_: Exception) {}
+                } catch (e: IllegalStateException) {
+                    AppLogger.warn(TAG, "Muxer stop failed: ${e.message}")
+                }
                 try {
                     muxer.release()
-                } catch (_: Exception) {}
+                } catch (e: Exception) {
+                    AppLogger.warn(TAG, "Muxer release failed: ${e.message}")
+                }
             }
 
             if (isCancelled) {
@@ -136,8 +140,12 @@ class VideoTranscoder {
         val inputFormat = extractor.getTrackFormat(trackInfo.trackIndex)
 
         // Determine output dimensions (cap at 1080p)
-        val inWidth = trackInfo.width.coerceAtLeast(1)
-        val inHeight = trackInfo.height.coerceAtLeast(1)
+        if (trackInfo.width <= 0 || trackInfo.height <= 0) {
+            AppLogger.error(TAG, "Invalid video dimensions: ${trackInfo.width}x${trackInfo.height}")
+            throw IllegalArgumentException("Invalid video dimensions: ${trackInfo.width}x${trackInfo.height}")
+        }
+        val inWidth = trackInfo.width
+        val inHeight = trackInfo.height
         val scaleFactor = minOf(
             MAX_WIDTH.toFloat() / inWidth,
             MAX_HEIGHT.toFloat() / inHeight,
@@ -192,6 +200,7 @@ class VideoTranscoder {
         val bufferInfo = MediaCodec.BufferInfo()
         var inputDone = false
         var decoderDone = false
+        var encoderEosSent = false
         var lastReportedProgress = -1
 
         try {
@@ -284,11 +293,12 @@ class VideoTranscoder {
                     }
                 }
 
-                if (decoderDone && encoderStatus == MediaCodec.INFO_TRY_AGAIN_LATER) {
+                if (decoderDone && !encoderEosSent && encoderStatus == MediaCodec.INFO_TRY_AGAIN_LATER) {
                     // Signal encoder EOS if not already done
                     val encInputIndex = encoder.dequeueInputBuffer(TIMEOUT_US)
                     if (encInputIndex >= 0) {
                         encoder.queueInputBuffer(encInputIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                        encoderEosSent = true
                     }
                 }
             }
@@ -336,6 +346,7 @@ class VideoTranscoder {
         val bufferInfo = MediaCodec.BufferInfo()
         var inputDone = false
         var decoderDone = false
+        var audioEncoderEosSent = false
 
         try {
             while (!isCancelled) {
@@ -413,10 +424,11 @@ class VideoTranscoder {
                     }
                 }
 
-                if (decoderDone && encoderStatus == MediaCodec.INFO_TRY_AGAIN_LATER) {
+                if (decoderDone && !audioEncoderEosSent && encoderStatus == MediaCodec.INFO_TRY_AGAIN_LATER) {
                     val encInputIndex = encoder.dequeueInputBuffer(TIMEOUT_US)
                     if (encInputIndex >= 0) {
                         encoder.queueInputBuffer(encInputIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                        audioEncoderEosSent = true
                     }
                 }
             }
