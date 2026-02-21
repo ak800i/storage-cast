@@ -42,7 +42,7 @@ jobs:
     name: Build Signed Release APK
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
@@ -70,8 +70,19 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: ./gradlew assembleRelease
 
-      - name: Upload signed APK
-        uses: actions/upload-artifact@v4
+      - name: Get version name
+        id: version
+        run: |
+          VERSION=$(grep 'versionName' app/build.gradle.kts | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Rename APK
+        run: mv app/build/outputs/apk/release/app-release.apk app/build/outputs/apk/release/StorageCast-${{ steps.version.outputs.tag }}.apk
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: app-release-signed
-          path: app/build/outputs/apk/release/app-release.apk
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: StorageCast ${{ steps.version.outputs.tag }}
+          generate_release_notes: true
+          files: app/build/outputs/apk/release/StorageCast-${{ steps.version.outputs.tag }}.apk
