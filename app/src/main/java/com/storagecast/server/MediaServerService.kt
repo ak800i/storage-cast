@@ -7,7 +7,6 @@ import android.net.Uri
 import android.os.Binder
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
-import android.util.Log
 import com.storagecast.log.AppLogger
 import fi.iki.elonen.NanoHTTPD
 import java.io.File
@@ -179,17 +178,21 @@ class MediaServerService : Service() {
             fileMap[id] = FileEntry(file, mimeType, uri)
         }
 
+        private fun addCorsHeaders(response: Response) {
+            response.addHeader("Access-Control-Allow-Origin", "*")
+            response.addHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+            response.addHeader("Access-Control-Allow-Headers", "Content-Type, Range")
+            response.addHeader("Access-Control-Expose-Headers", "Content-Range, Content-Length, Accept-Ranges")
+        }
+
         override fun serve(session: IHTTPSession): Response {
             val uri = session.uri
-            Log.d("MediaServer", "Request: $uri")
-            AppLogger.info("MediaServer", "HTTP ${session.method} $uri (headers: ${session.headers.filterKeys { it in listOf("range", "accept", "user-agent") }})")
+            AppLogger.info("MediaServer", "HTTP ${session.method} $uri (headers: ${session.headers.filterKeys { it in listOf("range", "accept", "user-agent", "connection") }})")
 
             // Handle CORS preflight requests
             if (session.method == Method.OPTIONS) {
                 val response = newFixedLengthResponse(Response.Status.OK, MIME_PLAINTEXT, "")
-                response.addHeader("Access-Control-Allow-Origin", "*")
-                response.addHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
-                response.addHeader("Access-Control-Allow-Headers", "Content-Type, Range")
+                addCorsHeaders(response)
                 response.addHeader("Access-Control-Max-Age", "86400")
                 return response
             }
@@ -255,7 +258,8 @@ class MediaServerService : Service() {
                     Response.Status.OK, entry.mimeType, fis, entry.file.length()
                 )
                 response.addHeader("Accept-Ranges", "bytes")
-                response.addHeader("Access-Control-Allow-Origin", "*")
+                addCorsHeaders(response)
+                AppLogger.info("MediaServer", "Response: 200 OK, Content-Type=${entry.mimeType}, Content-Length=${entry.file.length()}")
                 response
             } catch (e: Exception) {
                 AppLogger.error("MediaServer", "Error serving file ${entry.file.name}: ${e.message}")
@@ -288,12 +292,14 @@ class MediaServerService : Service() {
                     }
                 }
 
+                val contentRange = "bytes $start-$end/$fileLength"
                 val response = newFixedLengthResponse(
                     Response.Status.PARTIAL_CONTENT, entry.mimeType, fis, contentLength
                 )
-                response.addHeader("Content-Range", "bytes $start-$end/$fileLength")
+                response.addHeader("Content-Range", contentRange)
                 response.addHeader("Accept-Ranges", "bytes")
-                response.addHeader("Access-Control-Allow-Origin", "*")
+                addCorsHeaders(response)
+                AppLogger.info("MediaServer", "Response: 206 Partial Content, Content-Type=${entry.mimeType}, Content-Range=$contentRange, Content-Length=$contentLength")
                 response
             } catch (e: Exception) {
                 AppLogger.error("MediaServer", "Error serving partial content ${entry.file.name}: ${e.message}")
