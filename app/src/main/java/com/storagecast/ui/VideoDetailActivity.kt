@@ -593,7 +593,11 @@ class VideoDetailActivity : AppCompatActivity() {
             .setStreamType(MediaInfo.STREAM_TYPE_BUFFERED)
             .setContentType("video/mp4")
             .setMetadata(metadata)
-            .setMediaTracks(mediaTracks)
+            .apply {
+                if (mediaTracks.isNotEmpty()) {
+                    setMediaTracks(mediaTracks)
+                }
+            }
             .build()
 
         val loadRequest = MediaLoadRequestData.Builder()
@@ -682,7 +686,11 @@ class VideoDetailActivity : AppCompatActivity() {
             .setStreamType(MediaInfo.STREAM_TYPE_BUFFERED)
             .setContentType(video.mimeType)
             .setMetadata(metadata)
-            .setMediaTracks(mediaTracks)
+            .apply {
+                if (mediaTracks.isNotEmpty()) {
+                    setMediaTracks(mediaTracks)
+                }
+            }
             .build()
 
         val startPositionMs = pendingSeekPositionMs
