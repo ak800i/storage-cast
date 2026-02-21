@@ -32,6 +32,10 @@ import com.google.android.gms.cast.framework.media.RemoteMediaClient
 import com.storagecast.R
 import com.storagecast.databinding.ActivityVideoDetailBinding
 import com.storagecast.log.AppLogger
+import com.storagecast.media.CastCompatibility
+import com.storagecast.media.MediaProbeResult
+import com.storagecast.media.MediaProber
+import com.storagecast.media.VideoTranscoder
 import com.storagecast.model.SubtitleTrack
 import com.storagecast.model.VideoItem
 import com.storagecast.server.MediaServerService
@@ -64,6 +68,11 @@ class VideoDetailActivity : AppCompatActivity() {
     private val subtitleExtractor = SubtitleExtractor()
     private var selectedSubtitleFile: File? = null
     private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
+    private val mediaProber = MediaProber()
+    private val castCompatibility = CastCompatibility()
+    private var videoTranscoder: VideoTranscoder? = null
+    private var transcodedFile: File? = null
 
     private val progressHandler = Handler(Looper.getMainLooper())
     private var isSeekBarDragging = false
@@ -288,7 +297,7 @@ class VideoDetailActivity : AppCompatActivity() {
                 Toast.makeText(this, R.string.server_not_ready, Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
-            castVideo(video, selectedSubtitleFile)
+            checkCompatibilityAndCast(video)
         }
     }
 
@@ -346,6 +355,193 @@ class VideoDetailActivity : AppCompatActivity() {
                 AppLogger.error(TAG, "Failed to extract subtitle for track ${track.index}")
             }
         }
+    }
+
+    private fun checkCompatibilityAndCast(video: VideoItem) {
+        binding.progressBar.visibility = View.VISIBLE
+        activityScope.launch {
+            val probeResult = withContext(Dispatchers.IO) {
+                mediaProber.probe(video.path)
+            }
+            binding.progressBar.visibility = View.GONE
+
+            if (probeResult == null) {
+                AppLogger.warn(TAG, "Media probe failed, casting directly")
+                Toast.makeText(this@VideoDetailActivity, R.string.probe_failed, Toast.LENGTH_SHORT).show()
+                castVideo(video, selectedSubtitleFile)
+                return@launch
+            }
+
+            val result = castCompatibility.checkCompatibility(probeResult)
+            if (result.isFullyCompatible) {
+                AppLogger.info(TAG, "All codecs compatible, casting directly")
+                castVideo(video, selectedSubtitleFile)
+            } else {
+                showCodecCompatibilityDialog(video, probeResult, result)
+            }
+        }
+    }
+
+    private fun showCodecCompatibilityDialog(
+        video: VideoItem,
+        probeResult: MediaProbeResult,
+        compatResult: CastCompatibility.CompatibilityResult
+    ) {
+        AppLogger.warn(TAG, "Codec compatibility issue: ${compatResult.summary}")
+
+        val dialogView = layoutInflater.inflate(R.layout.dialog_codec_info, null)
+        val infoText = dialogView.findViewById<android.widget.TextView>(R.id.codecInfoText)
+        infoText.text = compatResult.detailedInfo
+        infoText.typeface = android.graphics.Typeface.MONOSPACE
+        infoText.setTextIsSelectable(true)
+
+        AlertDialog.Builder(this)
+            .setTitle(R.string.codec_incompatible_title)
+            .setView(dialogView)
+            .setPositiveButton(R.string.direct_stream) { _, _ ->
+                AppLogger.info(TAG, "User chose direct stream despite incompatible codecs")
+                castVideo(video, selectedSubtitleFile)
+            }
+            .setNegativeButton(R.string.transcode) { _, _ ->
+                AppLogger.info(TAG, "User chose to transcode")
+                startTranscoding(video, probeResult)
+            }
+            .setNeutralButton(R.string.cancel, null)
+            .show()
+    }
+
+    private fun startTranscoding(video: VideoItem, probeResult: MediaProbeResult) {
+        val transcoder = VideoTranscoder()
+        videoTranscoder = transcoder
+
+        val progressDialog = AlertDialog.Builder(this)
+            .setTitle(R.string.transcoding_title)
+            .setMessage(getString(R.string.transcoding_progress, 0))
+            .setNegativeButton(R.string.cancel) { _, _ ->
+                transcoder.cancel()
+            }
+            .setCancelable(false)
+            .show()
+
+        activityScope.launch {
+            withContext(Dispatchers.IO) {
+                val outputDir = File(cacheDir, "transcode")
+                outputDir.mkdirs()
+
+                transcoder.transcode(video.path, outputDir, probeResult,
+                    object : VideoTranscoder.ProgressListener {
+                        override fun onProgress(percent: Int) {
+                            runOnUiThread {
+                                progressDialog.setMessage(getString(R.string.transcoding_progress, percent))
+                            }
+                        }
+
+                        override fun onCompleted(outputFile: File) {
+                            runOnUiThread {
+                                progressDialog.dismiss()
+                                transcodedFile = outputFile
+                                AppLogger.info(TAG, "Transcode complete: ${outputFile.name}, ${outputFile.length()} bytes")
+                                castTranscodedVideo(video, outputFile)
+                            }
+                        }
+
+                        override fun onError(error: String) {
+                            runOnUiThread {
+                                progressDialog.dismiss()
+                                AppLogger.error(TAG, "Transcode error: $error")
+                                Toast.makeText(
+                                    this@VideoDetailActivity,
+                                    getString(R.string.transcode_failed, error),
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        }
+                    })
+            }
+        }
+    }
+
+    private fun castTranscodedVideo(originalVideo: VideoItem, transcodedFile: File) {
+        val service = mediaServerService
+        if (service == null) {
+            AppLogger.error(TAG, "castTranscodedVideo: media server service is null")
+            Toast.makeText(this, R.string.server_not_ready, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val session = castSession
+        if (session == null) {
+            AppLogger.error(TAG, "castTranscodedVideo: cast session is null")
+            Toast.makeText(this, R.string.not_connected, Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val serverIp = getDeviceIpAddress()
+        val serverPort = service.getServerPort()
+
+        val videoPath = service.registerFile(transcodedFile.absolutePath, "video/mp4", null)
+        val videoUrl = "http://$serverIp:$serverPort$videoPath"
+
+        AppLogger.info(TAG, "castTranscodedVideo: url=$videoUrl, size=${transcodedFile.length()}")
+
+        val metadata = MediaMetadata(MediaMetadata.MEDIA_TYPE_MOVIE).apply {
+            putString(MediaMetadata.KEY_TITLE, "${originalVideo.title} (transcoded)")
+        }
+
+        val mediaTracks = mutableListOf<MediaTrack>()
+
+        if (selectedSubtitleFile != null) {
+            val subtitlePath = service.registerSubtitle(selectedSubtitleFile!!)
+            val subtitleUrl = "http://$serverIp:$serverPort$subtitlePath"
+            val subtitleTrack = MediaTrack.Builder(1, MediaTrack.TYPE_TEXT)
+                .setName("Subtitles")
+                .setSubtype(MediaTrack.SUBTYPE_SUBTITLES)
+                .setContentId(subtitleUrl)
+                .setContentType("text/vtt")
+                .setLanguage("en")
+                .build()
+            mediaTracks.add(subtitleTrack)
+        }
+
+        val mediaInfo = MediaInfo.Builder(videoUrl)
+            .setStreamType(MediaInfo.STREAM_TYPE_BUFFERED)
+            .setContentType("video/mp4")
+            .setMetadata(metadata)
+            .setMediaTracks(mediaTracks)
+            .build()
+
+        val loadRequest = MediaLoadRequestData.Builder()
+            .setMediaInfo(mediaInfo)
+            .setAutoplay(true)
+            .setCurrentTime(pendingSeekPositionMs)
+            .apply {
+                if (mediaTracks.isNotEmpty()) {
+                    setActiveTrackIds(longArrayOf(1))
+                }
+            }
+            .build()
+
+        AppLogger.info(TAG, "castTranscodedVideo: sending load request")
+        val remoteMediaClient = session.remoteMediaClient
+        if (remoteMediaClient == null) {
+            AppLogger.error(TAG, "castTranscodedVideo: remoteMediaClient is null!")
+            Toast.makeText(this, R.string.error_cast, Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val pendingResult = remoteMediaClient.load(loadRequest)
+        pendingResult.setResultCallback { result ->
+            val status = result.status
+            if (status.isSuccess) {
+                AppLogger.info(TAG, "castTranscodedVideo: load SUCCESS")
+            } else {
+                AppLogger.error(TAG, "castTranscodedVideo: load FAILED - ${status.statusMessage}")
+                runOnUiThread {
+                    Toast.makeText(this, getString(R.string.cast_load_failed, status.statusMessage ?: "Unknown error"), Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+        updateCastStatus("${originalVideo.title} (transcoded)")
+        Toast.makeText(this, R.string.loading_video, Toast.LENGTH_SHORT).show()
     }
 
     private fun castVideo(video: VideoItem, subtitleFile: File?) {
@@ -609,7 +805,9 @@ class VideoDetailActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         stopProgressUpdates()
+        videoTranscoder?.cancel()
         activityScope.cancel()
+        transcodedFile?.delete()
         if (serviceBound) {
             unbindService(serviceConnection)
             serviceBound = false
