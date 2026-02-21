@@ -505,7 +505,11 @@ class VideoDetailActivity : AppCompatActivity() {
                 val position = seekBar?.progress?.toLong() ?: return
                 val client = castSession?.remoteMediaClient ?: return
                 AppLogger.info(TAG, "Seeking to ${formatDuration(position)}")
-                client.seek(position)
+                client.seek(position).setResultCallback { result ->
+                    if (!result.status.isSuccess) {
+                        AppLogger.error(TAG, "Seek failed: ${result.status.statusMessage}")
+                    }
+                }
             }
         })
     }

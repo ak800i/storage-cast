@@ -3,13 +3,13 @@ package com.storagecast.ui
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.graphics.Color
 import android.os.Bundle
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.style.ForegroundColorSpan
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import com.storagecast.R
 import com.storagecast.databinding.ActivityLogBinding
 import com.storagecast.log.AppLogger
@@ -60,9 +60,9 @@ class LogActivity : AppCompatActivity() {
                 spannable.append(entry.format())
                 val end = spannable.length
                 val color = when (entry.level) {
-                    AppLogger.LogLevel.WARNING -> Color.parseColor("#FF9800")
-                    AppLogger.LogLevel.ERROR -> Color.parseColor("#F44336")
-                    AppLogger.LogLevel.INFO -> Color.parseColor("#9E9E9E")
+                    AppLogger.LogLevel.WARNING -> ContextCompat.getColor(this, R.color.log_warning)
+                    AppLogger.LogLevel.ERROR -> ContextCompat.getColor(this, R.color.log_error)
+                    AppLogger.LogLevel.INFO -> ContextCompat.getColor(this, R.color.log_info)
                 }
                 spannable.setSpan(
                     ForegroundColorSpan(color),
