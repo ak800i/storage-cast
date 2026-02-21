@@ -47,4 +47,9 @@
     <string name="transcoding_title">Transcoding…</string>
     <string name="transcoding_progress">Transcoding: %d%%</string>
     <string name="transcode_failed">Transcoding failed: %s</string>
+    <string name="select_audio_track">Select Audio Track</string>
+    <string name="audio_track_title">Audio track</string>
+    <string name="audio_track_default">Default (first track)</string>
+    <string name="audio_track_selected">Audio: %s</string>
+    <string name="audio_no_tracks">No audio tracks found</string>
 </resources>

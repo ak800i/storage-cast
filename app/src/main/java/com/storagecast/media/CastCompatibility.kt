@@ -146,6 +146,9 @@ class CastCompatibility {
                 val status = if (supported) "✓" else "✗ UNSUPPORTED"
                 appendLine("  [$status] ${at.codec}")
                 appendLine("    MIME: ${at.mime}")
+                if (at.language != "und") {
+                    appendLine("    Language: ${at.language}")
+                }
                 if (at.sampleRate > 0) {
                     appendLine("    Sample rate: ${at.sampleRate} Hz")
                 }

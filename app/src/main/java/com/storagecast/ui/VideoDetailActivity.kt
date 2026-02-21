@@ -35,6 +35,7 @@ import com.google.android.gms.cast.framework.media.RemoteMediaClient
 import com.storagecast.R
 import com.storagecast.databinding.ActivityVideoDetailBinding
 import com.storagecast.log.AppLogger
+import com.storagecast.media.AudioTrackInfo
 import com.storagecast.media.CastCompatibility
 import com.storagecast.media.MediaProbeResult
 import com.storagecast.media.MediaProber
@@ -73,6 +74,8 @@ class VideoDetailActivity : AppCompatActivity() {
     private val subtitleConverter = SubtitleConverter()
     private var selectedSubtitleFile: File? = null
     private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private var selectedAudioTrack: AudioTrackInfo? = null
+    private var cachedProbeResult: MediaProbeResult? = null
 
     private val subtitleFilePicker = registerForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -296,6 +299,11 @@ class VideoDetailActivity : AppCompatActivity() {
             loadSubtitleTracks(video)
         }
 
+        binding.audioTrackButton.setOnClickListener {
+            val video = videoItem ?: return@setOnClickListener
+            loadAudioTracks(video)
+        }
+
         binding.castAndPlayButton.setOnClickListener {
             val video = videoItem ?: return@setOnClickListener
             val session = castSession
@@ -435,10 +443,78 @@ class VideoDetailActivity : AppCompatActivity() {
         }
     }
 
+    private fun loadAudioTracks(video: VideoItem) {
+        binding.progressBar.visibility = View.VISIBLE
+        activityScope.launch {
+            val probeResult = cachedProbeResult ?: withContext(Dispatchers.IO) {
+                mediaProber.probe(video.path)
+            }
+            binding.progressBar.visibility = View.GONE
+
+            if (probeResult == null) {
+                Toast.makeText(this@VideoDetailActivity, R.string.probe_failed, Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+            cachedProbeResult = probeResult
+
+            val audioTracks = probeResult.audioTracks
+            if (audioTracks.isEmpty()) {
+                Toast.makeText(this@VideoDetailActivity, R.string.audio_no_tracks, Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+            showAudioTrackDialog(audioTracks)
+        }
+    }
+
+    private fun showAudioTrackDialog(tracks: List<AudioTrackInfo>) {
+        val options = mutableListOf<String>()
+        options.add(getString(R.string.audio_track_default))
+        tracks.forEachIndexed { index, track ->
+            options.add(formatAudioTrackLabel(index + 1, track))
+        }
+
+        val currentSelection = if (selectedAudioTrack == null) 0
+            else tracks.indexOfFirst { it.trackIndex == selectedAudioTrack!!.trackIndex } + 1
+
+        AlertDialog.Builder(this)
+            .setTitle(R.string.audio_track_title)
+            .setSingleChoiceItems(options.toTypedArray(), currentSelection) { dialog, which ->
+                if (which == 0) {
+                    selectedAudioTrack = null
+                    binding.audioTrackStatus.visibility = View.GONE
+                    AppLogger.info(TAG, "Audio track reset to default")
+                } else {
+                    val track = tracks[which - 1]
+                    selectedAudioTrack = track
+                    binding.audioTrackStatus.text = getString(R.string.audio_track_selected,
+                        formatAudioTrackLabel(which, track))
+                    binding.audioTrackStatus.visibility = View.VISIBLE
+                    AppLogger.info(TAG, "Audio track selected: ${track.codec} ${track.language} (index=${track.trackIndex})")
+                }
+                dialog.dismiss()
+            }
+            .show()
+    }
+
+    private fun formatAudioTrackLabel(number: Int, track: AudioTrackInfo): String {
+        val lang = if (track.language != "und") track.language else ""
+        val channels = when (track.channelCount) {
+            1 -> "Mono"
+            2 -> "Stereo"
+            6 -> "5.1"
+            8 -> "7.1"
+            else -> if (track.channelCount > 0) "${track.channelCount}ch" else ""
+        }
+        val parts = mutableListOf("Track $number: ${track.codec}")
+        if (lang.isNotEmpty()) parts.add(lang)
+        if (channels.isNotEmpty()) parts.add(channels)
+        return parts.joinToString(" · ")
+    }
+
     private fun checkCompatibilityAndCast(video: VideoItem) {
         binding.progressBar.visibility = View.VISIBLE
         activityScope.launch {
-            val probeResult = withContext(Dispatchers.IO) {
+            val probeResult = cachedProbeResult ?: withContext(Dispatchers.IO) {
                 mediaProber.probe(video.path)
             }
             binding.progressBar.visibility = View.GONE
@@ -449,6 +525,7 @@ class VideoDetailActivity : AppCompatActivity() {
                 castVideo(video, selectedSubtitleFile)
                 return@launch
             }
+            cachedProbeResult = probeResult
 
             val result = castCompatibility.checkCompatibility(probeResult)
             if (result.isFullyCompatible) {
@@ -543,7 +620,9 @@ class VideoDetailActivity : AppCompatActivity() {
                                 ).show()
                             }
                         }
-                    })
+                    },
+                    selectedAudioTrack = selectedAudioTrack
+                )
             }
         }
     }
