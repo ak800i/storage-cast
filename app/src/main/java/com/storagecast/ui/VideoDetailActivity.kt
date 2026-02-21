@@ -136,6 +136,10 @@ class VideoDetailActivity : AppCompatActivity() {
         }
         override fun onSessionEnding(session: CastSession) {
             AppLogger.info(TAG, "Cast session ending")
+            val client = session.remoteMediaClient
+            if (client?.hasMediaSession() == true) {
+                pendingSeekPositionMs = client.approximateStreamPosition
+            }
         }
         override fun onSessionEnded(session: CastSession, error: Int) {
             AppLogger.info(TAG, "Cast session ended: error=$error")
