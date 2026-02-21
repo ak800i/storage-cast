@@ -60,7 +60,7 @@ class SubtitleExtractor {
         try {
             extractor.setDataSource(videoPath)
             val format = extractor.getTrackFormat(trackIndex)
-            val mime = format.getString(MediaFormat.KEY_MIME) ?: return null
+            format.getString(MediaFormat.KEY_MIME) ?: return null
 
             extractor.selectTrack(trackIndex)
 
