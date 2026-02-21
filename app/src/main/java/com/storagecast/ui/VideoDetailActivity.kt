@@ -65,10 +65,10 @@ class VideoDetailActivity : AppCompatActivity() {
     private val remoteMediaClientCallback = object : RemoteMediaClient.Callback() {
         override fun onStatusUpdated() {
             val client = castSession?.remoteMediaClient
-            val status = client?.mediaStatus
-            val playerState = status?.playerState
-            AppLogger.log(TAG, "RemoteMediaClient status updated: playerState=$playerState, idleReason=${status?.idleReason}")
-            if (playerState == com.google.android.gms.cast.MediaStatus.PLAYER_STATE_IDLE && status != null) {
+            val status = client?.mediaStatus ?: return
+            val playerState = status.playerState
+            AppLogger.log(TAG, "RemoteMediaClient status updated: playerState=$playerState, idleReason=${status.idleReason}")
+            if (playerState == com.google.android.gms.cast.MediaStatus.PLAYER_STATE_IDLE) {
                 when (status.idleReason) {
                     com.google.android.gms.cast.MediaStatus.IDLE_REASON_ERROR ->
                         AppLogger.log(TAG, "Cast playback error (IDLE_REASON_ERROR)")
@@ -338,7 +338,7 @@ class VideoDetailActivity : AppCompatActivity() {
 
         AppLogger.log(TAG, "castVideo: serverIp=$serverIp, serverPort=$serverPort, serverRunning=${service.isServerRunning()}")
 
-        val videoPath = service.registerFile(video.path, video.mimeType)
+        val videoPath = service.registerFile(video.path, video.mimeType, video.uri)
         val videoUrl = "http://$serverIp:$serverPort$videoPath"
 
         AppLogger.log(TAG, "castVideo: videoUrl=$videoUrl, mimeType=${video.mimeType}")
@@ -391,7 +391,18 @@ class VideoDetailActivity : AppCompatActivity() {
             return
         }
 
-        remoteMediaClient.load(loadRequest)
+        val pendingResult = remoteMediaClient.load(loadRequest)
+        pendingResult.setResultCallback { result ->
+            val status = result.status
+            if (status.isSuccess) {
+                AppLogger.log(TAG, "castVideo: load SUCCESS")
+            } else {
+                AppLogger.log(TAG, "castVideo: load FAILED - statusCode=${status.statusCode}, statusMessage=${status.statusMessage}")
+                runOnUiThread {
+                    Toast.makeText(this, getString(R.string.cast_load_failed, status.statusMessage ?: "Unknown error"), Toast.LENGTH_LONG).show()
+                }
+            }
+        }
         updateCastStatus(video.title)
 
         Toast.makeText(this, R.string.loading_video, Toast.LENGTH_SHORT).show()
