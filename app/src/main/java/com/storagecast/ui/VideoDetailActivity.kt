@@ -105,12 +105,34 @@ class VideoDetailActivity : AppCompatActivity() {
             val client = castSession?.remoteMediaClient
             val status = client?.mediaStatus ?: return
             val playerState = status.playerState
-            AppLogger.info(TAG, "RemoteMediaClient status updated: playerState=$playerState, idleReason=${status.idleReason}")
+            val playerStateName = when (playerState) {
+                com.google.android.gms.cast.MediaStatus.PLAYER_STATE_IDLE -> "IDLE"
+                com.google.android.gms.cast.MediaStatus.PLAYER_STATE_PLAYING -> "PLAYING"
+                com.google.android.gms.cast.MediaStatus.PLAYER_STATE_PAUSED -> "PAUSED"
+                com.google.android.gms.cast.MediaStatus.PLAYER_STATE_BUFFERING -> "BUFFERING"
+                com.google.android.gms.cast.MediaStatus.PLAYER_STATE_LOADING -> "LOADING"
+                else -> "UNKNOWN($playerState)"
+            }
+            val idleReasonName = when (status.idleReason) {
+                com.google.android.gms.cast.MediaStatus.IDLE_REASON_NONE -> "NONE"
+                com.google.android.gms.cast.MediaStatus.IDLE_REASON_FINISHED -> "FINISHED"
+                com.google.android.gms.cast.MediaStatus.IDLE_REASON_CANCELED -> "CANCELED"
+                com.google.android.gms.cast.MediaStatus.IDLE_REASON_INTERRUPTED -> "INTERRUPTED"
+                com.google.android.gms.cast.MediaStatus.IDLE_REASON_ERROR -> "ERROR"
+                else -> "UNKNOWN(${status.idleReason})"
+            }
+            AppLogger.info(TAG, "RemoteMediaClient status: playerState=$playerStateName, idleReason=$idleReasonName")
             updateProgressTracking(playerState)
             if (playerState == com.google.android.gms.cast.MediaStatus.PLAYER_STATE_IDLE) {
                 when (status.idleReason) {
-                    com.google.android.gms.cast.MediaStatus.IDLE_REASON_ERROR ->
-                        AppLogger.error(TAG, "Cast playback error (IDLE_REASON_ERROR)")
+                    com.google.android.gms.cast.MediaStatus.IDLE_REASON_ERROR -> {
+                        val mediaInfo = status.mediaInfo
+                        val contentId = mediaInfo?.contentId ?: "unknown"
+                        val contentType = mediaInfo?.contentType ?: "unknown"
+                        val streamType = mediaInfo?.streamType ?: -1
+                        val customData = status.customData
+                        AppLogger.error(TAG, "Cast playback error: contentId=$contentId, contentType=$contentType, streamType=$streamType, customData=$customData")
+                    }
                     com.google.android.gms.cast.MediaStatus.IDLE_REASON_CANCELED ->
                         AppLogger.warn(TAG, "Cast playback canceled")
                     com.google.android.gms.cast.MediaStatus.IDLE_REASON_INTERRUPTED ->
@@ -786,7 +808,8 @@ class VideoDetailActivity : AppCompatActivity() {
             }
             .build()
 
-        AppLogger.info(TAG, "castVideo: sending load request to cast device (startPosition=${formatDuration(startPositionMs)})")
+        AppLogger.info(TAG, "castVideo: sending load request to cast device (startPosition=${formatDuration(startPositionMs)}, streamType=BUFFERED, contentType=${video.mimeType})")
+        AppLogger.info(TAG, "castVideo: mediaInfo contentId=$videoUrl")
         val remoteMediaClient = session.remoteMediaClient
         if (remoteMediaClient == null) {
             AppLogger.error(TAG, "castVideo: remoteMediaClient is null!")
