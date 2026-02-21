@@ -6,4 +6,7 @@
     <color name="teal_700">#FF018786</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+    <color name="log_info">#FF9E9E9E</color>
+    <color name="log_warning">#FFFF9800</color>
+    <color name="log_error">#FFF44336</color>
 </resources>

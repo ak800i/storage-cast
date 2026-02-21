@@ -112,6 +112,50 @@
                 android:text="@string/cast_video"
                 style="@style/Widget.MaterialComponents.Button.OutlinedButton" />
 
+            <LinearLayout
+                android:id="@+id/seekBarContainer"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:orientation="vertical"
+                android:visibility="gone"
+                tools:visibility="visible">
+
+                <SeekBar
+                    android:id="@+id/videoSeekBar"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:paddingStart="4dp"
+                    android:paddingEnd="4dp">
+
+                    <TextView
+                        android:id="@+id/currentTimeText"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="0:00"
+                        android:textSize="12sp"
+                        android:textColor="?android:attr/textColorSecondary" />
+
+                    <View
+                        android:layout_width="0dp"
+                        android:layout_height="0dp"
+                        android:layout_weight="1" />
+
+                    <TextView
+                        android:id="@+id/totalTimeText"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="0:00"
+                        android:textSize="12sp"
+                        android:textColor="?android:attr/textColorSecondary" />
+                </LinearLayout>
+            </LinearLayout>
+
             <TextView
                 android:id="@+id/subtitleStatus"
                 android:layout_width="match_parent"

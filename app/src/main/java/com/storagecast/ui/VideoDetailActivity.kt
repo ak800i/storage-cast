@@ -8,12 +8,15 @@ import android.graphics.Bitmap
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.provider.MediaStore
 import android.util.Size
 import android.view.Menu
 import android.view.MenuItem
 import android.view.View
+import android.widget.SeekBar
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
@@ -62,28 +65,39 @@ class VideoDetailActivity : AppCompatActivity() {
     private var selectedSubtitleFile: File? = null
     private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
+    private val progressHandler = Handler(Looper.getMainLooper())
+    private var isSeekBarDragging = false
+    private var pendingSeekPositionMs = 0L
+    private val progressUpdateRunnable = object : Runnable {
+        override fun run() {
+            updateSeekBarProgress()
+            progressHandler.postDelayed(this, 1000)
+        }
+    }
+
     private val remoteMediaClientCallback = object : RemoteMediaClient.Callback() {
         override fun onStatusUpdated() {
             val client = castSession?.remoteMediaClient
             val status = client?.mediaStatus ?: return
             val playerState = status.playerState
-            AppLogger.log(TAG, "RemoteMediaClient status updated: playerState=$playerState, idleReason=${status.idleReason}")
+            AppLogger.info(TAG, "RemoteMediaClient status updated: playerState=$playerState, idleReason=${status.idleReason}")
+            updateProgressTracking(playerState)
             if (playerState == com.google.android.gms.cast.MediaStatus.PLAYER_STATE_IDLE) {
                 when (status.idleReason) {
                     com.google.android.gms.cast.MediaStatus.IDLE_REASON_ERROR ->
-                        AppLogger.log(TAG, "Cast playback error (IDLE_REASON_ERROR)")
+                        AppLogger.error(TAG, "Cast playback error (IDLE_REASON_ERROR)")
                     com.google.android.gms.cast.MediaStatus.IDLE_REASON_CANCELED ->
-                        AppLogger.log(TAG, "Cast playback canceled")
+                        AppLogger.warn(TAG, "Cast playback canceled")
                     com.google.android.gms.cast.MediaStatus.IDLE_REASON_INTERRUPTED ->
-                        AppLogger.log(TAG, "Cast playback interrupted")
+                        AppLogger.warn(TAG, "Cast playback interrupted")
                     com.google.android.gms.cast.MediaStatus.IDLE_REASON_FINISHED ->
-                        AppLogger.log(TAG, "Cast playback finished")
+                        AppLogger.info(TAG, "Cast playback finished")
                 }
             }
         }
 
         override fun onMetadataUpdated() {
-            AppLogger.log(TAG, "RemoteMediaClient metadata updated")
+            AppLogger.info(TAG, "RemoteMediaClient metadata updated")
         }
     }
 
@@ -94,14 +108,14 @@ class VideoDetailActivity : AppCompatActivity() {
             serviceBound = true
             try {
                 mediaServerService?.startServer()
-                AppLogger.log(TAG, "Media server service connected and started")
+                AppLogger.info(TAG, "Media server service connected and started")
             } catch (e: Exception) {
-                AppLogger.log(TAG, "Failed to start media server: ${e.message}")
+                AppLogger.error(TAG, "Failed to start media server: ${e.message}")
             }
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
-            AppLogger.log(TAG, "Media server service disconnected")
+            AppLogger.warn(TAG, "Media server service disconnected")
             mediaServerService = null
             serviceBound = false
         }
@@ -109,40 +123,46 @@ class VideoDetailActivity : AppCompatActivity() {
 
     private val sessionManagerListener = object : SessionManagerListener<CastSession> {
         override fun onSessionStarting(session: CastSession) {
-            AppLogger.log(TAG, "Cast session starting")
+            AppLogger.info(TAG, "Cast session starting")
         }
         override fun onSessionStarted(session: CastSession, sessionId: String) {
-            AppLogger.log(TAG, "Cast session started: $sessionId, device=${session.castDevice?.friendlyName}")
+            AppLogger.info(TAG, "Cast session started: $sessionId, device=${session.castDevice?.friendlyName}")
             castSession = session
             session.remoteMediaClient?.registerCallback(remoteMediaClientCallback)
             updateCastStatus()
         }
         override fun onSessionStartFailed(session: CastSession, error: Int) {
-            AppLogger.log(TAG, "Cast session start failed: error=$error")
+            AppLogger.error(TAG, "Cast session start failed: error=$error")
         }
         override fun onSessionEnding(session: CastSession) {
-            AppLogger.log(TAG, "Cast session ending")
+            AppLogger.info(TAG, "Cast session ending")
+            val client = session.remoteMediaClient
+            if (client?.hasMediaSession() == true) {
+                pendingSeekPositionMs = client.approximateStreamPosition
+            }
         }
         override fun onSessionEnded(session: CastSession, error: Int) {
-            AppLogger.log(TAG, "Cast session ended: error=$error")
+            AppLogger.info(TAG, "Cast session ended: error=$error")
             session.remoteMediaClient?.unregisterCallback(remoteMediaClientCallback)
             castSession = null
             updateCastStatus()
+            stopProgressUpdates()
+            resetSeekBarToLocal()
         }
         override fun onSessionResuming(session: CastSession, sessionId: String) {
-            AppLogger.log(TAG, "Cast session resuming: $sessionId")
+            AppLogger.info(TAG, "Cast session resuming: $sessionId")
         }
         override fun onSessionResumed(session: CastSession, wasSuspended: Boolean) {
-            AppLogger.log(TAG, "Cast session resumed, wasSuspended=$wasSuspended")
+            AppLogger.info(TAG, "Cast session resumed, wasSuspended=$wasSuspended")
             castSession = session
             session.remoteMediaClient?.registerCallback(remoteMediaClientCallback)
             updateCastStatus()
         }
         override fun onSessionResumeFailed(session: CastSession, error: Int) {
-            AppLogger.log(TAG, "Cast session resume failed: error=$error")
+            AppLogger.error(TAG, "Cast session resume failed: error=$error")
         }
         override fun onSessionSuspended(session: CastSession, reason: Int) {
-            AppLogger.log(TAG, "Cast session suspended: reason=$reason")
+            AppLogger.info(TAG, "Cast session suspended: reason=$reason")
         }
     }
 
@@ -161,15 +181,16 @@ class VideoDetailActivity : AppCompatActivity() {
         }
 
         if (videoItem != null) {
-            AppLogger.log(TAG, "Opened video: title=${videoItem!!.title}, path=${videoItem!!.path}, mime=${videoItem!!.mimeType}, size=${videoItem!!.size}")
+            AppLogger.info(TAG, "Opened video: title=${videoItem!!.title}, path=${videoItem!!.path}, mime=${videoItem!!.mimeType}, size=${videoItem!!.size}")
         } else {
-            AppLogger.log(TAG, "ERROR: No video item in intent extras")
+            AppLogger.error(TAG, "No video item in intent extras")
         }
 
         setupCast()
         bindMediaServer()
         displayVideoInfo()
         setupControls()
+        setupSeekBar()
     }
 
     private fun displayVideoInfo() {
@@ -182,6 +203,14 @@ class VideoDetailActivity : AppCompatActivity() {
         val size = formatSize(video.size)
         binding.videoInfo.text = "$duration • $size"
         binding.videoPath.text = video.path
+
+        if (video.duration > 0) {
+            binding.seekBarContainer.visibility = View.VISIBLE
+            binding.videoSeekBar.max = video.duration.toInt()
+            binding.videoSeekBar.progress = 0
+            binding.currentTimeText.text = formatDuration(0)
+            binding.totalTimeText.text = formatDuration(video.duration)
+        }
 
         loadThumbnail(video)
     }
@@ -212,7 +241,7 @@ class VideoDetailActivity : AppCompatActivity() {
                 Toast.makeText(this, R.string.not_connected, Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
-            AppLogger.log(TAG, "Play pressed")
+            AppLogger.info(TAG, "Play pressed")
             session.remoteMediaClient?.play()
             val video = videoItem
             Toast.makeText(this, getString(R.string.video_playing, video?.title ?: ""), Toast.LENGTH_SHORT).show()
@@ -224,7 +253,7 @@ class VideoDetailActivity : AppCompatActivity() {
                 Toast.makeText(this, R.string.not_connected, Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
-            AppLogger.log(TAG, "Pause pressed")
+            AppLogger.info(TAG, "Pause pressed")
             session.remoteMediaClient?.pause()
             Toast.makeText(this, R.string.video_paused, Toast.LENGTH_SHORT).show()
         }
@@ -235,7 +264,7 @@ class VideoDetailActivity : AppCompatActivity() {
                 Toast.makeText(this, R.string.not_connected, Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
-            AppLogger.log(TAG, "Stop pressed")
+            AppLogger.info(TAG, "Stop pressed")
             session.remoteMediaClient?.stop()
             Toast.makeText(this, R.string.video_stopped, Toast.LENGTH_SHORT).show()
         }
@@ -249,13 +278,13 @@ class VideoDetailActivity : AppCompatActivity() {
             val video = videoItem ?: return@setOnClickListener
             val session = castSession
             if (session == null || session.isConnected != true) {
-                AppLogger.log(TAG, "Cast video pressed but no session connected")
+                AppLogger.warn(TAG, "Cast video pressed but no session connected")
                 Toast.makeText(this, R.string.not_connected, Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
             val service = mediaServerService
             if (service == null || !service.isServerRunning()) {
-                AppLogger.log(TAG, "Cast video pressed but media server not ready (service=$service, running=${service?.isServerRunning()})")
+                AppLogger.warn(TAG, "Cast video pressed but media server not ready (service=$service, running=${service?.isServerRunning()})")
                 Toast.makeText(this, R.string.server_not_ready, Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
@@ -311,10 +340,10 @@ class VideoDetailActivity : AppCompatActivity() {
                 selectedSubtitleFile = subtitleFile
                 binding.subtitleStatus.text = getString(R.string.subtitle_selected, track.language)
                 binding.subtitleStatus.visibility = View.VISIBLE
-                AppLogger.log(TAG, "Subtitle extracted: ${subtitleFile.name}")
+                AppLogger.info(TAG, "Subtitle extracted: ${subtitleFile.name}")
             } else {
                 Toast.makeText(this@VideoDetailActivity, R.string.error_subtitle, Toast.LENGTH_SHORT).show()
-                AppLogger.log(TAG, "Failed to extract subtitle for track ${track.index}")
+                AppLogger.error(TAG, "Failed to extract subtitle for track ${track.index}")
             }
         }
     }
@@ -322,13 +351,13 @@ class VideoDetailActivity : AppCompatActivity() {
     private fun castVideo(video: VideoItem, subtitleFile: File?) {
         val service = mediaServerService
         if (service == null) {
-            AppLogger.log(TAG, "castVideo: media server service is null")
+            AppLogger.error(TAG, "castVideo: media server service is null")
             Toast.makeText(this, R.string.server_not_ready, Toast.LENGTH_SHORT).show()
             return
         }
         val session = castSession
         if (session == null) {
-            AppLogger.log(TAG, "castVideo: cast session is null")
+            AppLogger.error(TAG, "castVideo: cast session is null")
             Toast.makeText(this, R.string.not_connected, Toast.LENGTH_SHORT).show()
             return
         }
@@ -336,13 +365,13 @@ class VideoDetailActivity : AppCompatActivity() {
         val serverIp = getDeviceIpAddress()
         val serverPort = service.getServerPort()
 
-        AppLogger.log(TAG, "castVideo: serverIp=$serverIp, serverPort=$serverPort, serverRunning=${service.isServerRunning()}")
+        AppLogger.info(TAG, "castVideo: serverIp=$serverIp, serverPort=$serverPort, serverRunning=${service.isServerRunning()}")
 
         val videoPath = service.registerFile(video.path, video.mimeType, video.uri)
         val videoUrl = "http://$serverIp:$serverPort$videoPath"
 
-        AppLogger.log(TAG, "castVideo: videoUrl=$videoUrl, mimeType=${video.mimeType}")
-        AppLogger.log(TAG, "castVideo: file path=${video.path}, exists=${File(video.path).exists()}")
+        AppLogger.info(TAG, "castVideo: videoUrl=$videoUrl, mimeType=${video.mimeType}")
+        AppLogger.info(TAG, "castVideo: file path=${video.path}, exists=${File(video.path).exists()}")
 
         val metadata = MediaMetadata(MediaMetadata.MEDIA_TYPE_MOVIE).apply {
             putString(MediaMetadata.KEY_TITLE, video.title)
@@ -353,7 +382,7 @@ class VideoDetailActivity : AppCompatActivity() {
         if (subtitleFile != null) {
             val subtitlePath = service.registerSubtitle(subtitleFile)
             val subtitleUrl = "http://$serverIp:$serverPort$subtitlePath"
-            AppLogger.log(TAG, "castVideo: subtitleUrl=$subtitleUrl")
+            AppLogger.info(TAG, "castVideo: subtitleUrl=$subtitleUrl")
 
             val subtitleTrack = MediaTrack.Builder(1, MediaTrack.TYPE_TEXT)
                 .setName("Subtitles")
@@ -373,9 +402,12 @@ class VideoDetailActivity : AppCompatActivity() {
             .setMediaTracks(mediaTracks)
             .build()
 
+        val startPositionMs = pendingSeekPositionMs
+
         val loadRequest = MediaLoadRequestData.Builder()
             .setMediaInfo(mediaInfo)
             .setAutoplay(true)
+            .setCurrentTime(startPositionMs)
             .apply {
                 if (mediaTracks.isNotEmpty()) {
                     setActiveTrackIds(longArrayOf(1))
@@ -383,10 +415,10 @@ class VideoDetailActivity : AppCompatActivity() {
             }
             .build()
 
-        AppLogger.log(TAG, "castVideo: sending load request to cast device")
+        AppLogger.info(TAG, "castVideo: sending load request to cast device (startPosition=${formatDuration(startPositionMs)})")
         val remoteMediaClient = session.remoteMediaClient
         if (remoteMediaClient == null) {
-            AppLogger.log(TAG, "castVideo: remoteMediaClient is null!")
+            AppLogger.error(TAG, "castVideo: remoteMediaClient is null!")
             Toast.makeText(this, R.string.error_cast, Toast.LENGTH_SHORT).show()
             return
         }
@@ -395,9 +427,9 @@ class VideoDetailActivity : AppCompatActivity() {
         pendingResult.setResultCallback { result ->
             val status = result.status
             if (status.isSuccess) {
-                AppLogger.log(TAG, "castVideo: load SUCCESS")
+                AppLogger.info(TAG, "castVideo: load SUCCESS")
             } else {
-                AppLogger.log(TAG, "castVideo: load FAILED - statusCode=${status.statusCode}, statusMessage=${status.statusMessage}")
+                AppLogger.error(TAG, "castVideo: load FAILED - statusCode=${status.statusCode}, statusMessage=${status.statusMessage}")
                 runOnUiThread {
                     Toast.makeText(this, getString(R.string.cast_load_failed, status.statusMessage ?: "Unknown error"), Toast.LENGTH_LONG).show()
                 }
@@ -436,14 +468,14 @@ class VideoDetailActivity : AppCompatActivity() {
     private fun setupCast() {
         try {
             castContext = CastContext.getSharedInstance(this)
-            AppLogger.log(TAG, "Cast context initialized")
+            AppLogger.info(TAG, "Cast context initialized")
         } catch (e: Exception) {
-            AppLogger.log(TAG, "Cast not available: ${e.message}")
+            AppLogger.warn(TAG, "Cast not available: ${e.message}")
         }
     }
 
     private fun bindMediaServer() {
-        AppLogger.log(TAG, "Binding media server service")
+        AppLogger.info(TAG, "Binding media server service")
         Intent(this, MediaServerService::class.java).also { intent ->
             bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
         }
@@ -472,6 +504,80 @@ class VideoDetailActivity : AppCompatActivity() {
         return true
     }
 
+    private fun setupSeekBar() {
+        binding.videoSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (fromUser) {
+                    binding.currentTimeText.text = formatDuration(progress.toLong())
+                }
+            }
+
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {
+                isSeekBarDragging = true
+            }
+
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {
+                isSeekBarDragging = false
+                val position = seekBar?.progress?.toLong() ?: return
+                val client = castSession?.remoteMediaClient
+                if (client?.hasMediaSession() == true) {
+                    AppLogger.info(TAG, "Seeking cast to ${formatDuration(position)}")
+                    client.seek(position).setResultCallback { result ->
+                        if (!result.status.isSuccess) {
+                            AppLogger.error(TAG, "Seek failed: ${result.status.statusMessage}")
+                        }
+                    }
+                } else {
+                    pendingSeekPositionMs = position
+                    AppLogger.info(TAG, "Start position set to ${formatDuration(position)}")
+                }
+            }
+        })
+    }
+
+    private fun updateProgressTracking(playerState: Int) {
+        val isActive = playerState == com.google.android.gms.cast.MediaStatus.PLAYER_STATE_PLAYING ||
+                playerState == com.google.android.gms.cast.MediaStatus.PLAYER_STATE_PAUSED ||
+                playerState == com.google.android.gms.cast.MediaStatus.PLAYER_STATE_BUFFERING
+        if (isActive) {
+            startProgressUpdates()
+        } else {
+            stopProgressUpdates()
+        }
+    }
+
+    private fun resetSeekBarToLocal() {
+        val video = videoItem ?: return
+        if (video.duration > 0) {
+            binding.videoSeekBar.max = video.duration.toInt()
+            binding.videoSeekBar.progress = pendingSeekPositionMs.toInt()
+            binding.currentTimeText.text = formatDuration(pendingSeekPositionMs)
+            binding.totalTimeText.text = formatDuration(video.duration)
+        }
+    }
+
+    private fun updateSeekBarProgress() {
+        if (isSeekBarDragging) return
+        val client = castSession?.remoteMediaClient ?: return
+        val duration = client.streamDuration
+        val position = client.approximateStreamPosition
+        if (duration > 0) {
+            binding.videoSeekBar.max = duration.toInt()
+            binding.videoSeekBar.progress = position.toInt()
+            binding.currentTimeText.text = formatDuration(position)
+            binding.totalTimeText.text = formatDuration(duration)
+        }
+    }
+
+    private fun startProgressUpdates() {
+        progressHandler.removeCallbacks(progressUpdateRunnable)
+        progressHandler.post(progressUpdateRunnable)
+    }
+
+    private fun stopProgressUpdates() {
+        progressHandler.removeCallbacks(progressUpdateRunnable)
+    }
+
     override fun onResume() {
         super.onResume()
         try {
@@ -482,14 +588,15 @@ class VideoDetailActivity : AppCompatActivity() {
             castSession = currentSession
             currentSession?.remoteMediaClient?.registerCallback(remoteMediaClientCallback)
             updateCastStatus()
-            AppLogger.log(TAG, "onResume: castSession=${if (currentSession != null) "connected to ${currentSession.castDevice?.friendlyName}" else "null"}")
+            AppLogger.info(TAG, "onResume: castSession=${if (currentSession != null) "connected to ${currentSession.castDevice?.friendlyName}" else "null"}")
         } catch (e: Exception) {
-            AppLogger.log(TAG, "Cast not available in onResume: ${e.message}")
+            AppLogger.warn(TAG, "Cast not available in onResume: ${e.message}")
         }
     }
 
     override fun onPause() {
         super.onPause()
+        stopProgressUpdates()
         try {
             castSession?.remoteMediaClient?.unregisterCallback(remoteMediaClientCallback)
             castContext?.sessionManager?.removeSessionManagerListener(
@@ -501,6 +608,7 @@ class VideoDetailActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        stopProgressUpdates()
         activityScope.cancel()
         if (serviceBound) {
             unbindService(serviceConnection)
