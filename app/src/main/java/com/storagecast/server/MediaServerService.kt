@@ -1,15 +1,29 @@
 package com.storagecast.server
 
 import android.app.Service
+import android.content.ContentResolver
 import android.content.Intent
+import android.net.Uri
 import android.os.Binder
 import android.os.IBinder
+import android.os.ParcelFileDescriptor
 import android.util.Log
+import com.storagecast.log.AppLogger
 import fi.iki.elonen.NanoHTTPD
 import java.io.File
 import java.io.FileInputStream
+import java.io.IOException
+import java.io.InputStream
+import java.util.logging.Handler
+import java.util.logging.Level
+import java.util.logging.LogRecord
 
 class MediaServerService : Service() {
+
+    companion object {
+        @Volatile
+        private var logHandlerInstalled = false
+    }
 
     private val binder = LocalBinder()
     private var server: MediaServer? = null
@@ -21,27 +35,67 @@ class MediaServerService : Service() {
     override fun onBind(intent: Intent?): IBinder = binder
 
     fun startServer(port: Int = 8080): Int {
-        if (server?.isAlive == true) return server!!.listeningPort
-        server = MediaServer(port)
-        server?.start()
-        return server!!.listeningPort
+        installNanoHttpdLogHandler()
+        if (server?.isAlive == true) {
+            AppLogger.log("MediaServer", "Server already running on port ${server!!.listeningPort}")
+            return server!!.listeningPort
+        }
+        return try {
+            server = MediaServer(port, contentResolver)
+            server?.start()
+            val actualPort = server!!.listeningPort
+            AppLogger.log("MediaServer", "Server started on port $actualPort")
+            actualPort
+        } catch (e: Exception) {
+            AppLogger.log("MediaServer", "Failed to start server on port $port: ${e.message}")
+            throw e
+        }
+    }
+
+    private fun installNanoHttpdLogHandler() {
+        if (logHandlerInstalled) return
+        logHandlerInstalled = true
+        try {
+            val logger = java.util.logging.Logger.getLogger(NanoHTTPD::class.java.name)
+            logger.addHandler(object : Handler() {
+                override fun publish(record: LogRecord) {
+                    val msg = record.message ?: return
+                    val thrown = record.thrown
+                    if (thrown != null) {
+                        AppLogger.log("NanoHTTPD", "$msg: ${thrown.javaClass.simpleName}: ${thrown.message}")
+                    } else {
+                        AppLogger.log("NanoHTTPD", msg)
+                    }
+                }
+                override fun flush() {}
+                override fun close() {}
+            })
+        } catch (e: Exception) {
+            AppLogger.log("MediaServer", "Failed to install NanoHTTPD log handler: ${e.message}")
+        }
     }
 
     fun stopServer() {
         server?.stop()
         server = null
+        AppLogger.log("MediaServer", "Server stopped")
     }
 
-    fun registerFile(path: String, mimeType: String): String {
+    fun isServerRunning(): Boolean = server?.isAlive == true
+
+    fun registerFile(path: String, mimeType: String, uri: Uri? = null): String {
         val file = File(path)
         val id = file.name.hashCode().toUInt().toString()
-        server?.registerFile(id, file, mimeType)
+        val serverActive = server != null
+        server?.registerFile(id, file, mimeType, uri)
+        AppLogger.log("MediaServer", "Register file: path=$path, id=$id, uri=$uri, exists=${file.exists()}, size=${file.length()}, serverActive=$serverActive")
         return "/media/$id"
     }
 
     fun registerSubtitle(subtitleFile: File): String {
         val id = subtitleFile.name.hashCode().toUInt().toString()
-        server?.registerFile(id, subtitleFile, "text/vtt")
+        server?.registerFile(id, subtitleFile, "text/vtt", null)
+        AppLogger.log("MediaServer", "Register subtitle: ${subtitleFile.name}, id=$id, exists=${subtitleFile.exists()}")
         return "/media/$id"
     }
 
@@ -52,24 +106,102 @@ class MediaServerService : Service() {
         super.onDestroy()
     }
 
-    private class MediaServer(port: Int) : NanoHTTPD(port) {
-        private val fileMap = mutableMapOf<String, Pair<File, String>>()
+    private data class FileEntry(
+        val file: File,
+        val mimeType: String,
+        val uri: Uri?
+    )
 
-        fun registerFile(id: String, file: File, mimeType: String) {
-            fileMap[id] = Pair(file, mimeType)
+    /**
+     * Wraps an InputStream to monitor and log data transfer for diagnostics.
+     */
+    private class MonitoredInputStream(
+        private val delegate: InputStream,
+        private val fileName: String
+    ) : InputStream() {
+        private var totalBytesRead = 0L
+        private var firstBytesLogged = false
+
+        override fun read(): Int {
+            val b = delegate.read()
+            if (b >= 0) totalBytesRead++
+            return b
+        }
+
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            val result = try {
+                delegate.read(b, off, len)
+            } catch (e: IOException) {
+                AppLogger.log("MediaServer", "READ ERROR for $fileName after $totalBytesRead bytes: ${e.javaClass.simpleName}: ${e.message}")
+                throw e
+            }
+
+            if (result > 0) {
+                totalBytesRead += result
+                if (!firstBytesLogged) {
+                    firstBytesLogged = true
+                    val previewLen = minOf(result, 16)
+                    val hex = b.slice(off until off + previewLen)
+                        .joinToString(" ") { "%02x".format(it) }
+                    AppLogger.log("MediaServer", "First bytes of $fileName: $hex (read $result bytes)")
+                }
+            }
+
+            if (result <= 0) {
+                AppLogger.log("MediaServer", "Stream ended for $fileName: read()=$result, totalBytesRead=$totalBytesRead")
+            }
+
+            return result
+        }
+
+        override fun available(): Int = delegate.available()
+
+        override fun skip(n: Long): Long {
+            val skipped = delegate.skip(n)
+            totalBytesRead += skipped
+            return skipped
+        }
+
+        override fun close() {
+            AppLogger.log("MediaServer", "Stream closed for $fileName, totalBytesRead=$totalBytesRead")
+            delegate.close()
+        }
+    }
+
+    private class MediaServer(port: Int, private val resolver: ContentResolver) : NanoHTTPD(port) {
+        private val fileMap = mutableMapOf<String, FileEntry>()
+
+        fun registerFile(id: String, file: File, mimeType: String, uri: Uri?) {
+            fileMap[id] = FileEntry(file, mimeType, uri)
         }
 
         override fun serve(session: IHTTPSession): Response {
             val uri = session.uri
             Log.d("MediaServer", "Request: $uri")
+            AppLogger.log("MediaServer", "HTTP ${session.method} $uri (headers: ${session.headers.filterKeys { it in listOf("range", "accept", "user-agent") }})")
+
+            // Handle CORS preflight requests
+            if (session.method == Method.OPTIONS) {
+                val response = newFixedLengthResponse(Response.Status.OK, MIME_PLAINTEXT, "")
+                response.addHeader("Access-Control-Allow-Origin", "*")
+                response.addHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+                response.addHeader("Access-Control-Allow-Headers", "Content-Type, Range")
+                response.addHeader("Access-Control-Max-Age", "86400")
+                return response
+            }
 
             if (uri.startsWith("/media/")) {
                 val id = uri.removePrefix("/media/")
-                val (file, mimeType) = fileMap[id] ?: return newFixedLengthResponse(
-                    Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Not found"
-                )
+                val entry = fileMap[id]
+                if (entry == null) {
+                    AppLogger.log("MediaServer", "404 Not found: id=$id, registered ids=${fileMap.keys}")
+                    return newFixedLengthResponse(
+                        Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Not found"
+                    )
+                }
 
-                if (!file.exists()) {
+                if (!entry.file.exists()) {
+                    AppLogger.log("MediaServer", "404 File not found on disk: ${entry.file.absolutePath}")
                     return newFixedLengthResponse(
                         Response.Status.NOT_FOUND, MIME_PLAINTEXT, "File not found"
                     )
@@ -77,52 +209,94 @@ class MediaServerService : Service() {
 
                 val rangeHeader = session.headers["range"]
                 return if (rangeHeader != null) {
-                    servePartialContent(file, mimeType, rangeHeader)
+                    AppLogger.log("MediaServer", "Serving partial: ${entry.file.name} (${entry.file.length()} bytes), range=$rangeHeader")
+                    servePartialContent(entry, rangeHeader)
                 } else {
-                    serveFullContent(file, mimeType)
+                    AppLogger.log("MediaServer", "Serving full: ${entry.file.name} (${entry.file.length()} bytes)")
+                    serveFullContent(entry)
                 }
             }
 
+            AppLogger.log("MediaServer", "404 Unknown path: $uri")
             return newFixedLengthResponse(
                 Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Not found"
             )
         }
 
-        private fun serveFullContent(file: File, mimeType: String): Response {
-            val fis = FileInputStream(file)
-            val response = newFixedLengthResponse(
-                Response.Status.OK, mimeType, fis, file.length()
-            )
-            response.addHeader("Accept-Ranges", "bytes")
-            response.addHeader("Access-Control-Allow-Origin", "*")
-            return response
+        private fun openFileStream(entry: FileEntry): InputStream {
+            // Try ContentResolver first (handles scoped storage on Android 10+)
+            if (entry.uri != null) {
+                try {
+                    val pfd = resolver.openFileDescriptor(entry.uri, "r")
+                    if (pfd != null) {
+                        AppLogger.log("MediaServer", "Opened file via ContentResolver: ${entry.file.name}")
+                        return MonitoredInputStream(
+                            ParcelFileDescriptor.AutoCloseInputStream(pfd),
+                            entry.file.name
+                        )
+                    }
+                } catch (e: Exception) {
+                    AppLogger.log("MediaServer", "ContentResolver failed for ${entry.file.name}: ${e.message}, falling back to FileInputStream")
+                }
+            }
+            // Fall back to direct file access
+            AppLogger.log("MediaServer", "Opened file via FileInputStream: ${entry.file.name}")
+            return MonitoredInputStream(FileInputStream(entry.file), entry.file.name)
         }
 
-        private fun servePartialContent(
-            file: File, mimeType: String, rangeHeader: String
-        ): Response {
-            val fileLength = file.length()
-            val range = rangeHeader.replace("bytes=", "")
-            val parts = range.split("-")
-            val start = parts[0].toLongOrNull() ?: 0L
-            val end = if (parts.size > 1 && parts[1].isNotEmpty()) {
-                parts[1].toLongOrNull() ?: (fileLength - 1)
-            } else {
-                fileLength - 1
+        private fun serveFullContent(entry: FileEntry): Response {
+            return try {
+                val fis = openFileStream(entry)
+                val response = newFixedLengthResponse(
+                    Response.Status.OK, entry.mimeType, fis, entry.file.length()
+                )
+                response.addHeader("Accept-Ranges", "bytes")
+                response.addHeader("Access-Control-Allow-Origin", "*")
+                response
+            } catch (e: Exception) {
+                AppLogger.log("MediaServer", "Error serving file ${entry.file.name}: ${e.message}")
+                newFixedLengthResponse(
+                    Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "Error: ${e.message}"
+                )
             }
+        }
 
-            val contentLength = end - start + 1
-            val fis = FileInputStream(file)
-            fis.skip(start)
+        private fun servePartialContent(entry: FileEntry, rangeHeader: String): Response {
+            return try {
+                val fileLength = entry.file.length()
+                val range = rangeHeader.replace("bytes=", "")
+                val parts = range.split("-")
+                val start = parts[0].toLongOrNull() ?: 0L
+                val end = if (parts.size > 1 && parts[1].isNotEmpty()) {
+                    parts[1].toLongOrNull() ?: (fileLength - 1)
+                } else {
+                    fileLength - 1
+                }
 
-            val response = newFixedLengthResponse(
-                Response.Status.PARTIAL_CONTENT, mimeType, fis, contentLength
-            )
-            response.addHeader("Content-Range", "bytes $start-$end/$fileLength")
-            response.addHeader("Accept-Ranges", "bytes")
-            response.addHeader("Content-Length", contentLength.toString())
-            response.addHeader("Access-Control-Allow-Origin", "*")
-            return response
+                val contentLength = end - start + 1
+                val fis = openFileStream(entry)
+                if (start > 0) {
+                    var remaining = start
+                    while (remaining > 0) {
+                        val skipped = fis.skip(remaining)
+                        if (skipped <= 0) break
+                        remaining -= skipped
+                    }
+                }
+
+                val response = newFixedLengthResponse(
+                    Response.Status.PARTIAL_CONTENT, entry.mimeType, fis, contentLength
+                )
+                response.addHeader("Content-Range", "bytes $start-$end/$fileLength")
+                response.addHeader("Accept-Ranges", "bytes")
+                response.addHeader("Access-Control-Allow-Origin", "*")
+                response
+            } catch (e: Exception) {
+                AppLogger.log("MediaServer", "Error serving partial content ${entry.file.name}: ${e.message}")
+                newFixedLengthResponse(
+                    Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "Error: ${e.message}"
+                )
+            }
         }
     }
 }

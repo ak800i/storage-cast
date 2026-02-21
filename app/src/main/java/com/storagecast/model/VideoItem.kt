@@ -1,7 +1,10 @@
 package com.storagecast.model
 
 import android.net.Uri
+import android.os.Parcelable
+import kotlinx.parcelize.Parcelize
 
+@Parcelize
 data class VideoItem(
     val id: Long,
     val title: String,
@@ -10,4 +13,4 @@ data class VideoItem(
     val duration: Long,
     val size: Long,
     val mimeType: String
-)
+) : Parcelable
