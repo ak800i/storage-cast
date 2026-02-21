@@ -4,13 +4,21 @@ An Android app that casts videos from your device's local storage to Google Cast
 
 ## Features
 
-- Browse videos stored on your Android device
+- Browse videos stored on your Android device in a hierarchical folder view
+- Search for videos by name
 - Cast videos to any Google Cast compatible device on the same network
+- Seek during playback — seek bar with current position and duration
 - Detect and extract embedded subtitle tracks from video files
+- Load external subtitle files from local storage
 - Cast subtitles (converted to WebVTT) alongside video
+- On-device transcoding for videos with codecs not natively supported by Cast devices
 - Built-in HTTP server to stream media to Cast devices
 - Video thumbnails, duration, and file size display
 - Material Design UI
+
+## Usage
+
+Download the latest APK from the [Releases](../../releases) tab and install it on your Android device.
 
 ## Architecture
 
