@@ -67,6 +67,7 @@ class VideoDetailActivity : AppCompatActivity() {
 
     private val progressHandler = Handler(Looper.getMainLooper())
     private var isSeekBarDragging = false
+    private var pendingSeekPositionMs = 0L
     private val progressUpdateRunnable = object : Runnable {
         override fun run() {
             updateSeekBarProgress()
@@ -80,7 +81,7 @@ class VideoDetailActivity : AppCompatActivity() {
             val status = client?.mediaStatus ?: return
             val playerState = status.playerState
             AppLogger.info(TAG, "RemoteMediaClient status updated: playerState=$playerState, idleReason=${status.idleReason}")
-            updateSeekBarVisibility(playerState)
+            updateProgressTracking(playerState)
             if (playerState == com.google.android.gms.cast.MediaStatus.PLAYER_STATE_IDLE) {
                 when (status.idleReason) {
                     com.google.android.gms.cast.MediaStatus.IDLE_REASON_ERROR ->
@@ -141,8 +142,8 @@ class VideoDetailActivity : AppCompatActivity() {
             session.remoteMediaClient?.unregisterCallback(remoteMediaClientCallback)
             castSession = null
             updateCastStatus()
-            binding.seekBarContainer.visibility = View.GONE
             stopProgressUpdates()
+            resetSeekBarToLocal()
         }
         override fun onSessionResuming(session: CastSession, sessionId: String) {
             AppLogger.info(TAG, "Cast session resuming: $sessionId")
@@ -198,6 +199,14 @@ class VideoDetailActivity : AppCompatActivity() {
         val size = formatSize(video.size)
         binding.videoInfo.text = "$duration • $size"
         binding.videoPath.text = video.path
+
+        if (video.duration > 0) {
+            binding.seekBarContainer.visibility = View.VISIBLE
+            binding.videoSeekBar.max = video.duration.toInt()
+            binding.videoSeekBar.progress = 0
+            binding.currentTimeText.text = formatDuration(0)
+            binding.totalTimeText.text = formatDuration(video.duration)
+        }
 
         loadThumbnail(video)
     }
@@ -389,9 +398,12 @@ class VideoDetailActivity : AppCompatActivity() {
             .setMediaTracks(mediaTracks)
             .build()
 
+        val startPositionMs = pendingSeekPositionMs
+
         val loadRequest = MediaLoadRequestData.Builder()
             .setMediaInfo(mediaInfo)
             .setAutoplay(true)
+            .setCurrentTime(startPositionMs)
             .apply {
                 if (mediaTracks.isNotEmpty()) {
                     setActiveTrackIds(longArrayOf(1))
@@ -399,7 +411,7 @@ class VideoDetailActivity : AppCompatActivity() {
             }
             .build()
 
-        AppLogger.info(TAG, "castVideo: sending load request to cast device")
+        AppLogger.info(TAG, "castVideo: sending load request to cast device (startPosition=${formatDuration(startPositionMs)})")
         val remoteMediaClient = session.remoteMediaClient
         if (remoteMediaClient == null) {
             AppLogger.error(TAG, "castVideo: remoteMediaClient is null!")
@@ -503,26 +515,40 @@ class VideoDetailActivity : AppCompatActivity() {
             override fun onStopTrackingTouch(seekBar: SeekBar?) {
                 isSeekBarDragging = false
                 val position = seekBar?.progress?.toLong() ?: return
-                val client = castSession?.remoteMediaClient ?: return
-                AppLogger.info(TAG, "Seeking to ${formatDuration(position)}")
-                client.seek(position).setResultCallback { result ->
-                    if (!result.status.isSuccess) {
-                        AppLogger.error(TAG, "Seek failed: ${result.status.statusMessage}")
+                val client = castSession?.remoteMediaClient
+                if (client?.hasMediaSession() == true) {
+                    AppLogger.info(TAG, "Seeking cast to ${formatDuration(position)}")
+                    client.seek(position).setResultCallback { result ->
+                        if (!result.status.isSuccess) {
+                            AppLogger.error(TAG, "Seek failed: ${result.status.statusMessage}")
+                        }
                     }
+                } else {
+                    pendingSeekPositionMs = position
+                    AppLogger.info(TAG, "Start position set to ${formatDuration(position)}")
                 }
             }
         })
     }
 
-    private fun updateSeekBarVisibility(playerState: Int) {
+    private fun updateProgressTracking(playerState: Int) {
         val isActive = playerState == com.google.android.gms.cast.MediaStatus.PLAYER_STATE_PLAYING ||
                 playerState == com.google.android.gms.cast.MediaStatus.PLAYER_STATE_PAUSED ||
                 playerState == com.google.android.gms.cast.MediaStatus.PLAYER_STATE_BUFFERING
-        binding.seekBarContainer.visibility = if (isActive) View.VISIBLE else View.GONE
         if (isActive) {
             startProgressUpdates()
         } else {
             stopProgressUpdates()
+        }
+    }
+
+    private fun resetSeekBarToLocal() {
+        val video = videoItem ?: return
+        if (video.duration > 0) {
+            binding.videoSeekBar.max = video.duration.toInt()
+            binding.videoSeekBar.progress = pendingSeekPositionMs.toInt()
+            binding.currentTimeText.text = formatDuration(pendingSeekPositionMs)
+            binding.totalTimeText.text = formatDuration(video.duration)
         }
     }
 

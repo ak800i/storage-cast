@@ -62,7 +62,11 @@ class MediaServerService : Service() {
                     val msg = record.message ?: return
                     val thrown = record.thrown
                     if (thrown != null) {
-                        AppLogger.warn("NanoHTTPD", "$msg: ${thrown.javaClass.simpleName}: ${thrown.message}")
+                        if (thrown is java.net.SocketException) {
+                            AppLogger.info("NanoHTTPD", "$msg: ${thrown.javaClass.simpleName}: ${thrown.message}")
+                        } else {
+                            AppLogger.warn("NanoHTTPD", "$msg: ${thrown.javaClass.simpleName}: ${thrown.message}")
+                        }
                     } else {
                         AppLogger.info("NanoHTTPD", msg)
                     }
