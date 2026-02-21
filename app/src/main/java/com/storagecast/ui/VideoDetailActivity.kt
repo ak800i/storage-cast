@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.graphics.Bitmap
+import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
@@ -18,6 +19,7 @@ import android.view.MenuItem
 import android.view.View
 import android.widget.SeekBar
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import com.google.android.gms.cast.MediaInfo
@@ -40,6 +42,7 @@ import com.storagecast.media.VideoTranscoder
 import com.storagecast.model.SubtitleTrack
 import com.storagecast.model.VideoItem
 import com.storagecast.server.MediaServerService
+import com.storagecast.subtitle.SubtitleConverter
 import com.storagecast.subtitle.SubtitleExtractor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -67,8 +70,17 @@ class VideoDetailActivity : AppCompatActivity() {
     private var serviceBound = false
 
     private val subtitleExtractor = SubtitleExtractor()
+    private val subtitleConverter = SubtitleConverter()
     private var selectedSubtitleFile: File? = null
     private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
+    private val subtitleFilePicker = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            handleSubtitleFileSelected(uri)
+        }
+    }
 
     private val mediaProber = MediaProber()
     private val castCompatibility = CastCompatibility()
@@ -309,32 +321,97 @@ class VideoDetailActivity : AppCompatActivity() {
                 subtitleExtractor.getSubtitleTracks(video.path)
             }
             binding.progressBar.visibility = View.GONE
-            if (tracks.isEmpty()) {
-                Toast.makeText(this@VideoDetailActivity, R.string.no_subtitles, Toast.LENGTH_SHORT).show()
-            } else {
-                showSubtitleDialog(video, tracks)
-            }
+            showSubtitleDialog(video, tracks)
         }
     }
 
     private fun showSubtitleDialog(video: VideoItem, tracks: List<SubtitleTrack>) {
-        val options = mutableListOf("No subtitles")
-        tracks.forEach { track ->
-            options.add("${track.language} - ${track.title} (${track.codec})")
+        val options = mutableListOf<String>()
+        options.add(getString(R.string.subtitle_source_none))
+
+        val embeddedStartIndex = options.size
+        if (tracks.isNotEmpty()) {
+            options.add(getString(R.string.subtitle_embedded_header))
+            tracks.forEach { track ->
+                options.add("    ${track.language} - ${track.title} (${track.codec})")
+            }
         }
 
+        options.add(getString(R.string.subtitle_source_file))
+        val fileOptionIndex = options.size - 1
+
+        val headerIndex = if (tracks.isNotEmpty()) embeddedStartIndex else -1
+
         AlertDialog.Builder(this)
-            .setTitle("Select subtitle track")
+            .setTitle(R.string.subtitle_source_title)
             .setItems(options.toTypedArray()) { _, which ->
-                if (which == 0) {
-                    selectedSubtitleFile = null
-                    binding.subtitleStatus.visibility = View.GONE
-                } else {
-                    val track = tracks[which - 1]
-                    extractSubtitle(video.path, track)
+                when {
+                    which == 0 -> {
+                        selectedSubtitleFile = null
+                        binding.subtitleStatus.visibility = View.GONE
+                    }
+                    which == headerIndex -> {
+                        // Header item tapped, ignore
+                    }
+                    which == fileOptionIndex -> {
+                        subtitleFilePicker.launch(arrayOf(
+                            "text/plain",
+                            "text/vtt",
+                            "application/x-subrip",
+                            "text/x-ssa",
+                            "text/x-ass",
+                            "application/octet-stream"
+                        ))
+                    }
+                    tracks.isNotEmpty() && which > headerIndex && which < fileOptionIndex -> {
+                        val trackIndex = which - headerIndex - 1
+                        val track = tracks[trackIndex]
+                        extractSubtitle(video.path, track)
+                    }
                 }
             }
             .show()
+    }
+
+    private fun handleSubtitleFileSelected(uri: Uri) {
+        binding.progressBar.visibility = View.VISIBLE
+        activityScope.launch {
+            val subtitleFile = withContext(Dispatchers.IO) {
+                try {
+                    val fileName = getFileNameFromUri(uri) ?: "subtitle.srt"
+                    val inputStream = contentResolver.openInputStream(uri) ?: return@withContext null
+                    val outputDir = File(cacheDir, "subtitles")
+                    inputStream.use { stream ->
+                        subtitleConverter.convertToVtt(stream, fileName, outputDir)
+                    }
+                } catch (e: Exception) {
+                    AppLogger.error(TAG, "Failed to load subtitle file: ${e.message}")
+                    null
+                }
+            }
+            binding.progressBar.visibility = View.GONE
+            if (subtitleFile != null) {
+                selectedSubtitleFile = subtitleFile
+                binding.subtitleStatus.text = getString(R.string.subtitle_file_selected)
+                binding.subtitleStatus.visibility = View.VISIBLE
+                AppLogger.info(TAG, "Local subtitle loaded: ${subtitleFile.name}")
+            } else {
+                Toast.makeText(this@VideoDetailActivity, R.string.subtitle_file_error, Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun getFileNameFromUri(uri: Uri): String? {
+        val cursor = contentResolver.query(uri, null, null, null, null)
+        cursor?.use {
+            if (it.moveToFirst()) {
+                val nameIndex = it.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                if (nameIndex >= 0) {
+                    return it.getString(nameIndex)
+                }
+            }
+        }
+        return uri.lastPathSegment
     }
 
     private fun extractSubtitle(videoPath: String, track: SubtitleTrack) {
@@ -516,7 +593,11 @@ class VideoDetailActivity : AppCompatActivity() {
             .setStreamType(MediaInfo.STREAM_TYPE_BUFFERED)
             .setContentType("video/mp4")
             .setMetadata(metadata)
-            .setMediaTracks(mediaTracks)
+            .apply {
+                if (mediaTracks.isNotEmpty()) {
+                    setMediaTracks(mediaTracks)
+                }
+            }
             .build()
 
         val loadRequest = MediaLoadRequestData.Builder()
@@ -605,7 +686,11 @@ class VideoDetailActivity : AppCompatActivity() {
             .setStreamType(MediaInfo.STREAM_TYPE_BUFFERED)
             .setContentType(video.mimeType)
             .setMetadata(metadata)
-            .setMediaTracks(mediaTracks)
+            .apply {
+                if (mediaTracks.isNotEmpty()) {
+                    setMediaTracks(mediaTracks)
+                }
+            }
             .build()
 
         val startPositionMs = pendingSeekPositionMs
