@@ -23,6 +23,7 @@ import androidx.appcompat.app.AppCompatActivity
 import com.google.android.gms.cast.MediaInfo
 import com.google.android.gms.cast.MediaLoadRequestData
 import com.google.android.gms.cast.MediaMetadata
+import com.google.android.gms.cast.MediaSeekOptions
 import com.google.android.gms.cast.MediaTrack
 import com.google.android.gms.cast.framework.CastButtonFactory
 import com.google.android.gms.cast.framework.CastContext
@@ -727,7 +728,7 @@ class VideoDetailActivity : AppCompatActivity() {
                 val client = castSession?.remoteMediaClient
                 if (client?.hasMediaSession() == true) {
                     AppLogger.info(TAG, "Seeking cast to ${formatDuration(position)}")
-                    client.seek(position).setResultCallback { result ->
+                    client.seek(MediaSeekOptions.Builder().setPosition(position).build()).setResultCallback { result ->
                         if (!result.status.isSuccess) {
                             AppLogger.error(TAG, "Seek failed: ${result.status.statusMessage}")
                         }
