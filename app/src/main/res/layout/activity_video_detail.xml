@@ -120,6 +120,14 @@
                 android:text="@string/cast_video"
                 style="@style/Widget.MaterialComponents.Button.OutlinedButton" />
 
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/transcodeAndCastButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/transcode_and_cast"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton" />
+
             <LinearLayout
                 android:id="@+id/seekBarContainer"
                 android:layout_width="match_parent"

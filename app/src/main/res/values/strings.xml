@@ -52,4 +52,5 @@
     <string name="audio_track_default">Default (first track)</string>
     <string name="audio_track_selected">Audio: %s</string>
     <string name="audio_no_tracks">No audio tracks found</string>
+    <string name="transcode_and_cast">Transcode &amp; Cast</string>
 </resources>

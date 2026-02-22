@@ -342,6 +342,21 @@ class VideoDetailActivity : AppCompatActivity() {
             }
             checkCompatibilityAndCast(video)
         }
+
+        binding.transcodeAndCastButton.setOnClickListener {
+            val video = videoItem ?: return@setOnClickListener
+            val session = castSession
+            if (session == null || session.isConnected != true) {
+                Toast.makeText(this, R.string.not_connected, Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            val service = mediaServerService
+            if (service == null || !service.isServerRunning()) {
+                Toast.makeText(this, R.string.server_not_ready, Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            transcodeAndCast(video)
+        }
     }
 
     private fun loadSubtitleTracks(video: VideoItem) {
@@ -557,6 +572,25 @@ class VideoDetailActivity : AppCompatActivity() {
             } else {
                 showCodecCompatibilityDialog(video, probeResult, result)
             }
+        }
+    }
+
+    private fun transcodeAndCast(video: VideoItem) {
+        binding.progressBar.visibility = View.VISIBLE
+        activityScope.launch {
+            val probeResult = cachedProbeResult ?: withContext(Dispatchers.IO) {
+                mediaProber.probe(video.path)
+            }
+            binding.progressBar.visibility = View.GONE
+
+            if (probeResult == null) {
+                Toast.makeText(this@VideoDetailActivity, R.string.probe_failed, Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+            cachedProbeResult = probeResult
+
+            AppLogger.info(TAG, "User chose to transcode & cast")
+            startTranscoding(video, probeResult)
         }
     }
 
