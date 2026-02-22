@@ -39,6 +39,7 @@ import com.storagecast.media.AudioTrackInfo
 import com.storagecast.media.CastCompatibility
 import com.storagecast.media.MediaProbeResult
 import com.storagecast.media.MediaProber
+import com.storagecast.media.MkvTrackFilter
 import com.storagecast.media.VideoTranscoder
 import com.storagecast.model.SubtitleTrack
 import com.storagecast.model.VideoItem
@@ -545,7 +546,10 @@ class VideoDetailActivity : AppCompatActivity() {
         val probe = cachedProbeResult
         val audioTrack = selectedAudioTrack
         if (needsAudioRemux() && probe != null && audioTrack != null) {
-            if (VideoTranscoder.canRemuxAudio(audioTrack)) {
+            if (isMkvContainer(probe)) {
+                AppLogger.info(TAG, "Using streaming MKV track filter for audio selection")
+                startStreamingMkvFilterAndCast(video, probe, audioTrack)
+            } else if (VideoTranscoder.canRemuxAudio(audioTrack)) {
                 startRemuxAndCast(video, probe)
             } else {
                 AppLogger.info(TAG, "Audio codec ${audioTrack.mime} cannot be remuxed, using video passthrough with audio transcode")
@@ -554,6 +558,128 @@ class VideoDetailActivity : AppCompatActivity() {
         } else {
             castVideo(video, selectedSubtitleFile)
         }
+    }
+
+    private fun isMkvContainer(probe: MediaProbeResult): Boolean {
+        return probe.containerFormat.contains("MKV", ignoreCase = true) ||
+               probe.containerFormat.contains("Matroska", ignoreCase = true) ||
+               probe.containerFormat.contains("WebM", ignoreCase = true)
+    }
+
+    private fun startStreamingMkvFilterAndCast(video: VideoItem, probe: MediaProbeResult, audioTrack: AudioTrackInfo) {
+        val service = mediaServerService
+        if (service == null) {
+            AppLogger.error(TAG, "startStreamingMkvFilterAndCast: media server service is null")
+            Toast.makeText(this, R.string.server_not_ready, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val session = castSession
+        if (session == null) {
+            AppLogger.error(TAG, "startStreamingMkvFilterAndCast: cast session is null")
+            Toast.makeText(this, R.string.not_connected, Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // MKV track numbers are 1-based (MediaExtractor index + 1)
+        val videoTrackNum = probe.primaryVideo?.let { it.trackIndex + 1 }
+        val audioTrackNum = audioTrack.trackIndex + 1
+        val keepTrackNumbers = setOfNotNull(videoTrackNum, audioTrackNum)
+
+        AppLogger.info(TAG, "Streaming MKV filter: keeping track numbers $keepTrackNumbers " +
+            "(video=${probe.primaryVideo?.codec}, audio=${audioTrack.codec} ${audioTrack.language})")
+
+        val filter = MkvTrackFilter()
+        val videoPath = video.path
+        val videoUri = video.uri
+
+        val streamPath = service.registerStreamingSource(video.path, "video/x-matroska") {
+            val sourceStream = if (videoUri != null) {
+                try {
+                    val pfd = contentResolver.openFileDescriptor(videoUri, "r")
+                    if (pfd != null) {
+                        android.os.ParcelFileDescriptor.AutoCloseInputStream(pfd)
+                    } else {
+                        java.io.FileInputStream(videoPath)
+                    }
+                } catch (e: Exception) {
+                    AppLogger.warn(TAG, "ContentResolver failed, falling back to FileInputStream: ${e.message}")
+                    java.io.FileInputStream(videoPath)
+                }
+            } else {
+                java.io.FileInputStream(videoPath)
+            }
+            filter.createFilteredStream(sourceStream, keepTrackNumbers)
+        }
+
+        val serverIp = getDeviceIpAddress()
+        val serverPort = service.getServerPort()
+        val videoUrl = "http://$serverIp:$serverPort$streamPath"
+
+        AppLogger.info(TAG, "Streaming MKV cast: url=$videoUrl")
+
+        val metadata = MediaMetadata(MediaMetadata.MEDIA_TYPE_MOVIE).apply {
+            putString(MediaMetadata.KEY_TITLE, video.title)
+        }
+
+        val mediaTracks = mutableListOf<MediaTrack>()
+
+        if (selectedSubtitleFile != null) {
+            val subtitlePath = service.registerSubtitle(selectedSubtitleFile!!)
+            val subtitleUrl = "http://$serverIp:$serverPort$subtitlePath"
+            val subtitleTrack = MediaTrack.Builder(1, MediaTrack.TYPE_TEXT)
+                .setName("Subtitles")
+                .setSubtype(MediaTrack.SUBTYPE_SUBTITLES)
+                .setContentId(subtitleUrl)
+                .setContentType("text/vtt")
+                .setLanguage("en")
+                .build()
+            mediaTracks.add(subtitleTrack)
+        }
+
+        val mediaInfo = MediaInfo.Builder(videoUrl)
+            .setStreamType(MediaInfo.STREAM_TYPE_LIVE)
+            .setContentType("video/x-matroska")
+            .setMetadata(metadata)
+            .apply {
+                if (mediaTracks.isNotEmpty()) {
+                    setMediaTracks(mediaTracks)
+                }
+            }
+            .build()
+
+        val loadRequest = MediaLoadRequestData.Builder()
+            .setMediaInfo(mediaInfo)
+            .setAutoplay(true)
+            .setCurrentTime(pendingSeekPositionMs)
+            .apply {
+                if (mediaTracks.isNotEmpty()) {
+                    setActiveTrackIds(longArrayOf(1))
+                }
+            }
+            .build()
+
+        AppLogger.info(TAG, "Streaming MKV: sending load request to cast device")
+        val remoteMediaClient = session.remoteMediaClient
+        if (remoteMediaClient == null) {
+            AppLogger.error(TAG, "startStreamingMkvFilterAndCast: remoteMediaClient is null!")
+            Toast.makeText(this, R.string.error_cast, Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val pendingResult = remoteMediaClient.load(loadRequest)
+        pendingResult.setResultCallback { result ->
+            val status = result.status
+            if (status.isSuccess) {
+                AppLogger.info(TAG, "Streaming MKV cast: load SUCCESS")
+            } else {
+                AppLogger.error(TAG, "Streaming MKV cast: load FAILED - ${status.statusMessage}")
+                runOnUiThread {
+                    Toast.makeText(this, getString(R.string.cast_load_failed, status.statusMessage ?: "Unknown error"), Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+        updateCastStatus(video.title)
+        Toast.makeText(this, R.string.loading_video, Toast.LENGTH_SHORT).show()
     }
 
     private fun checkCompatibilityAndCast(video: VideoItem) {
