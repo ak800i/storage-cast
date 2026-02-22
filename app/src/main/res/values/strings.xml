@@ -22,7 +22,11 @@
     <string name="play">Play</string>
     <string name="pause">Pause</string>
     <string name="stop">Stop</string>
-    <string name="select_subtitles">Select Subtitles</string>
+    <string name="rewind_30">Rewind 30s</string>
+    <string name="forward_30">Forward 30s</string>
+    <string name="rotate_video">Rotate</string>
+    <string name="video_thumbnail_desc">Video thumbnail</string>
+    <string name="select_subtitles">Subtitles</string>
     <string name="cast_video">Cast Video</string>
     <string name="no_items">No items in this folder</string>
     <string name="subtitle_selected">Subtitle: %s</string>
@@ -47,7 +51,7 @@
     <string name="transcoding_title">Transcoding…</string>
     <string name="transcoding_progress">Transcoding: %d%%</string>
     <string name="transcode_failed">Transcoding failed: %s</string>
-    <string name="select_audio_track">Select Audio Track</string>
+    <string name="select_audio_track">Audio</string>
     <string name="audio_track_title">Audio track</string>
     <string name="audio_track_default">Default (first track)</string>
     <string name="audio_track_selected">Audio: %s</string>
@@ -55,4 +59,7 @@
     <string name="remuxing_title">Preparing audio track…</string>
     <string name="remuxing_progress">Preparing: %d%%</string>
     <string name="remux_failed">Audio track preparation failed: %s</string>
+    <string name="audio_track_switch_reload">Switching audio track — stream will reload</string>
+    <string name="subtitle_switched_live">Subtitles updated</string>
+    <string name="subtitle_disabled_live">Subtitles disabled</string>
 </resources>
