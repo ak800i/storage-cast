@@ -124,6 +124,19 @@ class Mp4ToMkvStreamer {
         return pipedIn
     }
 
+    /**
+     * Writes selected tracks from a media file as MKV directly to an OutputStream.
+     * Blocks until all data is written. Use for writing to a file.
+     */
+    fun writeTo(
+        sourcePath: String,
+        videoTrackIndex: Int,
+        audioTrackIndex: Int,
+        output: OutputStream
+    ) {
+        mux(sourcePath, videoTrackIndex, audioTrackIndex, output)
+    }
+
     private fun mux(
         sourcePath: String,
         videoTrackIndex: Int,
