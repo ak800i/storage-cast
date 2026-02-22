@@ -579,7 +579,7 @@ class Mp4ToMkvStreamer {
 
             val naluStart = i + scLen
             var naluEnd = data.size
-            for (j in naluStart until data.size - 2) {
+            for (j in naluStart until data.size) {
                 if (startCodeLength(data, j) > 0) {
                     naluEnd = j
                     break
@@ -596,12 +596,12 @@ class Mp4ToMkvStreamer {
     }
 
     private fun startCodeLength(data: ByteArray, offset: Int): Int {
-        if (offset + 3 < data.size &&
+        if (offset + 4 <= data.size &&
             data[offset] == 0.toByte() && data[offset + 1] == 0.toByte() &&
             data[offset + 2] == 0.toByte() && data[offset + 3] == 1.toByte()) {
             return 4
         }
-        if (offset + 2 < data.size &&
+        if (offset + 3 <= data.size &&
             data[offset] == 0.toByte() && data[offset + 1] == 0.toByte() &&
             data[offset + 2] == 1.toByte()) {
             return 3
