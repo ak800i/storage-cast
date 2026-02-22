@@ -62,10 +62,12 @@ class VideoDetailActivity : AppCompatActivity() {
     companion object {
         const val EXTRA_VIDEO = "extra_video"
         private const val TAG = "VideoDetail"
+        private const val SEEK_OFFSET_MS = 30_000L
     }
 
     private lateinit var binding: ActivityVideoDetailBinding
     private var videoItem: VideoItem? = null
+    private var thumbnailRotation = 0f
 
     private var castContext: CastContext? = null
     private var castSession: CastSession? = null
@@ -330,6 +332,23 @@ class VideoDetailActivity : AppCompatActivity() {
             Toast.makeText(this, R.string.video_stopped, Toast.LENGTH_SHORT).show()
         }
 
+        binding.rewindButton.setOnClickListener {
+            seekRelative(-SEEK_OFFSET_MS)
+        }
+
+        binding.forwardButton.setOnClickListener {
+            seekRelative(SEEK_OFFSET_MS)
+        }
+
+        binding.rotateButton.setOnClickListener {
+            thumbnailRotation = (thumbnailRotation + 90f) % 360f
+            binding.videoThumbnail.animate()
+                .rotation(thumbnailRotation)
+                .setDuration(200)
+                .start()
+            AppLogger.info(TAG, "Thumbnail rotated to ${thumbnailRotation.toInt()}°")
+        }
+
         binding.subtitleButton.setOnClickListener {
             val video = videoItem ?: return@setOnClickListener
             loadSubtitleTracks(video)
@@ -338,6 +357,30 @@ class VideoDetailActivity : AppCompatActivity() {
         binding.audioTrackButton.setOnClickListener {
             val video = videoItem ?: return@setOnClickListener
             loadAudioTracks(video)
+        }
+    }
+
+    private fun seekRelative(offsetMs: Long) {
+        val client = castSession?.remoteMediaClient
+        if (client?.hasMediaSession() == true) {
+            val current = client.approximateStreamPosition
+            val duration = client.streamDuration
+            val target = (current + offsetMs).coerceIn(0, duration.coerceAtLeast(0))
+            AppLogger.info(TAG, "Seek ${if (offsetMs > 0) "forward" else "rewind"}: ${formatDuration(current)} → ${formatDuration(target)}")
+            client.seek(MediaSeekOptions.Builder().setPosition(target).build())
+                .setResultCallback { result ->
+                    if (!result.status.isSuccess) {
+                        AppLogger.error(TAG, "Seek failed: ${result.status.statusMessage}")
+                    }
+                }
+        } else {
+            // No active cast — adjust pending seek position
+            val video = videoItem ?: return
+            val duration = video.duration
+            pendingSeekPositionMs = (pendingSeekPositionMs + offsetMs).coerceIn(0, duration.coerceAtLeast(0))
+            binding.videoSeekBar.progress = pendingSeekPositionMs.toInt()
+            binding.currentTimeText.text = formatDuration(pendingSeekPositionMs)
+            AppLogger.info(TAG, "Pending start position: ${formatDuration(pendingSeekPositionMs)}")
         }
     }
 
@@ -376,6 +419,7 @@ class VideoDetailActivity : AppCompatActivity() {
                     which == 0 -> {
                         selectedSubtitleFile = null
                         binding.subtitleStatus.visibility = View.GONE
+                        applyLiveSubtitleChange(null)
                     }
                     which == headerIndex -> {
                         // Header item tapped, ignore
@@ -422,6 +466,7 @@ class VideoDetailActivity : AppCompatActivity() {
                 binding.subtitleStatus.text = getString(R.string.subtitle_file_selected)
                 binding.subtitleStatus.visibility = View.VISIBLE
                 AppLogger.info(TAG, "Local subtitle loaded: ${subtitleFile.name}")
+                applyLiveSubtitleChange(subtitleFile)
             } else {
                 Toast.makeText(this@VideoDetailActivity, R.string.subtitle_file_error, Toast.LENGTH_SHORT).show()
             }
@@ -455,11 +500,79 @@ class VideoDetailActivity : AppCompatActivity() {
                 binding.subtitleStatus.text = getString(R.string.subtitle_selected, track.language)
                 binding.subtitleStatus.visibility = View.VISIBLE
                 AppLogger.info(TAG, "Subtitle extracted: ${subtitleFile.name}")
+                applyLiveSubtitleChange(subtitleFile)
             } else {
                 Toast.makeText(this@VideoDetailActivity, R.string.error_subtitle, Toast.LENGTH_SHORT).show()
                 AppLogger.error(TAG, "Failed to extract subtitle for track ${track.index}")
             }
         }
+    }
+
+    /**
+     * Applies a subtitle change while casting is active.
+     * If subtitleFile is null, disables subtitles. Otherwise, registers and activates the new track.
+     */
+    private fun applyLiveSubtitleChange(subtitleFile: File?) {
+        val client = castSession?.remoteMediaClient ?: return
+        if (!client.hasMediaSession()) return
+
+        if (subtitleFile == null) {
+            // Disable subtitles on the active cast
+            client.setActiveMediaTracks(longArrayOf())
+                .setResultCallback { result ->
+                    if (result.status.isSuccess) {
+                        AppLogger.info(TAG, "Live subtitle disabled")
+                    } else {
+                        AppLogger.error(TAG, "Failed to disable live subtitles: ${result.status.statusMessage}")
+                    }
+                }
+            Toast.makeText(this, R.string.subtitle_disabled_live, Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // Register subtitle file with server and reload media with the new subtitle track
+        val service = mediaServerService ?: return
+        val serverIp = getDeviceIpAddress()
+        val serverPort = service.getServerPort()
+        val subtitlePath = service.registerSubtitle(subtitleFile)
+        val subtitleUrl = "http://$serverIp:$serverPort$subtitlePath"
+
+        val currentMediaInfo = client.mediaInfo ?: return
+        val currentPosition = client.approximateStreamPosition
+
+        val newSubtitleTrack = MediaTrack.Builder(1, MediaTrack.TYPE_TEXT)
+            .setName("Subtitles")
+            .setSubtype(MediaTrack.SUBTYPE_SUBTITLES)
+            .setContentId(subtitleUrl)
+            .setContentType("text/vtt")
+            .setLanguage("en")
+            .build()
+
+        val metadata = currentMediaInfo.metadata ?: MediaMetadata(MediaMetadata.MEDIA_TYPE_MOVIE)
+
+        val newMediaInfo = MediaInfo.Builder(currentMediaInfo.contentId)
+            .setStreamType(currentMediaInfo.streamType)
+            .setContentType(currentMediaInfo.contentType)
+            .setMetadata(metadata)
+            .setMediaTracks(listOf(newSubtitleTrack))
+            .build()
+
+        val loadRequest = MediaLoadRequestData.Builder()
+            .setMediaInfo(newMediaInfo)
+            .setAutoplay(true)
+            .setCurrentTime(currentPosition)
+            .setActiveTrackIds(longArrayOf(1))
+            .build()
+
+        AppLogger.info(TAG, "Reloading media with new subtitle at position ${formatDuration(currentPosition)}")
+        client.load(loadRequest).setResultCallback { result ->
+            if (result.status.isSuccess) {
+                AppLogger.info(TAG, "Live subtitle switch: load SUCCESS")
+            } else {
+                AppLogger.error(TAG, "Live subtitle switch: load FAILED - ${result.status.statusMessage}")
+            }
+        }
+        Toast.makeText(this, R.string.subtitle_switched_live, Toast.LENGTH_SHORT).show()
     }
 
     private fun loadAudioTracks(video: VideoItem) {
@@ -499,6 +612,7 @@ class VideoDetailActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setTitle(R.string.audio_track_title)
             .setSingleChoiceItems(options.toTypedArray(), currentSelection) { dialog, which ->
+                val previousTrack = selectedAudioTrack
                 if (which == 0) {
                     selectedAudioTrack = null
                     binding.audioTrackStatus.visibility = View.GONE
@@ -512,8 +626,32 @@ class VideoDetailActivity : AppCompatActivity() {
                     AppLogger.info(TAG, "Audio track selected: ${track.codec} ${track.language} (index=${track.trackIndex})")
                 }
                 dialog.dismiss()
+                applyLiveAudioTrackChange(previousTrack)
             }
             .show()
+    }
+
+    /**
+     * If casting is active, reload the stream with the newly selected audio track.
+     * Saves current position and resumes from there.
+     */
+    private fun applyLiveAudioTrackChange(previousTrack: AudioTrackInfo?) {
+        val client = castSession?.remoteMediaClient ?: return
+        if (!client.hasMediaSession()) return
+        val video = videoItem ?: return
+
+        // Check if the track actually changed
+        val previousIndex = previousTrack?.trackIndex
+        val newIndex = selectedAudioTrack?.trackIndex
+        if (previousIndex == newIndex) return
+
+        // Save current position, then re-cast
+        pendingSeekPositionMs = client.approximateStreamPosition
+        AppLogger.info(TAG, "Audio track changed during cast, reloading from ${formatDuration(pendingSeekPositionMs)}")
+        Toast.makeText(this, R.string.audio_track_switch_reload, Toast.LENGTH_SHORT).show()
+
+        // Re-initiate the cast pipeline which will use the new selectedAudioTrack
+        checkCompatibilityAndCast(video)
     }
 
     private fun formatAudioTrackLabel(number: Int, track: AudioTrackInfo): String {
