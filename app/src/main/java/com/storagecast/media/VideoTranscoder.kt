@@ -30,6 +30,16 @@ class VideoTranscoder {
         private const val TIMEOUT_US = 10_000L
         private const val MAX_WIDTH = 1920
         private const val MAX_HEIGHT = 1080
+
+        /** Audio MIME types that MediaMuxer supports for MP4 passthrough (no re-encoding). */
+        private val REMUXABLE_AUDIO_MIMES = setOf(
+            "audio/mp4a-latm"  // AAC
+        )
+
+        /** Returns true if the audio track can be passthrough-muxed into MP4. */
+        fun canRemuxAudio(audioTrack: AudioTrackInfo): Boolean {
+            return audioTrack.mime in REMUXABLE_AUDIO_MIMES
+        }
     }
 
     interface ProgressListener {

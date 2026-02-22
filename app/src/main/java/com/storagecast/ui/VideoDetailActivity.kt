@@ -543,8 +543,14 @@ class VideoDetailActivity : AppCompatActivity() {
 
     private fun directStreamOrRemux(video: VideoItem) {
         val probe = cachedProbeResult
-        if (needsAudioRemux() && probe != null) {
-            startRemuxAndCast(video, probe)
+        val audioTrack = selectedAudioTrack
+        if (needsAudioRemux() && probe != null && audioTrack != null) {
+            if (VideoTranscoder.canRemuxAudio(audioTrack)) {
+                startRemuxAndCast(video, probe)
+            } else {
+                AppLogger.info(TAG, "Audio codec ${audioTrack.mime} cannot be remuxed, falling back to transcode")
+                startTranscoding(video, probe)
+            }
         } else {
             castVideo(video, selectedSubtitleFile)
         }
