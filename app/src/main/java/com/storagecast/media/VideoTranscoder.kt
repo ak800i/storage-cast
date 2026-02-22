@@ -485,36 +485,45 @@ class VideoTranscoder {
             val buffer = ByteBuffer.allocate(bufferSize)
             val bufferInfo = MediaCodec.BufferInfo()
             var lastReportedProgress = -1
+            val trackCount = trackIndexMap.size
+            var trackNumber = 0
 
             for ((inputTrackIndex, muxerTrackIndex) in trackIndexMap) {
+                val progressBase = (trackNumber * 100) / trackCount
+                val progressRange = 100 / trackCount
+                trackNumber++
+
                 val trackExtractor = MediaExtractor()
-                trackExtractor.setDataSource(inputPath)
-                trackExtractor.selectTrack(inputTrackIndex)
+                try {
+                    trackExtractor.setDataSource(inputPath)
+                    trackExtractor.selectTrack(inputTrackIndex)
 
-                while (!isCancelled) {
-                    buffer.clear()
-                    val sampleSize = trackExtractor.readSampleData(buffer, 0)
-                    if (sampleSize < 0) break
+                    while (!isCancelled) {
+                        buffer.clear()
+                        val sampleSize = trackExtractor.readSampleData(buffer, 0)
+                        if (sampleSize < 0) break
 
-                    bufferInfo.offset = 0
-                    bufferInfo.size = sampleSize
-                    bufferInfo.presentationTimeUs = trackExtractor.sampleTime
-                    bufferInfo.flags = trackExtractor.sampleFlags
+                        bufferInfo.offset = 0
+                        bufferInfo.size = sampleSize
+                        bufferInfo.presentationTimeUs = trackExtractor.sampleTime
+                        bufferInfo.flags = trackExtractor.sampleFlags
 
-                    muxer.writeSampleData(muxerTrackIndex, buffer, bufferInfo)
+                        muxer.writeSampleData(muxerTrackIndex, buffer, bufferInfo)
 
-                    if (durationUs > 0) {
-                        val progress = ((trackExtractor.sampleTime * 100) / durationUs).toInt().coerceIn(0, 100)
-                        if (progress != lastReportedProgress) {
-                            lastReportedProgress = progress
-                            listener.onProgress(progress)
+                        if (durationUs > 0) {
+                            val trackProgress = ((trackExtractor.sampleTime * progressRange) / durationUs).toInt()
+                            val progress = (progressBase + trackProgress).coerceIn(0, 100)
+                            if (progress != lastReportedProgress) {
+                                lastReportedProgress = progress
+                                listener.onProgress(progress)
+                            }
                         }
+
+                        trackExtractor.advance()
                     }
-
-                    trackExtractor.advance()
+                } finally {
+                    trackExtractor.release()
                 }
-
-                trackExtractor.release()
             }
 
             try { muxer.stop() } catch (e: IllegalStateException) {
