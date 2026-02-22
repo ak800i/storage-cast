@@ -548,7 +548,7 @@ class VideoDetailActivity : AppCompatActivity() {
             if (VideoTranscoder.canRemuxAudio(audioTrack)) {
                 startRemuxAndCast(video, probe)
             } else {
-                AppLogger.info(TAG, "Audio codec ${audioTrack.mime} cannot be remuxed, falling back to transcode")
+                AppLogger.info(TAG, "Audio codec ${audioTrack.mime} cannot be remuxed, falling back to transcoding")
                 startTranscoding(video, probe)
             }
         } else {
