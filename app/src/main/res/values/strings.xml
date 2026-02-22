@@ -41,6 +41,7 @@
     <string name="logs_cleared">Logs cleared</string>
     <string name="no_logs">No logs yet</string>
     <string name="cast_load_failed">Cast load failed: %s</string>
+    <string name="cast_session_failed">Cast connection failed (error %d)</string>
     <string name="server_not_ready">Media server not ready</string>
     <string name="probing_media">Analyzing media…</string>
     <string name="probe_failed">Failed to analyze media codecs</string>
