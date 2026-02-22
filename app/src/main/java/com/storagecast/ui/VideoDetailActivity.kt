@@ -285,15 +285,27 @@ class VideoDetailActivity : AppCompatActivity() {
 
     private fun setupControls() {
         binding.playButton.setOnClickListener {
+            val video = videoItem ?: return@setOnClickListener
             val session = castSession
             if (session == null || session.isConnected != true) {
                 Toast.makeText(this, R.string.not_connected, Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
-            AppLogger.info(TAG, "Play pressed")
-            session.remoteMediaClient?.play()
-            val video = videoItem
-            Toast.makeText(this, getString(R.string.video_playing, video?.title ?: ""), Toast.LENGTH_SHORT).show()
+            val playerState = session.remoteMediaClient?.mediaStatus?.playerState
+            if (isMediaActive(playerState)) {
+                AppLogger.info(TAG, "Play pressed – resuming")
+                session.remoteMediaClient?.play()
+                Toast.makeText(this, getString(R.string.video_playing, video.title), Toast.LENGTH_SHORT).show()
+            } else {
+                AppLogger.info(TAG, "Play pressed – casting video")
+                val service = mediaServerService
+                if (service == null || !service.isServerRunning()) {
+                    AppLogger.warn(TAG, "Play pressed but media server not ready (service=$service, running=${service?.isServerRunning()})")
+                    Toast.makeText(this, R.string.server_not_ready, Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                checkCompatibilityAndCast(video)
+            }
         }
 
         binding.pauseButton.setOnClickListener {
@@ -326,23 +338,6 @@ class VideoDetailActivity : AppCompatActivity() {
         binding.audioTrackButton.setOnClickListener {
             val video = videoItem ?: return@setOnClickListener
             loadAudioTracks(video)
-        }
-
-        binding.castAndPlayButton.setOnClickListener {
-            val video = videoItem ?: return@setOnClickListener
-            val session = castSession
-            if (session == null || session.isConnected != true) {
-                AppLogger.warn(TAG, "Cast video pressed but no session connected")
-                Toast.makeText(this, R.string.not_connected, Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
-            val service = mediaServerService
-            if (service == null || !service.isServerRunning()) {
-                AppLogger.warn(TAG, "Cast video pressed but media server not ready (service=$service, running=${service?.isServerRunning()})")
-                Toast.makeText(this, R.string.server_not_ready, Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
-            checkCompatibilityAndCast(video)
         }
     }
 
@@ -1314,11 +1309,14 @@ class VideoDetailActivity : AppCompatActivity() {
         })
     }
 
-    private fun updateProgressTracking(playerState: Int) {
-        val isActive = playerState == com.google.android.gms.cast.MediaStatus.PLAYER_STATE_PLAYING ||
+    private fun isMediaActive(playerState: Int?): Boolean {
+        return playerState == com.google.android.gms.cast.MediaStatus.PLAYER_STATE_PLAYING ||
                 playerState == com.google.android.gms.cast.MediaStatus.PLAYER_STATE_PAUSED ||
                 playerState == com.google.android.gms.cast.MediaStatus.PLAYER_STATE_BUFFERING
-        if (isActive) {
+    }
+
+    private fun updateProgressTracking(playerState: Int) {
+        if (isMediaActive(playerState)) {
             startProgressUpdates()
         } else {
             stopProgressUpdates()
