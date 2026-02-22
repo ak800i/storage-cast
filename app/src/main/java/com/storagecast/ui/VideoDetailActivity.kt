@@ -172,6 +172,15 @@ class VideoDetailActivity : AppCompatActivity() {
         }
     }
 
+    private fun handleCastSessionFailure(session: CastSession, error: Int) {
+        session.remoteMediaClient?.unregisterCallback(remoteMediaClientCallback)
+        castSession = null
+        updateCastStatus()
+        stopProgressUpdates()
+        resetSeekBarToLocal()
+        Toast.makeText(this, getString(R.string.cast_session_failed, error), Toast.LENGTH_LONG).show()
+    }
+
     private val sessionManagerListener = object : SessionManagerListener<CastSession> {
         override fun onSessionStarting(session: CastSession) {
             AppLogger.info(TAG, "Cast session starting")
@@ -184,6 +193,7 @@ class VideoDetailActivity : AppCompatActivity() {
         }
         override fun onSessionStartFailed(session: CastSession, error: Int) {
             AppLogger.error(TAG, "Cast session start failed: error=$error")
+            handleCastSessionFailure(session, error)
         }
         override fun onSessionEnding(session: CastSession) {
             AppLogger.info(TAG, "Cast session ending")
@@ -211,6 +221,7 @@ class VideoDetailActivity : AppCompatActivity() {
         }
         override fun onSessionResumeFailed(session: CastSession, error: Int) {
             AppLogger.error(TAG, "Cast session resume failed: error=$error")
+            handleCastSessionFailure(session, error)
         }
         override fun onSessionSuspended(session: CastSession, reason: Int) {
             AppLogger.info(TAG, "Cast session suspended: reason=$reason")
