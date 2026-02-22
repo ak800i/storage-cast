@@ -391,7 +391,10 @@ class MediaProber {
         val codec = CODEC_NAMES[mime] ?: codecId
 
         return AudioTrackInfo(
-            trackIndex = trackNumber - 1, // Convert to 0-based (MKV track numbers are 1-based)
+            // trackIndex = mkvTrackNumber - 1 to match the convention in
+            // VideoDetailActivity.startStreamingMkvFilterAndCast which does trackIndex + 1
+            // to recover the MKV track number for MkvTrackFilter.
+            trackIndex = trackNumber - 1,
             codec = codec,
             mime = mime,
             sampleRate = sampleRate,
