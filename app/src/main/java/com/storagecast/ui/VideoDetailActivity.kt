@@ -548,8 +548,8 @@ class VideoDetailActivity : AppCompatActivity() {
             if (VideoTranscoder.canRemuxAudio(audioTrack)) {
                 startRemuxAndCast(video, probe)
             } else {
-                AppLogger.info(TAG, "Audio codec ${audioTrack.mime} cannot be remuxed, falling back to transcoding")
-                startTranscoding(video, probe)
+                AppLogger.info(TAG, "Audio codec ${audioTrack.mime} cannot be remuxed, using video passthrough with audio transcode")
+                startRemuxWithAudioTranscodeAndCast(video, probe)
             }
         } else {
             castVideo(video, selectedSubtitleFile)
@@ -724,6 +724,71 @@ class VideoDetailActivity : AppCompatActivity() {
                             runOnUiThread {
                                 progressDialog.dismiss()
                                 AppLogger.error(TAG, "Remux error: $error")
+                                Toast.makeText(
+                                    this@VideoDetailActivity,
+                                    getString(R.string.remux_failed, error),
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        }
+                    }
+                )
+            }
+        }
+    }
+
+    private fun startRemuxWithAudioTranscodeAndCast(video: VideoItem, probeResult: MediaProbeResult) {
+        val audioTrack = selectedAudioTrack ?: return
+        val transcoder = VideoTranscoder()
+        videoTranscoder = transcoder
+
+        AppLogger.info(TAG, "Remuxing with audio transcode: ${audioTrack.codec} ${audioTrack.language} (index=${audioTrack.trackIndex})")
+
+        val progressDialog = AlertDialog.Builder(this)
+            .setTitle(R.string.remuxing_title)
+            .setMessage(getString(R.string.remuxing_progress, 0))
+            .setNegativeButton(R.string.cancel) { _, _ ->
+                transcoder.cancel()
+            }
+            .setCancelable(false)
+            .show()
+
+        activityScope.launch {
+            withContext(Dispatchers.IO) {
+                val outputDir = File(cacheDir, "remux")
+                if (!outputDir.exists() && !outputDir.mkdirs()) {
+                    runOnUiThread {
+                        progressDialog.dismiss()
+                        Toast.makeText(
+                            this@VideoDetailActivity,
+                            getString(R.string.remux_failed, "Cannot create output directory"),
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                    return@withContext
+                }
+
+                transcoder.remuxWithAudioTranscode(video.path, outputDir, probeResult, audioTrack,
+                    object : VideoTranscoder.ProgressListener {
+                        override fun onProgress(percent: Int) {
+                            runOnUiThread {
+                                progressDialog.setMessage(getString(R.string.remuxing_progress, percent))
+                            }
+                        }
+
+                        override fun onCompleted(outputFile: File) {
+                            runOnUiThread {
+                                progressDialog.dismiss()
+                                transcodedFile = outputFile
+                                AppLogger.info(TAG, "Remux with audio transcode complete: ${outputFile.name}, ${outputFile.length()} bytes")
+                                castTranscodedVideo(video, outputFile)
+                            }
+                        }
+
+                        override fun onError(error: String) {
+                            runOnUiThread {
+                                progressDialog.dismiss()
+                                AppLogger.error(TAG, "Remux with audio transcode error: $error")
                                 Toast.makeText(
                                     this@VideoDetailActivity,
                                     getString(R.string.remux_failed, error),

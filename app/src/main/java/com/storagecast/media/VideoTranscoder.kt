@@ -560,6 +560,110 @@ class VideoTranscoder {
         }
     }
 
+    /**
+     * Remuxes a media file with video passthrough and audio transcoding.
+     * The video track is copied as-is (no re-encoding) while the selected audio track
+     * is decoded and re-encoded to AAC. Much faster than full transcode since
+     * video passthrough is essentially just an I/O copy.
+     */
+    fun remuxWithAudioTranscode(
+        inputPath: String,
+        outputDir: File,
+        probeResult: MediaProbeResult,
+        selectedAudioTrack: AudioTrackInfo,
+        listener: ProgressListener
+    ) {
+        isCancelled = false
+        val outputFile = File(outputDir, "remux_${System.currentTimeMillis()}.mp4")
+
+        try {
+            val videoTrack = probeResult.primaryVideo
+            val durationUs = if (probeResult.durationMs > 0) probeResult.durationMs * 1000 else 0L
+
+            val muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            var muxerStarted = false
+
+            try {
+                // Phase 1: Video passthrough (fast copy, no re-encoding)
+                if (videoTrack != null) {
+                    AppLogger.info(TAG, "Video passthrough: ${videoTrack.codec} ${videoTrack.width}x${videoTrack.height}")
+                    val extractor = MediaExtractor()
+                    extractor.setDataSource(inputPath)
+
+                    val videoFormat = extractor.getTrackFormat(videoTrack.trackIndex)
+                    val muxerVideoTrack = muxer.addTrack(videoFormat)
+                    muxer.start()
+                    muxerStarted = true
+
+                    extractor.selectTrack(videoTrack.trackIndex)
+
+                    val buffer = ByteBuffer.allocate(1024 * 1024)
+                    val bufferInfo = MediaCodec.BufferInfo()
+                    var lastReportedProgress = -1
+
+                    while (!isCancelled) {
+                        buffer.clear()
+                        val sampleSize = extractor.readSampleData(buffer, 0)
+                        if (sampleSize < 0) break
+
+                        bufferInfo.offset = 0
+                        bufferInfo.size = sampleSize
+                        bufferInfo.presentationTimeUs = extractor.sampleTime
+                        bufferInfo.flags = extractor.sampleFlags
+
+                        muxer.writeSampleData(muxerVideoTrack, buffer, bufferInfo)
+
+                        if (durationUs > 0) {
+                            val progress = ((extractor.sampleTime * 50) / durationUs).toInt().coerceIn(0, 50)
+                            if (progress != lastReportedProgress) {
+                                lastReportedProgress = progress
+                                listener.onProgress(progress)
+                            }
+                        }
+
+                        extractor.advance()
+                    }
+
+                    extractor.release()
+                }
+
+                // Phase 2: Audio transcode (decode original codec → encode to AAC)
+                if (!isCancelled) {
+                    AppLogger.info(TAG, "Transcoding audio: ${selectedAudioTrack.codec} → AAC")
+                    listener.onProgress(50)
+                    val audioExtractor = MediaExtractor()
+                    audioExtractor.setDataSource(inputPath)
+
+                    transcodeAudioTrack(audioExtractor, muxer, selectedAudioTrack, muxerStarted)
+
+                    audioExtractor.release()
+                }
+            } finally {
+                try { muxer.stop() } catch (e: IllegalStateException) {
+                    AppLogger.warn(TAG, "Muxer stop failed: ${e.message}")
+                }
+                try { muxer.release() } catch (e: Exception) {
+                    AppLogger.warn(TAG, "Muxer release failed: ${e.message}")
+                }
+            }
+
+            if (isCancelled) {
+                outputFile.delete()
+                AppLogger.info(TAG, "Remux with audio transcode cancelled")
+                listener.onError("Cancelled")
+                return
+            }
+
+            AppLogger.info(TAG, "Remux with audio transcode completed: ${outputFile.name} (${outputFile.length()} bytes)")
+            listener.onCompleted(outputFile)
+
+        } catch (e: Exception) {
+            AppLogger.error(TAG, "Remux with audio transcode failed: ${e.message}")
+            outputFile.delete()
+            listener.onError("Remuxing failed: ${e.message}")
+        }
+    }
+
     private fun selectHardwareEncoder(mime: String): String? {
         val codecList = MediaCodecList(MediaCodecList.REGULAR_CODECS)
         return codecList.codecInfos
