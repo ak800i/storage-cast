@@ -485,7 +485,7 @@ class MkvTrackFilter {
             val skipped = input.skipBytes(minOf(remaining, Int.MAX_VALUE.toLong()).toInt()).toLong()
             if (skipped <= 0) {
                 // skipBytes may return 0, fall back to read
-                if (input.read() < 0) break
+                if (input.read() < 0) throw IOException("Unexpected EOF while skipping $count bytes ($remaining remaining)")
                 remaining--
             } else {
                 remaining -= skipped

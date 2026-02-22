@@ -262,7 +262,7 @@ class MediaServerService : Service() {
         private fun serveStream(entry: StreamEntry): Response {
             return try {
                 val stream = entry.factory()
-                val monitoredStream = MonitoredInputStream(stream, "streaming-remux")
+                val monitoredStream = MonitoredInputStream(stream, "streaming-source")
                 AppLogger.info("MediaServer", "Serving streaming source, mimeType=${entry.mimeType}")
                 val response = newChunkedResponse(Response.Status.OK, entry.mimeType, monitoredStream)
                 addCorsHeaders(response)

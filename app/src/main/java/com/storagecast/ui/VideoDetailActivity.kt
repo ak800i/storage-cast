@@ -581,9 +581,15 @@ class VideoDetailActivity : AppCompatActivity() {
         }
 
         // MKV track numbers are 1-based (MediaExtractor index + 1)
-        val videoTrackNum = probe.primaryVideo?.let { it.trackIndex + 1 }
+        val videoTrack = probe.primaryVideo
+        if (videoTrack == null) {
+            AppLogger.warn(TAG, "No video track found, falling back to direct cast")
+            castVideo(video, selectedSubtitleFile)
+            return
+        }
+        val videoTrackNum = videoTrack.trackIndex + 1
         val audioTrackNum = audioTrack.trackIndex + 1
-        val keepTrackNumbers = setOfNotNull(videoTrackNum, audioTrackNum)
+        val keepTrackNumbers = setOf(videoTrackNum, audioTrackNum)
 
         AppLogger.info(TAG, "Streaming MKV filter: keeping track numbers $keepTrackNumbers " +
             "(video=${probe.primaryVideo?.codec}, audio=${audioTrack.codec} ${audioTrack.language})")
@@ -637,7 +643,7 @@ class VideoDetailActivity : AppCompatActivity() {
         }
 
         val mediaInfo = MediaInfo.Builder(videoUrl)
-            .setStreamType(MediaInfo.STREAM_TYPE_LIVE)
+            .setStreamType(MediaInfo.STREAM_TYPE_BUFFERED)
             .setContentType("video/x-matroska")
             .setMetadata(metadata)
             .apply {
