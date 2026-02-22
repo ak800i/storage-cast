@@ -5,7 +5,7 @@
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#FF121212"
+    android:background="@color/background_dark"
     tools:context=".ui.VideoDetailActivity">
 
     <com.google.android.material.progressindicator.LinearProgressIndicator
@@ -42,7 +42,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="220dp"
                     android:scaleType="centerCrop"
-                    android:background="#FF1E1E1E"
+                    android:background="@color/surface_dark"
                     android:contentDescription="@string/video_thumbnail_desc" />
 
                 <ImageButton
@@ -73,7 +73,7 @@
                     android:layout_height="wrap_content"
                     android:textSize="18sp"
                     android:textStyle="bold"
-                    android:textColor="@android:color/white"
+                    android:textColor="@color/text_primary_dark"
                     android:maxLines="2"
                     android:ellipsize="end" />
 
@@ -83,7 +83,7 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="4dp"
                     android:textSize="13sp"
-                    android:textColor="#B3FFFFFF" />
+                    android:textColor="@color/text_secondary_dark" />
 
                 <TextView
                     android:id="@+id/videoPath"
@@ -91,7 +91,7 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="2dp"
                     android:textSize="11sp"
-                    android:textColor="#80FFFFFF"
+                    android:textColor="@color/text_tertiary_dark"
                     android:maxLines="1"
                     android:ellipsize="middle" />
             </LinearLayout>
@@ -127,7 +127,7 @@
                         android:layout_height="wrap_content"
                         android:text="0:00"
                         android:textSize="12sp"
-                        android:textColor="#B3FFFFFF" />
+                        android:textColor="@color/text_secondary_dark" />
 
                     <View
                         android:layout_width="0dp"
@@ -140,7 +140,7 @@
                         android:layout_height="wrap_content"
                         android:text="0:00"
                         android:textSize="12sp"
-                        android:textColor="#B3FFFFFF" />
+                        android:textColor="@color/text_secondary_dark" />
                 </LinearLayout>
             </LinearLayout>
 
@@ -209,7 +209,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="1dp"
                 android:layout_marginHorizontal="16dp"
-                android:background="#33FFFFFF" />
+                android:background="@color/divider_dark" />
 
             <!-- Track selection buttons -->
             <LinearLayout
@@ -230,9 +230,9 @@
                     app:icon="@drawable/ic_subtitles"
                     app:iconSize="18dp"
                     style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-                    app:strokeColor="#80FFFFFF"
-                    android:textColor="#DDFFFFFF"
-                    app:iconTint="#DDFFFFFF" />
+                    app:strokeColor="@color/text_tertiary_dark"
+                    android:textColor="@color/text_primary_dark"
+                    app:iconTint="@color/text_primary_dark" />
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/audioTrackButton"
@@ -245,9 +245,9 @@
                     app:icon="@drawable/ic_audiotrack"
                     app:iconSize="18dp"
                     style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-                    app:strokeColor="#80FFFFFF"
-                    android:textColor="#DDFFFFFF"
-                    app:iconTint="#DDFFFFFF" />
+                    app:strokeColor="@color/text_tertiary_dark"
+                    android:textColor="@color/text_primary_dark"
+                    app:iconTint="@color/text_primary_dark" />
             </LinearLayout>
 
             <!-- Status texts -->
