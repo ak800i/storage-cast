@@ -17,14 +17,16 @@ class CastCompatibility {
             "video/av01"       // AV1
         )
 
+        // AC-3 and E-AC-3 are excluded because Cast devices only do passthrough
+        // over HDMI — if the TV/receiver cannot decode Dolby Digital, there is
+        // no audio.  Marking them unsupported lets the user choose to transcode
+        // to AAC (always works) or direct-stream (works only with capable sinks).
         private val SUPPORTED_AUDIO_MIMES = setOf(
             "audio/mp4a-latm", // AAC
             "audio/mpeg",      // MP3
             "audio/vorbis",    // Vorbis
             "audio/opus",      // Opus
-            "audio/flac",      // FLAC
-            "audio/ac3",       // AC-3 (Dolby Digital)
-            "audio/eac3"       // E-AC-3 (Dolby Digital Plus)
+            "audio/flac"       // FLAC
         )
 
         private val SUPPORTED_CONTAINERS = setOf(
