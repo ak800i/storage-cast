@@ -637,7 +637,7 @@ class VideoDetailActivity : AppCompatActivity() {
         }
 
         val mediaInfo = MediaInfo.Builder(videoUrl)
-            .setStreamType(MediaInfo.STREAM_TYPE_BUFFERED)
+            .setStreamType(MediaInfo.STREAM_TYPE_LIVE)
             .setContentType("video/x-matroska")
             .setMetadata(metadata)
             .apply {
@@ -739,7 +739,7 @@ class VideoDetailActivity : AppCompatActivity() {
         }
 
         val mediaInfo = MediaInfo.Builder(videoUrl)
-            .setStreamType(MediaInfo.STREAM_TYPE_BUFFERED)
+            .setStreamType(MediaInfo.STREAM_TYPE_LIVE)
             .setContentType("video/x-matroska")
             .setMetadata(metadata)
             .apply {
