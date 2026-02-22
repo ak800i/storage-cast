@@ -265,6 +265,7 @@ class MediaServerService : Service() {
                 val monitoredStream = MonitoredInputStream(stream, "streaming-source")
                 AppLogger.info("MediaServer", "Serving streaming source, mimeType=${entry.mimeType}")
                 val response = newChunkedResponse(Response.Status.OK, entry.mimeType, monitoredStream)
+                response.addHeader("Accept-Ranges", "none")
                 addCorsHeaders(response)
                 response
             } catch (e: Exception) {
