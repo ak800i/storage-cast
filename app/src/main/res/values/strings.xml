@@ -52,4 +52,7 @@
     <string name="audio_track_default">Default (first track)</string>
     <string name="audio_track_selected">Audio: %s</string>
     <string name="audio_no_tracks">No audio tracks found</string>
+    <string name="remuxing_title">Preparing audio track…</string>
+    <string name="remuxing_progress">Preparing: %d%%</string>
+    <string name="remux_failed">Audio track preparation failed: %s</string>
 </resources>

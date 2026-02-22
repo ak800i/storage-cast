@@ -443,6 +443,104 @@ class VideoTranscoder {
         return muxerTrackIndex
     }
 
+    /**
+     * Remuxes a media file to include only the video track and the selected audio track,
+     * without re-encoding. This is used when the user selects a non-default audio track
+     * for direct streaming.
+     */
+    fun remux(
+        inputPath: String,
+        outputDir: File,
+        probeResult: MediaProbeResult,
+        selectedAudioTrack: AudioTrackInfo,
+        listener: ProgressListener
+    ) {
+        isCancelled = false
+        val outputFile = File(outputDir, "remux_${System.currentTimeMillis()}.mp4")
+
+        try {
+            val muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            val trackIndexMap = mutableMapOf<Int, Int>()
+
+            val extractor = MediaExtractor()
+            extractor.setDataSource(inputPath)
+
+            // Add video track format
+            val videoTrack = probeResult.primaryVideo
+            if (videoTrack != null) {
+                val format = extractor.getTrackFormat(videoTrack.trackIndex)
+                trackIndexMap[videoTrack.trackIndex] = muxer.addTrack(format)
+            }
+
+            // Add selected audio track format
+            val audioFormat = extractor.getTrackFormat(selectedAudioTrack.trackIndex)
+            trackIndexMap[selectedAudioTrack.trackIndex] = muxer.addTrack(audioFormat)
+
+            extractor.release()
+
+            muxer.start()
+
+            val durationUs = if (probeResult.durationMs > 0) probeResult.durationMs * 1000 else 0L
+            val bufferSize = 1024 * 1024
+            val buffer = ByteBuffer.allocate(bufferSize)
+            val bufferInfo = MediaCodec.BufferInfo()
+            var lastReportedProgress = -1
+
+            for ((inputTrackIndex, muxerTrackIndex) in trackIndexMap) {
+                val trackExtractor = MediaExtractor()
+                trackExtractor.setDataSource(inputPath)
+                trackExtractor.selectTrack(inputTrackIndex)
+
+                while (!isCancelled) {
+                    buffer.clear()
+                    val sampleSize = trackExtractor.readSampleData(buffer, 0)
+                    if (sampleSize < 0) break
+
+                    bufferInfo.offset = 0
+                    bufferInfo.size = sampleSize
+                    bufferInfo.presentationTimeUs = trackExtractor.sampleTime
+                    bufferInfo.flags = trackExtractor.sampleFlags
+
+                    muxer.writeSampleData(muxerTrackIndex, buffer, bufferInfo)
+
+                    if (durationUs > 0) {
+                        val progress = ((trackExtractor.sampleTime * 100) / durationUs).toInt().coerceIn(0, 100)
+                        if (progress != lastReportedProgress) {
+                            lastReportedProgress = progress
+                            listener.onProgress(progress)
+                        }
+                    }
+
+                    trackExtractor.advance()
+                }
+
+                trackExtractor.release()
+            }
+
+            try { muxer.stop() } catch (e: IllegalStateException) {
+                AppLogger.warn(TAG, "Muxer stop failed: ${e.message}")
+            }
+            try { muxer.release() } catch (e: Exception) {
+                AppLogger.warn(TAG, "Muxer release failed: ${e.message}")
+            }
+
+            if (isCancelled) {
+                outputFile.delete()
+                AppLogger.info(TAG, "Remux cancelled")
+                listener.onError("Remuxing cancelled")
+                return
+            }
+
+            AppLogger.info(TAG, "Remux completed: ${outputFile.name} (${outputFile.length()} bytes)")
+            listener.onCompleted(outputFile)
+
+        } catch (e: Exception) {
+            AppLogger.error(TAG, "Remux failed: ${e.message}")
+            outputFile.delete()
+            listener.onError("Remuxing failed: ${e.message}")
+        }
+    }
+
     private fun selectHardwareEncoder(mime: String): String? {
         val codecList = MediaCodecList(MediaCodecList.REGULAR_CODECS)
         return codecList.codecInfos

@@ -534,6 +534,22 @@ class VideoDetailActivity : AppCompatActivity() {
         return parts.joinToString(" · ")
     }
 
+    private fun needsAudioRemux(): Boolean {
+        val selected = selectedAudioTrack ?: return false
+        val probe = cachedProbeResult ?: return false
+        val primary = probe.primaryAudio ?: return false
+        return selected.trackIndex != primary.trackIndex
+    }
+
+    private fun directStreamOrRemux(video: VideoItem) {
+        val probe = cachedProbeResult
+        if (needsAudioRemux() && probe != null) {
+            startRemuxAndCast(video, probe)
+        } else {
+            castVideo(video, selectedSubtitleFile)
+        }
+    }
+
     private fun checkCompatibilityAndCast(video: VideoItem) {
         binding.progressBar.visibility = View.VISIBLE
         activityScope.launch {
@@ -553,7 +569,7 @@ class VideoDetailActivity : AppCompatActivity() {
             val result = castCompatibility.checkCompatibility(probeResult)
             if (result.isFullyCompatible) {
                 AppLogger.info(TAG, "All codecs compatible, casting directly")
-                castVideo(video, selectedSubtitleFile)
+                directStreamOrRemux(video)
             } else {
                 showCodecCompatibilityDialog(video, probeResult, result)
             }
@@ -578,7 +594,7 @@ class VideoDetailActivity : AppCompatActivity() {
             .setView(dialogView)
             .setPositiveButton(R.string.direct_stream) { _, _ ->
                 AppLogger.info(TAG, "User chose direct stream despite incompatible codecs")
-                castVideo(video, selectedSubtitleFile)
+                directStreamOrRemux(video)
             }
             .setNegativeButton(R.string.transcode) { _, _ ->
                 AppLogger.info(TAG, "User chose to transcode")
@@ -645,6 +661,71 @@ class VideoDetailActivity : AppCompatActivity() {
                         }
                     },
                     selectedAudioTrack = selectedAudioTrack
+                )
+            }
+        }
+    }
+
+    private fun startRemuxAndCast(video: VideoItem, probeResult: MediaProbeResult) {
+        val audioTrack = selectedAudioTrack ?: return
+        val transcoder = VideoTranscoder()
+        videoTranscoder = transcoder
+
+        AppLogger.info(TAG, "Remuxing to select audio track: ${audioTrack.codec} ${audioTrack.language} (index=${audioTrack.trackIndex})")
+
+        val progressDialog = AlertDialog.Builder(this)
+            .setTitle(R.string.remuxing_title)
+            .setMessage(getString(R.string.remuxing_progress, 0))
+            .setNegativeButton(R.string.cancel) { _, _ ->
+                transcoder.cancel()
+            }
+            .setCancelable(false)
+            .show()
+
+        activityScope.launch {
+            withContext(Dispatchers.IO) {
+                val outputDir = File(cacheDir, "remux")
+                if (!outputDir.exists() && !outputDir.mkdirs()) {
+                    runOnUiThread {
+                        progressDialog.dismiss()
+                        Toast.makeText(
+                            this@VideoDetailActivity,
+                            getString(R.string.remux_failed, "Cannot create output directory"),
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                    return@withContext
+                }
+
+                transcoder.remux(video.path, outputDir, probeResult, audioTrack,
+                    object : VideoTranscoder.ProgressListener {
+                        override fun onProgress(percent: Int) {
+                            runOnUiThread {
+                                progressDialog.setMessage(getString(R.string.remuxing_progress, percent))
+                            }
+                        }
+
+                        override fun onCompleted(outputFile: File) {
+                            runOnUiThread {
+                                progressDialog.dismiss()
+                                transcodedFile = outputFile
+                                AppLogger.info(TAG, "Remux complete: ${outputFile.name}, ${outputFile.length()} bytes")
+                                castTranscodedVideo(video, outputFile)
+                            }
+                        }
+
+                        override fun onError(error: String) {
+                            runOnUiThread {
+                                progressDialog.dismiss()
+                                AppLogger.error(TAG, "Remux error: $error")
+                                Toast.makeText(
+                                    this@VideoDetailActivity,
+                                    getString(R.string.remux_failed, error),
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        }
+                    }
                 )
             }
         }
