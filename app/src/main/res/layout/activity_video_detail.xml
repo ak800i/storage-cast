@@ -112,14 +112,6 @@
                 android:text="@string/select_audio_track"
                 style="@style/Widget.MaterialComponents.Button.OutlinedButton" />
 
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/castAndPlayButton"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="@string/cast_video"
-                style="@style/Widget.MaterialComponents.Button.OutlinedButton" />
-
             <LinearLayout
                 android:id="@+id/seekBarContainer"
                 android:layout_width="match_parent"
