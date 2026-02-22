@@ -102,6 +102,18 @@ class MediaServerService : Service() {
         return "/media/$id"
     }
 
+    /**
+     * Registers a streaming source that produces data on-demand via a factory lambda.
+     * Each HTTP request invokes the factory to create a fresh InputStream.
+     * The response uses chunked transfer encoding (no Content-Length).
+     */
+    fun registerStreamingSource(label: String, mimeType: String, factory: () -> InputStream): String {
+        val id = "stream_${label.hashCode().toUInt()}_${System.currentTimeMillis()}"
+        server?.registerStreamFactory(id, mimeType, factory)
+        AppLogger.info("MediaServer", "Register streaming source: label=$label, id=$id, mimeType=$mimeType")
+        return "/media/$id"
+    }
+
     fun getServerPort(): Int = server?.listeningPort ?: 8080
 
     override fun onDestroy() {
@@ -113,6 +125,11 @@ class MediaServerService : Service() {
         val file: File,
         val mimeType: String,
         val uri: Uri?
+    )
+
+    private data class StreamEntry(
+        val mimeType: String,
+        val factory: () -> InputStream
     )
 
     /**
@@ -173,9 +190,14 @@ class MediaServerService : Service() {
 
     private class MediaServer(port: Int, private val resolver: ContentResolver) : NanoHTTPD(port) {
         private val fileMap = mutableMapOf<String, FileEntry>()
+        private val streamMap = mutableMapOf<String, StreamEntry>()
 
         fun registerFile(id: String, file: File, mimeType: String, uri: Uri?) {
             fileMap[id] = FileEntry(file, mimeType, uri)
+        }
+
+        fun registerStreamFactory(id: String, mimeType: String, factory: () -> InputStream) {
+            streamMap[id] = StreamEntry(mimeType, factory)
         }
 
         private fun addCorsHeaders(response: Response) {
@@ -199,9 +221,16 @@ class MediaServerService : Service() {
 
             if (uri.startsWith("/media/")) {
                 val id = uri.removePrefix("/media/")
+
+                // Check for streaming source first
+                val streamEntry = streamMap[id]
+                if (streamEntry != null) {
+                    return serveStream(streamEntry)
+                }
+
                 val entry = fileMap[id]
                 if (entry == null) {
-                    AppLogger.warn("MediaServer", "404 Not found: id=$id, registered ids=${fileMap.keys}")
+                    AppLogger.warn("MediaServer", "404 Not found: id=$id, registered ids=${fileMap.keys + streamMap.keys}")
                     return newFixedLengthResponse(
                         Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Not found"
                     )
@@ -228,6 +257,22 @@ class MediaServerService : Service() {
             return newFixedLengthResponse(
                 Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Not found"
             )
+        }
+
+        private fun serveStream(entry: StreamEntry): Response {
+            return try {
+                val stream = entry.factory()
+                val monitoredStream = MonitoredInputStream(stream, "streaming-source")
+                AppLogger.info("MediaServer", "Serving streaming source, mimeType=${entry.mimeType}")
+                val response = newChunkedResponse(Response.Status.OK, entry.mimeType, monitoredStream)
+                addCorsHeaders(response)
+                response
+            } catch (e: Exception) {
+                AppLogger.error("MediaServer", "Error creating stream: ${e.message}")
+                newFixedLengthResponse(
+                    Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "Error: ${e.message}"
+                )
+            }
         }
 
         private fun openFileStream(entry: FileEntry): InputStream {

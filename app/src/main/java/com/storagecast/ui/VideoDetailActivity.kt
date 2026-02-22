@@ -39,6 +39,7 @@ import com.storagecast.media.AudioTrackInfo
 import com.storagecast.media.CastCompatibility
 import com.storagecast.media.MediaProbeResult
 import com.storagecast.media.MediaProber
+import com.storagecast.media.MkvTrackFilter
 import com.storagecast.media.VideoTranscoder
 import com.storagecast.model.SubtitleTrack
 import com.storagecast.model.VideoItem
@@ -534,6 +535,159 @@ class VideoDetailActivity : AppCompatActivity() {
         return parts.joinToString(" · ")
     }
 
+    private fun needsAudioRemux(): Boolean {
+        val selected = selectedAudioTrack ?: return false
+        val probe = cachedProbeResult ?: return false
+        val primary = probe.primaryAudio ?: return false
+        return selected.trackIndex != primary.trackIndex
+    }
+
+    private fun directStreamOrRemux(video: VideoItem) {
+        val probe = cachedProbeResult
+        val audioTrack = selectedAudioTrack
+        if (needsAudioRemux() && probe != null && audioTrack != null) {
+            if (isMkvContainer(probe)) {
+                AppLogger.info(TAG, "Using streaming MKV track filter for audio selection")
+                startStreamingMkvFilterAndCast(video, probe, audioTrack)
+            } else if (VideoTranscoder.canRemuxAudio(audioTrack)) {
+                startRemuxAndCast(video, probe)
+            } else {
+                AppLogger.info(TAG, "Audio codec ${audioTrack.mime} cannot be remuxed, using video passthrough with audio transcode")
+                startRemuxWithAudioTranscodeAndCast(video, probe)
+            }
+        } else {
+            castVideo(video, selectedSubtitleFile)
+        }
+    }
+
+    private fun isMkvContainer(probe: MediaProbeResult): Boolean {
+        return probe.containerFormat.contains("MKV", ignoreCase = true) ||
+               probe.containerFormat.contains("Matroska", ignoreCase = true) ||
+               probe.containerFormat.contains("WebM", ignoreCase = true)
+    }
+
+    private fun startStreamingMkvFilterAndCast(video: VideoItem, probe: MediaProbeResult, audioTrack: AudioTrackInfo) {
+        val service = mediaServerService
+        if (service == null) {
+            AppLogger.error(TAG, "startStreamingMkvFilterAndCast: media server service is null")
+            Toast.makeText(this, R.string.server_not_ready, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val session = castSession
+        if (session == null) {
+            AppLogger.error(TAG, "startStreamingMkvFilterAndCast: cast session is null")
+            Toast.makeText(this, R.string.not_connected, Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // MKV track numbers are 1-based (MediaExtractor index + 1)
+        val videoTrack = probe.primaryVideo
+        if (videoTrack == null) {
+            AppLogger.warn(TAG, "No video track found, falling back to direct cast")
+            castVideo(video, selectedSubtitleFile)
+            return
+        }
+        val videoTrackNum = videoTrack.trackIndex + 1
+        val audioTrackNum = audioTrack.trackIndex + 1
+        val keepTrackNumbers = setOf(videoTrackNum, audioTrackNum)
+
+        AppLogger.info(TAG, "Streaming MKV filter: keeping track numbers $keepTrackNumbers " +
+            "(video=${probe.primaryVideo?.codec}, audio=${audioTrack.codec} ${audioTrack.language})")
+
+        val filter = MkvTrackFilter()
+        val videoPath = video.path
+        val videoUri = video.uri
+
+        val streamPath = service.registerStreamingSource(video.path, "video/x-matroska") {
+            val sourceStream = if (videoUri != null) {
+                try {
+                    val pfd = contentResolver.openFileDescriptor(videoUri, "r")
+                    if (pfd != null) {
+                        android.os.ParcelFileDescriptor.AutoCloseInputStream(pfd)
+                    } else {
+                        java.io.FileInputStream(videoPath)
+                    }
+                } catch (e: Exception) {
+                    AppLogger.warn(TAG, "ContentResolver failed, falling back to FileInputStream: ${e.message}")
+                    java.io.FileInputStream(videoPath)
+                }
+            } else {
+                java.io.FileInputStream(videoPath)
+            }
+            filter.createFilteredStream(sourceStream, keepTrackNumbers)
+        }
+
+        val serverIp = getDeviceIpAddress()
+        val serverPort = service.getServerPort()
+        val videoUrl = "http://$serverIp:$serverPort$streamPath"
+
+        AppLogger.info(TAG, "Streaming MKV cast: url=$videoUrl")
+
+        val metadata = MediaMetadata(MediaMetadata.MEDIA_TYPE_MOVIE).apply {
+            putString(MediaMetadata.KEY_TITLE, video.title)
+        }
+
+        val mediaTracks = mutableListOf<MediaTrack>()
+
+        if (selectedSubtitleFile != null) {
+            val subtitlePath = service.registerSubtitle(selectedSubtitleFile!!)
+            val subtitleUrl = "http://$serverIp:$serverPort$subtitlePath"
+            val subtitleTrack = MediaTrack.Builder(1, MediaTrack.TYPE_TEXT)
+                .setName("Subtitles")
+                .setSubtype(MediaTrack.SUBTYPE_SUBTITLES)
+                .setContentId(subtitleUrl)
+                .setContentType("text/vtt")
+                .setLanguage("en")
+                .build()
+            mediaTracks.add(subtitleTrack)
+        }
+
+        val mediaInfo = MediaInfo.Builder(videoUrl)
+            .setStreamType(MediaInfo.STREAM_TYPE_BUFFERED)
+            .setContentType("video/x-matroska")
+            .setMetadata(metadata)
+            .apply {
+                if (mediaTracks.isNotEmpty()) {
+                    setMediaTracks(mediaTracks)
+                }
+            }
+            .build()
+
+        val loadRequest = MediaLoadRequestData.Builder()
+            .setMediaInfo(mediaInfo)
+            .setAutoplay(true)
+            .setCurrentTime(pendingSeekPositionMs)
+            .apply {
+                if (mediaTracks.isNotEmpty()) {
+                    setActiveTrackIds(longArrayOf(1))
+                }
+            }
+            .build()
+
+        AppLogger.info(TAG, "Streaming MKV: sending load request to cast device")
+        val remoteMediaClient = session.remoteMediaClient
+        if (remoteMediaClient == null) {
+            AppLogger.error(TAG, "startStreamingMkvFilterAndCast: remoteMediaClient is null!")
+            Toast.makeText(this, R.string.error_cast, Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val pendingResult = remoteMediaClient.load(loadRequest)
+        pendingResult.setResultCallback { result ->
+            val status = result.status
+            if (status.isSuccess) {
+                AppLogger.info(TAG, "Streaming MKV cast: load SUCCESS")
+            } else {
+                AppLogger.error(TAG, "Streaming MKV cast: load FAILED - ${status.statusMessage}")
+                runOnUiThread {
+                    Toast.makeText(this, getString(R.string.cast_load_failed, status.statusMessage ?: "Unknown error"), Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+        updateCastStatus(video.title)
+        Toast.makeText(this, R.string.loading_video, Toast.LENGTH_SHORT).show()
+    }
+
     private fun checkCompatibilityAndCast(video: VideoItem) {
         binding.progressBar.visibility = View.VISIBLE
         activityScope.launch {
@@ -553,7 +707,7 @@ class VideoDetailActivity : AppCompatActivity() {
             val result = castCompatibility.checkCompatibility(probeResult)
             if (result.isFullyCompatible) {
                 AppLogger.info(TAG, "All codecs compatible, casting directly")
-                castVideo(video, selectedSubtitleFile)
+                directStreamOrRemux(video)
             } else {
                 showCodecCompatibilityDialog(video, probeResult, result)
             }
@@ -578,7 +732,7 @@ class VideoDetailActivity : AppCompatActivity() {
             .setView(dialogView)
             .setPositiveButton(R.string.direct_stream) { _, _ ->
                 AppLogger.info(TAG, "User chose direct stream despite incompatible codecs")
-                castVideo(video, selectedSubtitleFile)
+                directStreamOrRemux(video)
             }
             .setNegativeButton(R.string.transcode) { _, _ ->
                 AppLogger.info(TAG, "User chose to transcode")
@@ -645,6 +799,136 @@ class VideoDetailActivity : AppCompatActivity() {
                         }
                     },
                     selectedAudioTrack = selectedAudioTrack
+                )
+            }
+        }
+    }
+
+    private fun startRemuxAndCast(video: VideoItem, probeResult: MediaProbeResult) {
+        val audioTrack = selectedAudioTrack ?: return
+        val transcoder = VideoTranscoder()
+        videoTranscoder = transcoder
+
+        AppLogger.info(TAG, "Remuxing to select audio track: ${audioTrack.codec} ${audioTrack.language} (index=${audioTrack.trackIndex})")
+
+        val progressDialog = AlertDialog.Builder(this)
+            .setTitle(R.string.remuxing_title)
+            .setMessage(getString(R.string.remuxing_progress, 0))
+            .setNegativeButton(R.string.cancel) { _, _ ->
+                transcoder.cancel()
+            }
+            .setCancelable(false)
+            .show()
+
+        activityScope.launch {
+            withContext(Dispatchers.IO) {
+                val outputDir = File(cacheDir, "remux")
+                if (!outputDir.exists() && !outputDir.mkdirs()) {
+                    runOnUiThread {
+                        progressDialog.dismiss()
+                        Toast.makeText(
+                            this@VideoDetailActivity,
+                            getString(R.string.remux_failed, "Cannot create output directory"),
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                    return@withContext
+                }
+
+                transcoder.remux(video.path, outputDir, probeResult, audioTrack,
+                    object : VideoTranscoder.ProgressListener {
+                        override fun onProgress(percent: Int) {
+                            runOnUiThread {
+                                progressDialog.setMessage(getString(R.string.remuxing_progress, percent))
+                            }
+                        }
+
+                        override fun onCompleted(outputFile: File) {
+                            runOnUiThread {
+                                progressDialog.dismiss()
+                                transcodedFile = outputFile
+                                AppLogger.info(TAG, "Remux complete: ${outputFile.name}, ${outputFile.length()} bytes")
+                                castTranscodedVideo(video, outputFile)
+                            }
+                        }
+
+                        override fun onError(error: String) {
+                            runOnUiThread {
+                                progressDialog.dismiss()
+                                AppLogger.error(TAG, "Remux error: $error")
+                                Toast.makeText(
+                                    this@VideoDetailActivity,
+                                    getString(R.string.remux_failed, error),
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        }
+                    }
+                )
+            }
+        }
+    }
+
+    private fun startRemuxWithAudioTranscodeAndCast(video: VideoItem, probeResult: MediaProbeResult) {
+        val audioTrack = selectedAudioTrack ?: return
+        val transcoder = VideoTranscoder()
+        videoTranscoder = transcoder
+
+        AppLogger.info(TAG, "Remuxing with audio transcode: ${audioTrack.codec} ${audioTrack.language} (index=${audioTrack.trackIndex})")
+
+        val progressDialog = AlertDialog.Builder(this)
+            .setTitle(R.string.remuxing_title)
+            .setMessage(getString(R.string.remuxing_progress, 0))
+            .setNegativeButton(R.string.cancel) { _, _ ->
+                transcoder.cancel()
+            }
+            .setCancelable(false)
+            .show()
+
+        activityScope.launch {
+            withContext(Dispatchers.IO) {
+                val outputDir = File(cacheDir, "remux")
+                if (!outputDir.exists() && !outputDir.mkdirs()) {
+                    runOnUiThread {
+                        progressDialog.dismiss()
+                        Toast.makeText(
+                            this@VideoDetailActivity,
+                            getString(R.string.remux_failed, "Cannot create output directory"),
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                    return@withContext
+                }
+
+                transcoder.remuxWithAudioTranscode(video.path, outputDir, probeResult, audioTrack,
+                    object : VideoTranscoder.ProgressListener {
+                        override fun onProgress(percent: Int) {
+                            runOnUiThread {
+                                progressDialog.setMessage(getString(R.string.remuxing_progress, percent))
+                            }
+                        }
+
+                        override fun onCompleted(outputFile: File) {
+                            runOnUiThread {
+                                progressDialog.dismiss()
+                                transcodedFile = outputFile
+                                AppLogger.info(TAG, "Remux with audio transcode complete: ${outputFile.name}, ${outputFile.length()} bytes")
+                                castTranscodedVideo(video, outputFile)
+                            }
+                        }
+
+                        override fun onError(error: String) {
+                            runOnUiThread {
+                                progressDialog.dismiss()
+                                AppLogger.error(TAG, "Remux with audio transcode error: $error")
+                                Toast.makeText(
+                                    this@VideoDetailActivity,
+                                    getString(R.string.remux_failed, error),
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        }
+                    }
                 )
             }
         }
