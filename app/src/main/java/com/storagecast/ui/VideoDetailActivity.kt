@@ -54,6 +54,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.IOException
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
@@ -735,43 +736,51 @@ class VideoDetailActivity : AppCompatActivity() {
         val videoUri = video.uri
 
         activityScope.launch {
-            val outputFile = withContext(Dispatchers.IO) {
-                val outputDir = File(cacheDir, "mkvfilter")
-                if (!outputDir.exists()) outputDir.mkdirs()
-                val tempFile = File(outputDir, "filtered_${System.currentTimeMillis()}.mkv")
+            try {
+                val outputFile = withContext(Dispatchers.IO) {
+                    val outputDir = File(cacheDir, "mkvfilter")
+                    if (!outputDir.exists() && !outputDir.mkdirs()) {
+                        throw IOException("Cannot create output directory")
+                    }
+                    val tempFile = File(outputDir, "filtered_${System.currentTimeMillis()}.mkv")
 
-                val sourceStream = if (videoUri != null) {
-                    try {
-                        val pfd = contentResolver.openFileDescriptor(videoUri, "r")
-                        if (pfd != null) {
-                            android.os.ParcelFileDescriptor.AutoCloseInputStream(pfd)
-                        } else {
+                    val sourceStream = if (videoUri != null) {
+                        try {
+                            val pfd = contentResolver.openFileDescriptor(videoUri, "r")
+                            if (pfd != null) {
+                                android.os.ParcelFileDescriptor.AutoCloseInputStream(pfd)
+                            } else {
+                                java.io.FileInputStream(videoPath)
+                            }
+                        } catch (e: Exception) {
+                            AppLogger.warn(TAG, "ContentResolver failed, falling back to FileInputStream: ${e.message}")
                             java.io.FileInputStream(videoPath)
                         }
-                    } catch (e: Exception) {
-                        AppLogger.warn(TAG, "ContentResolver failed, falling back to FileInputStream: ${e.message}")
+                    } else {
                         java.io.FileInputStream(videoPath)
                     }
-                } else {
-                    java.io.FileInputStream(videoPath)
-                }
 
-                try {
-                    java.io.FileOutputStream(tempFile).use { fos ->
-                        filter.filter(sourceStream, fos, keepTrackNumbers)
+                    try {
+                        java.io.FileOutputStream(tempFile).use { fos ->
+                            filter.filter(sourceStream, fos, keepTrackNumbers)
+                        }
+                    } finally {
+                        try { sourceStream.close() } catch (_: Exception) {}
                     }
-                } finally {
-                    try { sourceStream.close() } catch (_: Exception) {}
+
+                    AppLogger.info(TAG, "MKV filter complete: ${tempFile.name}, ${tempFile.length()} bytes")
+                    tempFile
                 }
 
-                AppLogger.info(TAG, "MKV filter complete: ${tempFile.name}, ${tempFile.length()} bytes")
-                tempFile
+                progressDialog.dismiss()
+                transcodedFile?.delete()
+                transcodedFile = outputFile
+                castTranscodedVideo(video, outputFile, "video/x-matroska")
+            } catch (e: Exception) {
+                AppLogger.error(TAG, "MKV filter failed: ${e.message}")
+                progressDialog.dismiss()
+                Toast.makeText(this@VideoDetailActivity, getString(R.string.remux_failed, e.message ?: "Unknown error"), Toast.LENGTH_LONG).show()
             }
-
-            progressDialog.dismiss()
-            transcodedFile?.delete()
-            transcodedFile = outputFile
-            castTranscodedVideo(video, outputFile, "video/x-matroska")
         }
     }
 
@@ -796,23 +805,31 @@ class VideoDetailActivity : AppCompatActivity() {
         val videoPath = video.path
 
         activityScope.launch {
-            val outputFile = withContext(Dispatchers.IO) {
-                val outputDir = File(cacheDir, "mkvfilter")
-                if (!outputDir.exists()) outputDir.mkdirs()
-                val tempFile = File(outputDir, "remuxed_${System.currentTimeMillis()}.mkv")
+            try {
+                val outputFile = withContext(Dispatchers.IO) {
+                    val outputDir = File(cacheDir, "mkvfilter")
+                    if (!outputDir.exists() && !outputDir.mkdirs()) {
+                        throw IOException("Cannot create output directory")
+                    }
+                    val tempFile = File(outputDir, "remuxed_${System.currentTimeMillis()}.mkv")
 
-                java.io.FileOutputStream(tempFile).use { fos ->
-                    streamer.writeTo(videoPath, videoTrack.trackIndex, audioTrack.trackIndex, fos)
+                    java.io.FileOutputStream(tempFile).use { fos ->
+                        streamer.writeTo(videoPath, videoTrack.trackIndex, audioTrack.trackIndex, fos)
+                    }
+
+                    AppLogger.info(TAG, "MP4→MKV remux complete: ${tempFile.name}, ${tempFile.length()} bytes")
+                    tempFile
                 }
 
-                AppLogger.info(TAG, "MP4→MKV remux complete: ${tempFile.name}, ${tempFile.length()} bytes")
-                tempFile
+                progressDialog.dismiss()
+                transcodedFile?.delete()
+                transcodedFile = outputFile
+                castTranscodedVideo(video, outputFile, "video/x-matroska")
+            } catch (e: Exception) {
+                AppLogger.error(TAG, "MP4→MKV remux failed: ${e.message}")
+                progressDialog.dismiss()
+                Toast.makeText(this@VideoDetailActivity, getString(R.string.remux_failed, e.message ?: "Unknown error"), Toast.LENGTH_LONG).show()
             }
-
-            progressDialog.dismiss()
-            transcodedFile?.delete()
-            transcodedFile = outputFile
-            castTranscodedVideo(video, outputFile, "video/x-matroska")
         }
     }
 
