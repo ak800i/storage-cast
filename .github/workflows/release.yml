@@ -56,7 +56,9 @@ jobs:
             echo ""
             echo "${COMMITS}"
             echo ""
-            echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREV_TAG:-initial}...${{ steps.version.outputs.tag }}"
+            if [ -n "$PREV_TAG" ]; then
+              echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${{ steps.version.outputs.tag }}"
+            fi
             echo "RELEASE_NOTES_EOF"
           } >> "$GITHUB_OUTPUT"
 
