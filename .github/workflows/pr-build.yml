@@ -20,8 +20,11 @@ jobs:
       - name: Build debug APK
         run: ./gradlew assembleDebug
 
+      - name: Rename APK
+        run: mv app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/StorageCast-Debug.apk
+
       - name: Upload test APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug-pr
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: StorageCast-Debug
+          path: app/build/outputs/apk/debug/StorageCast-Debug.apk
