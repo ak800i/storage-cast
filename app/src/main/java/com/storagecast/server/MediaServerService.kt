@@ -13,6 +13,7 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.IOException
 import java.io.InputStream
+import java.util.concurrent.ConcurrentHashMap
 import java.util.logging.Handler
 import java.util.logging.Level
 import java.util.logging.LogRecord
@@ -189,8 +190,8 @@ class MediaServerService : Service() {
     }
 
     private class MediaServer(port: Int, private val resolver: ContentResolver) : NanoHTTPD(port) {
-        private val fileMap = mutableMapOf<String, FileEntry>()
-        private val streamMap = mutableMapOf<String, StreamEntry>()
+        private val fileMap = ConcurrentHashMap<String, FileEntry>()
+        private val streamMap = ConcurrentHashMap<String, StreamEntry>()
 
         fun registerFile(id: String, file: File, mimeType: String, uri: Uri?) {
             fileMap[id] = FileEntry(file, mimeType, uri)
@@ -339,6 +340,17 @@ class MediaServerService : Service() {
                     parts[1].toLongOrNull() ?: (fileLength - 1)
                 } else {
                     fileLength - 1
+                }
+
+                // If range covers the entire file (e.g. "bytes=0-"), serve as
+                // full 200 OK with Accept-Ranges so the client knows it can
+                // issue subsequent Range requests.  Some Cast receivers
+                // (notably older CrKey/Chrome builds) mishandle a 206 whose
+                // body equals the full file and never retry with a proper
+                // sub-range, causing an immediate playback error.
+                if (start == 0L && end >= fileLength - 1) {
+                    AppLogger.info("MediaServer", "Range covers entire file, serving as 200 OK")
+                    return serveFullContent(entry)
                 }
 
                 val contentLength = end - start + 1
