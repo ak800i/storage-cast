@@ -13,6 +13,17 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate version
+        id: version
+        run: |
+          VERSION=$(date -u +'%Y.%m.%d-%H%M%S')
+          VERSION_CODE=$(date -u +%s)
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "code=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
 
       - name: Setup build environment
         uses: ./.github/actions/setup-build
@@ -26,13 +37,28 @@ jobs:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: ./gradlew assembleRelease
+        run: ./gradlew assembleRelease -PreleaseVersionName=${{ steps.version.outputs.version }} -PreleaseVersionCode=${{ steps.version.outputs.code }}
 
-      - name: Get version name
-        id: version
+      - name: Generate release notes
+        id: notes
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION=$(grep 'versionName' app/build.gradle.kts | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -n "$PREV_TAG" ]; then
+            COMMITS=$(git log "${PREV_TAG}..HEAD" --pretty=format:"- %s (%h)" --no-merges)
+          else
+            COMMITS=$(git log --pretty=format:"- %s (%h)" --no-merges -20)
+          fi
+          {
+            echo "body<<RELEASE_NOTES_EOF"
+            echo "## What's Changed"
+            echo ""
+            echo "${COMMITS}"
+            echo ""
+            echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREV_TAG:-initial}...${{ steps.version.outputs.tag }}"
+            echo "RELEASE_NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Rename APK
         run: mv app/build/outputs/apk/release/app-release.apk app/build/outputs/apk/release/StorageCast-${{ steps.version.outputs.tag }}.apk
@@ -42,5 +68,6 @@ jobs:
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: StorageCast ${{ steps.version.outputs.tag }}
-          generate_release_notes: true
+          body: ${{ steps.notes.outputs.body }}
+          generate_release_notes: false
           files: app/build/outputs/apk/release/StorageCast-${{ steps.version.outputs.tag }}.apk

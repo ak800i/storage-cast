@@ -12,8 +12,8 @@ android {
         applicationId = "com.storagecast"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = (findProperty("releaseVersionCode") as? String)?.toIntOrNull() ?: 1
+        versionName = (findProperty("releaseVersionName") as? String) ?: "1.0"
     }
 
     if (System.getenv("KEYSTORE_PATH") != null) {
