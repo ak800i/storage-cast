@@ -277,24 +277,38 @@ class MediaServerService : Service() {
         }
 
         private fun openFileStream(entry: FileEntry): InputStream {
+            return openFileStreamAtOffset(entry, 0)
+        }
+
+        /**
+         * Opens a file stream positioned at the given byte offset.
+         * Uses FileChannel.position() for O(1) seeking instead of InputStream.skip()
+         * which may degrade to O(n) on some Android storage implementations (e.g. FUSE).
+         */
+        private fun openFileStreamAtOffset(entry: FileEntry, offset: Long): InputStream {
             // Try ContentResolver first (handles scoped storage on Android 10+)
             if (entry.uri != null) {
                 try {
                     val pfd = resolver.openFileDescriptor(entry.uri, "r")
                     if (pfd != null) {
-                        AppLogger.info("MediaServer", "Opened file via ContentResolver: ${entry.file.name}")
-                        return MonitoredInputStream(
-                            ParcelFileDescriptor.AutoCloseInputStream(pfd),
-                            entry.file.name
-                        )
+                        val fis = ParcelFileDescriptor.AutoCloseInputStream(pfd)
+                        if (offset > 0) {
+                            fis.channel.position(offset)
+                        }
+                        AppLogger.info("MediaServer", "Opened file via ContentResolver at offset $offset: ${entry.file.name}")
+                        return MonitoredInputStream(fis, entry.file.name)
                     }
                 } catch (e: Exception) {
                     AppLogger.warn("MediaServer", "ContentResolver failed for ${entry.file.name}: ${e.message}, falling back to FileInputStream")
                 }
             }
             // Fall back to direct file access
-            AppLogger.info("MediaServer", "Opened file via FileInputStream: ${entry.file.name}")
-            return MonitoredInputStream(FileInputStream(entry.file), entry.file.name)
+            val fis = FileInputStream(entry.file)
+            if (offset > 0) {
+                fis.channel.position(offset)
+            }
+            AppLogger.info("MediaServer", "Opened file via FileInputStream at offset $offset: ${entry.file.name}")
+            return MonitoredInputStream(fis, entry.file.name)
         }
 
         private fun serveFullContent(entry: FileEntry): Response {
@@ -328,15 +342,7 @@ class MediaServerService : Service() {
                 }
 
                 val contentLength = end - start + 1
-                val fis = openFileStream(entry)
-                if (start > 0) {
-                    var remaining = start
-                    while (remaining > 0) {
-                        val skipped = fis.skip(remaining)
-                        if (skipped <= 0) break
-                        remaining -= skipped
-                    }
-                }
+                val fis = openFileStreamAtOffset(entry, start)
 
                 val contentRange = "bytes $start-$end/$fileLength"
                 val response = newFixedLengthResponse(
