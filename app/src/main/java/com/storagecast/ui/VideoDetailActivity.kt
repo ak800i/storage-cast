@@ -705,11 +705,22 @@ class VideoDetailActivity : AppCompatActivity() {
         val audioTrack = selectedAudioTrack
         if (needsAudioRemux() && probe != null && audioTrack != null) {
             if (isMkvContainer(probe)) {
-                AppLogger.info(TAG, "Using streaming MKV track filter for audio selection")
-                startStreamingMkvFilterAndCast(video, probe, audioTrack)
+                // MKV + audio selection → remux to MP4 (Cast receivers may not support MKV containers)
+                AppLogger.info(TAG, "MKV with audio selection, remuxing to MP4")
+                remuxToMp4AndCast(video, probe, audioTrack)
             } else {
                 AppLogger.info(TAG, "Using streaming MP4→MKV remux for audio selection")
                 startStreamingMp4AsMkvAndCast(video, probe, audioTrack)
+            }
+        } else if (probe != null && isMkvContainer(probe)) {
+            // MKV container → remux to MP4 for Cast compatibility
+            val targetAudio = audioTrack ?: probe.primaryAudio
+            if (targetAudio != null) {
+                AppLogger.info(TAG, "MKV container detected, remuxing to MP4 for Cast compatibility")
+                remuxToMp4AndCast(video, probe, targetAudio)
+            } else {
+                AppLogger.warn(TAG, "MKV with no audio track found, attempting direct cast")
+                castVideo(video, selectedSubtitleFile)
             }
         } else {
             castVideo(video, selectedSubtitleFile)
@@ -720,6 +731,83 @@ class VideoDetailActivity : AppCompatActivity() {
         return probe.containerFormat.contains("MKV", ignoreCase = true) ||
                probe.containerFormat.contains("Matroska", ignoreCase = true) ||
                probe.containerFormat.contains("WebM", ignoreCase = true)
+    }
+
+    /**
+     * Remuxes an MKV file to MP4 for Cast compatibility.
+     * Video is passed through (no re-encoding). Audio is either passed through
+     * (if AAC) or transcoded to AAC (for AC-3, Vorbis, etc.).
+     */
+    private fun remuxToMp4AndCast(video: VideoItem, probe: MediaProbeResult, audioTrack: AudioTrackInfo) {
+        val transcoder = VideoTranscoder()
+        videoTranscoder = transcoder
+
+        val useAudioTranscode = !VideoTranscoder.canRemuxAudio(audioTrack)
+
+        AppLogger.info(TAG, "Remuxing MKV→MP4: audio=${audioTrack.codec} ${audioTrack.language}, " +
+            "audioTranscode=$useAudioTranscode")
+
+        val progressDialog = AlertDialog.Builder(this)
+            .setTitle(R.string.remuxing_title)
+            .setMessage(getString(R.string.remuxing_progress, 0))
+            .setNegativeButton(R.string.cancel) { _, _ ->
+                transcoder.cancel()
+            }
+            .setCancelable(false)
+            .show()
+
+        activityScope.launch {
+            withContext(Dispatchers.IO) {
+                val outputDir = File(cacheDir, "remux")
+                if (!outputDir.exists() && !outputDir.mkdirs()) {
+                    runOnUiThread {
+                        progressDialog.dismiss()
+                        Toast.makeText(
+                            this@VideoDetailActivity,
+                            getString(R.string.remux_failed, "Cannot create output directory"),
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                    return@withContext
+                }
+
+                val listener = object : VideoTranscoder.ProgressListener {
+                    override fun onProgress(percent: Int) {
+                        runOnUiThread {
+                            progressDialog.setMessage(getString(R.string.remuxing_progress, percent))
+                        }
+                    }
+
+                    override fun onCompleted(outputFile: File) {
+                        runOnUiThread {
+                            progressDialog.dismiss()
+                            transcodedFile?.delete()
+                            transcodedFile = outputFile
+                            AppLogger.info(TAG, "MKV→MP4 remux complete: ${outputFile.name}, ${outputFile.length()} bytes")
+                            castTranscodedVideo(video, outputFile)
+                        }
+                    }
+
+                    override fun onError(error: String) {
+                        runOnUiThread {
+                            progressDialog.dismiss()
+                            AppLogger.error(TAG, "MKV→MP4 remux error: $error")
+                            Toast.makeText(
+                                this@VideoDetailActivity,
+                                getString(R.string.remux_failed, error),
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                }
+
+                if (useAudioTranscode) {
+                    transcoder.remuxWithAudioTranscode(video.path, outputDir, probe, audioTrack, listener)
+                } else {
+                    transcoder.remux(video.path, outputDir, probe, audioTrack, listener)
+                }
+            }
+        }
     }
 
     private fun startStreamingMkvFilterAndCast(video: VideoItem, probe: MediaProbeResult, audioTrack: AudioTrackInfo) {
