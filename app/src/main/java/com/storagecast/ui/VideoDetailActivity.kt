@@ -719,7 +719,7 @@ class VideoDetailActivity : AppCompatActivity() {
                 AppLogger.info(TAG, "MKV container detected, remuxing to MP4 for Cast compatibility")
                 remuxToMp4AndCast(video, probe, targetAudio)
             } else {
-                AppLogger.warn(TAG, "MKV with no audio track found, attempting direct cast")
+                AppLogger.warn(TAG, "MKV with no audio track found, attempting direct cast (remux requires audio track)")
                 castVideo(video, selectedSubtitleFile)
             }
         } else {
