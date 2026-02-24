@@ -22,6 +22,7 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import com.google.android.gms.cast.MediaError
 import com.google.android.gms.cast.MediaInfo
 import com.google.android.gms.cast.MediaLoadRequestData
 import com.google.android.gms.cast.MediaMetadata
@@ -162,6 +163,10 @@ class VideoDetailActivity : AppCompatActivity() {
 
         override fun onMetadataUpdated() {
             AppLogger.info(TAG, "RemoteMediaClient metadata updated")
+        }
+
+        override fun onMediaError(mediaError: MediaError) {
+            logMediaError(mediaError)
         }
     }
 
@@ -1458,6 +1463,44 @@ class VideoDetailActivity : AppCompatActivity() {
             serviceBound = false
         }
         super.onDestroy()
+    }
+
+    private fun logMediaError(mediaError: MediaError) {
+        try {
+            val errorType = mediaError.type ?: "unknown"
+            val errorReason = mediaError.reason ?: "unknown"
+            val detailedCode = mediaError.detailedErrorCode
+            val errorCustomData = mediaError.customData
+            AppLogger.error(TAG, "Cast device error: type=$errorType, reason=$errorReason, detailedErrorCode=${detailedCode ?: "none"}")
+            if (detailedCode != null) {
+                AppLogger.error(TAG, "Cast device error detail: ${describeDetailedErrorCode(detailedCode)}")
+            }
+            if (errorCustomData != null) {
+                AppLogger.error(TAG, "Cast device error customData: $errorCustomData")
+            }
+        } catch (e: Exception) {
+            AppLogger.error(TAG, "Failed to read MediaError from cast device: ${e.message}")
+        }
+    }
+
+    private fun describeDetailedErrorCode(code: Int): String {
+        return when (code) {
+            100 -> "MEDIA_UNKNOWN ($code) — Unknown media error"
+            101 -> "MEDIA_ABORTED ($code) — Playback was aborted"
+            102 -> "MEDIA_DECODE ($code) — Failed to decode media (codec may be unsupported)"
+            103 -> "MEDIA_NETWORK ($code) — Network error prevented fetching media"
+            104 -> "MEDIA_SRC_NOT_SUPPORTED ($code) — Media source/format not supported"
+            110 -> "MEDIA_UNKNOWN_TRANSFER_MODE ($code) — Unknown transfer mode"
+            200 -> "REQUEST_UNKNOWN ($code) — Unknown request error"
+            201 -> "REQUEST_INVALID_PARAM ($code) — Invalid request parameter"
+            202 -> "REQUEST_INVALID_MEDIA_SESSION ($code) — Invalid media session"
+            203 -> "REQUEST_SKIP_LIMIT ($code) — Skip limit reached"
+            204 -> "REQUEST_NOT_SUPPORTED ($code) — Request not supported"
+            205 -> "REQUEST_LANGUAGE_NOT_SUPPORTED ($code) — Language not supported"
+            300 -> "GENERIC_LOAD ($code) — Generic load error"
+            301 -> "LOAD_INTERRUPTED ($code) — Load was interrupted"
+            else -> "UNKNOWN_ERROR ($code) — Unrecognized error code"
+        }
     }
 
     private fun formatDuration(durationMs: Long): String {
