@@ -1452,11 +1452,11 @@ class VideoDetailActivity : AppCompatActivity() {
 
     private fun logMediaError(mediaError: MediaError) {
         try {
-            val type = mediaError.type ?: "unknown"
-            val reason = mediaError.reason ?: "unknown"
+            val errorType = mediaError.type ?: "unknown"
+            val errorReason = mediaError.reason ?: "unknown"
             val detailedCode = mediaError.detailedErrorCode
             val errorCustomData = mediaError.customData
-            AppLogger.error(TAG, "Cast device error: type=$type, reason=$reason, detailedErrorCode=${detailedCode ?: "none"}")
+            AppLogger.error(TAG, "Cast device error: type=$errorType, reason=$errorReason, detailedErrorCode=${detailedCode ?: "none"}")
             if (detailedCode != null) {
                 AppLogger.error(TAG, "Cast device error detail: ${describeDetailedErrorCode(detailedCode)}")
             }
@@ -1470,21 +1470,21 @@ class VideoDetailActivity : AppCompatActivity() {
 
     private fun describeDetailedErrorCode(code: Int): String {
         return when (code) {
-            100 -> "MEDIA_UNKNOWN ($code) — An unknown media error occurred on the cast device"
-            101 -> "MEDIA_ABORTED ($code) — Playback was aborted by the cast device"
-            102 -> "MEDIA_DECODE ($code) — The cast device failed to decode the media (codec may be unsupported)"
-            103 -> "MEDIA_NETWORK ($code) — A network error prevented the cast device from fetching the media"
-            104 -> "MEDIA_SRC_NOT_SUPPORTED ($code) — The media source/format is not supported by the cast device"
+            100 -> "MEDIA_UNKNOWN ($code) — Unknown media error"
+            101 -> "MEDIA_ABORTED ($code) — Playback was aborted"
+            102 -> "MEDIA_DECODE ($code) — Failed to decode media (codec may be unsupported)"
+            103 -> "MEDIA_NETWORK ($code) — Network error prevented fetching media"
+            104 -> "MEDIA_SRC_NOT_SUPPORTED ($code) — Media source/format not supported"
             110 -> "MEDIA_UNKNOWN_TRANSFER_MODE ($code) — Unknown transfer mode"
-            200 -> "REQUEST_UNKNOWN ($code) — An unknown request error on the cast device"
-            201 -> "REQUEST_INVALID_PARAM ($code) — Invalid request parameter sent to the cast device"
-            202 -> "REQUEST_INVALID_MEDIA_SESSION ($code) — Invalid media session on the cast device"
-            203 -> "REQUEST_SKIP_LIMIT ($code) — Skip limit reached on the cast device"
-            204 -> "REQUEST_NOT_SUPPORTED ($code) — Request not supported by the cast device"
-            205 -> "REQUEST_LANGUAGE_NOT_SUPPORTED ($code) — Language not supported by the cast device"
-            300 -> "GENERIC_LOAD ($code) — Generic load error on the cast device"
-            301 -> "LOAD_INTERRUPTED ($code) — Load was interrupted on the cast device"
-            else -> "UNKNOWN_ERROR ($code) — Unrecognized error code from the cast device"
+            200 -> "REQUEST_UNKNOWN ($code) — Unknown request error"
+            201 -> "REQUEST_INVALID_PARAM ($code) — Invalid request parameter"
+            202 -> "REQUEST_INVALID_MEDIA_SESSION ($code) — Invalid media session"
+            203 -> "REQUEST_SKIP_LIMIT ($code) — Skip limit reached"
+            204 -> "REQUEST_NOT_SUPPORTED ($code) — Request not supported"
+            205 -> "REQUEST_LANGUAGE_NOT_SUPPORTED ($code) — Language not supported"
+            300 -> "GENERIC_LOAD ($code) — Generic load error"
+            301 -> "LOAD_INTERRUPTED ($code) — Load was interrupted"
+            else -> "UNKNOWN_ERROR ($code) — Unrecognized error code"
         }
     }
 
