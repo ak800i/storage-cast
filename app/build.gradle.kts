@@ -4,12 +4,12 @@ plugins {
 
 android {
     namespace = "com.storagecast"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.storagecast"
         minSdk = 24
-        targetSdk = 34
+        targetSdk = 35
         versionCode = (findProperty("releaseVersionCode") as? String)?.toIntOrNull() ?: 1
         versionName = (findProperty("releaseVersionName") as? String) ?: "1.0"
     }
