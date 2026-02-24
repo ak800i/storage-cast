@@ -365,6 +365,17 @@ class MediaServerService : Service() {
 
                 AppLogger.info("MediaServer", "Parsed range: start=$start, end=$end, fileLength=$fileLength")
 
+                // If range covers the entire file (e.g. "bytes=0-"), serve as
+                // full 200 OK with Accept-Ranges so the client knows it can
+                // issue subsequent Range requests.  Some Cast receivers
+                // (notably older CrKey/Chrome builds) mishandle a 206 whose
+                // body equals the full file and never retry with a proper
+                // sub-range, causing an immediate playback error.
+                if (start == 0L && end >= fileLength - 1) {
+                    AppLogger.info("MediaServer", "Range covers entire file, serving as 200 OK")
+                    return serveFullContent(entry)
+                }
+
                 val contentLength = end - start + 1
                 val fis = openFileStreamAtOffset(entry, start)
 
