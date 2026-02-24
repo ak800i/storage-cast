@@ -26,10 +26,15 @@ import com.google.android.gms.cast.framework.CastButtonFactory
 import com.google.android.gms.cast.framework.CastContext
 import com.storagecast.R
 import com.storagecast.databinding.ActivityMainBinding
+import com.storagecast.log.AppLogger
 import com.storagecast.model.VideoItem
 import java.io.File
 
 class MainActivity : AppCompatActivity() {
+
+    companion object {
+        private const val TAG = "MainActivity"
+    }
 
     private lateinit var binding: ActivityMainBinding
     private lateinit var viewModel: MainViewModel
@@ -251,8 +256,8 @@ class MainActivity : AppCompatActivity() {
                         Uri.parse("package:$packageName")
                     )
                     startActivity(intent)
-                } catch (_: Exception) {
-                    // Some OEMs don't support direct request; fall back to settings
+                } catch (e: Exception) {
+                    AppLogger.warn(TAG, "Direct battery optimization request not supported: ${e.message}")
                     openBatteryOptimizationSettings()
                 }
             }
@@ -266,12 +271,13 @@ class MainActivity : AppCompatActivity() {
     private fun openBatteryOptimizationSettings() {
         try {
             startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
-        } catch (_: Exception) {
-            // Fallback to general battery settings
+        } catch (e: Exception) {
+            AppLogger.warn(TAG, "Battery optimization settings not available: ${e.message}")
             try {
                 startActivity(Intent(Settings.ACTION_BATTERY_SAVER_SETTINGS))
-            } catch (_: Exception) {
-                Toast.makeText(this, "Please disable battery optimization for StorageCast in Settings", Toast.LENGTH_LONG).show()
+            } catch (e2: Exception) {
+                AppLogger.warn(TAG, "Battery saver settings not available: ${e2.message}")
+                Toast.makeText(this, R.string.battery_optimization_open_settings, Toast.LENGTH_LONG).show()
             }
         }
     }
