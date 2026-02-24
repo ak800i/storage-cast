@@ -22,6 +22,7 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import com.google.android.gms.cast.MediaError
 import com.google.android.gms.cast.MediaInfo
 import com.google.android.gms.cast.MediaLoadRequestData
 import com.google.android.gms.cast.MediaMetadata
@@ -150,6 +151,10 @@ class VideoDetailActivity : AppCompatActivity() {
 
         override fun onMetadataUpdated() {
             AppLogger.info(TAG, "RemoteMediaClient metadata updated")
+        }
+
+        override fun onMediaError(mediaError: MediaError) {
+            logMediaError(mediaError)
         }
     }
 
@@ -1443,6 +1448,44 @@ class VideoDetailActivity : AppCompatActivity() {
             serviceBound = false
         }
         super.onDestroy()
+    }
+
+    private fun logMediaError(mediaError: MediaError) {
+        try {
+            val type = mediaError.type ?: "unknown"
+            val reason = mediaError.reason ?: "unknown"
+            val detailedCode = mediaError.detailedErrorCode
+            val errorCustomData = mediaError.customData
+            AppLogger.error(TAG, "Cast device error: type=$type, reason=$reason, detailedErrorCode=${detailedCode ?: "none"}")
+            if (detailedCode != null) {
+                AppLogger.error(TAG, "Cast device error detail: ${describeDetailedErrorCode(detailedCode)}")
+            }
+            if (errorCustomData != null) {
+                AppLogger.error(TAG, "Cast device error customData: $errorCustomData")
+            }
+        } catch (e: Exception) {
+            AppLogger.error(TAG, "Failed to read MediaError from cast device: ${e.message}")
+        }
+    }
+
+    private fun describeDetailedErrorCode(code: Int): String {
+        return when (code) {
+            100 -> "MEDIA_UNKNOWN ($code) — An unknown media error occurred on the cast device"
+            101 -> "MEDIA_ABORTED ($code) — Playback was aborted by the cast device"
+            102 -> "MEDIA_DECODE ($code) — The cast device failed to decode the media (codec may be unsupported)"
+            103 -> "MEDIA_NETWORK ($code) — A network error prevented the cast device from fetching the media"
+            104 -> "MEDIA_SRC_NOT_SUPPORTED ($code) — The media source/format is not supported by the cast device"
+            110 -> "MEDIA_UNKNOWN_TRANSFER_MODE ($code) — Unknown transfer mode"
+            200 -> "REQUEST_UNKNOWN ($code) — An unknown request error on the cast device"
+            201 -> "REQUEST_INVALID_PARAM ($code) — Invalid request parameter sent to the cast device"
+            202 -> "REQUEST_INVALID_MEDIA_SESSION ($code) — Invalid media session on the cast device"
+            203 -> "REQUEST_SKIP_LIMIT ($code) — Skip limit reached on the cast device"
+            204 -> "REQUEST_NOT_SUPPORTED ($code) — Request not supported by the cast device"
+            205 -> "REQUEST_LANGUAGE_NOT_SUPPORTED ($code) — Language not supported by the cast device"
+            300 -> "GENERIC_LOAD ($code) — Generic load error on the cast device"
+            301 -> "LOAD_INTERRUPTED ($code) — Load was interrupted on the cast device"
+            else -> "UNKNOWN_ERROR ($code) — Unrecognized error code from the cast device"
+        }
     }
 
     private fun formatDuration(durationMs: Long): String {
