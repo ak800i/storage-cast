@@ -1,18 +1,22 @@
 package com.storagecast.ui
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.provider.OpenableColumns
+import android.provider.Settings
 import android.view.Menu
 import android.view.MenuItem
 import android.view.View
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SearchView
 import androidx.core.content.ContextCompat
@@ -53,6 +57,7 @@ class MainActivity : AppCompatActivity() {
         setupCast()
         checkPermissionsAndLoad()
         setupBackNavigation()
+        checkBatteryOptimization()
 
         handleIncomingIntent(intent)
     }
@@ -228,5 +233,46 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         })
+    }
+
+    private fun checkBatteryOptimization() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (pm.isIgnoringBatteryOptimizations(packageName)) return
+
+        AlertDialog.Builder(this)
+            .setTitle(R.string.battery_optimization_title)
+            .setMessage(R.string.battery_optimization_message)
+            .setPositiveButton(R.string.battery_optimization_disable) { _, _ ->
+                try {
+                    val intent = Intent(
+                        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                        Uri.parse("package:$packageName")
+                    )
+                    startActivity(intent)
+                } catch (_: Exception) {
+                    // Some OEMs don't support direct request; fall back to settings
+                    openBatteryOptimizationSettings()
+                }
+            }
+            .setNeutralButton(R.string.battery_optimization_settings) { _, _ ->
+                openBatteryOptimizationSettings()
+            }
+            .setNegativeButton(R.string.battery_optimization_later, null)
+            .show()
+    }
+
+    private fun openBatteryOptimizationSettings() {
+        try {
+            startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+        } catch (_: Exception) {
+            // Fallback to general battery settings
+            try {
+                startActivity(Intent(Settings.ACTION_BATTERY_SAVER_SETTINGS))
+            } catch (_: Exception) {
+                Toast.makeText(this, "Please disable battery optimization for StorageCast in Settings", Toast.LENGTH_LONG).show()
+            }
+        }
     }
 }

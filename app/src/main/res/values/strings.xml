@@ -63,4 +63,9 @@
     <string name="audio_track_switch_reload">Switching audio track — stream will reload</string>
     <string name="subtitle_switched_live">Subtitles updated</string>
     <string name="subtitle_disabled_live">Subtitles disabled</string>
+    <string name="battery_optimization_title">Battery Optimization</string>
+    <string name="battery_optimization_message">Battery optimization may kill the media server while casting. Please disable it for StorageCast to ensure reliable playback.</string>
+    <string name="battery_optimization_disable">Disable</string>
+    <string name="battery_optimization_settings">Settings</string>
+    <string name="battery_optimization_later">Later</string>
 </resources>
