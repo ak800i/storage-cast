@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
@@ -28,6 +29,7 @@ import com.google.android.gms.cast.MediaLoadRequestData
 import com.google.android.gms.cast.MediaMetadata
 import com.google.android.gms.cast.MediaSeekOptions
 import com.google.android.gms.cast.MediaTrack
+import com.google.android.gms.cast.TextTrackStyle
 import com.google.android.gms.cast.framework.CastButtonFactory
 import com.google.android.gms.cast.framework.CastContext
 import com.google.android.gms.cast.framework.CastSession
@@ -537,6 +539,16 @@ class VideoDetailActivity : AppCompatActivity() {
         }
     }
 
+    private fun createSubtitleStyle(): TextTrackStyle {
+        return TextTrackStyle().apply {
+            foregroundColor = Color.WHITE
+            backgroundColor = Color.TRANSPARENT
+            windowType = TextTrackStyle.WINDOW_TYPE_NONE
+            edgeType = TextTrackStyle.EDGE_TYPE_OUTLINE
+            edgeColor = Color.BLACK
+        }
+    }
+
     /**
      * Applies a subtitle change while casting is active.
      * If subtitleFile is null, disables subtitles. Otherwise, registers and activates the new track.
@@ -594,6 +606,7 @@ class VideoDetailActivity : AppCompatActivity() {
             .build()
 
         AppLogger.info(TAG, "Reloading media with new subtitle at position ${formatDuration(currentPosition)}")
+        client.setTextTrackStyle(createSubtitleStyle())
         client.load(loadRequest).setResultCallback { result ->
             if (result.status.isSuccess) {
                 AppLogger.info(TAG, "Live subtitle switch: load SUCCESS")
@@ -1169,6 +1182,10 @@ class VideoDetailActivity : AppCompatActivity() {
             return
         }
 
+        if (mediaTracks.isNotEmpty()) {
+            remoteMediaClient.setTextTrackStyle(createSubtitleStyle())
+        }
+
         val pendingResult = remoteMediaClient.load(loadRequest)
         pendingResult.setResultCallback { result ->
             val status = result.status
@@ -1264,6 +1281,10 @@ class VideoDetailActivity : AppCompatActivity() {
             AppLogger.error(TAG, "castVideo: remoteMediaClient is null!")
             Toast.makeText(this, R.string.error_cast, Toast.LENGTH_SHORT).show()
             return
+        }
+
+        if (mediaTracks.isNotEmpty()) {
+            remoteMediaClient.setTextTrackStyle(createSubtitleStyle())
         }
 
         val pendingResult = remoteMediaClient.load(loadRequest)
