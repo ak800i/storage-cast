@@ -127,6 +127,7 @@ class VideoDetailActivity : AppCompatActivity() {
                 else -> "UNKNOWN(${status.idleReason})"
             }
             AppLogger.info(TAG, "RemoteMediaClient status: playerState=$playerStateName, idleReason=$idleReasonName")
+            AppLogger.info(TAG, "  streamPosition=${status.streamPosition}, streamDuration=${client.streamDuration}, volume=${status.streamVolume}, muted=${status.isMute}")
             updateProgressTracking(playerState)
             if (playerState == com.google.android.gms.cast.MediaStatus.PLAYER_STATE_IDLE) {
                 when (status.idleReason) {
@@ -135,8 +136,19 @@ class VideoDetailActivity : AppCompatActivity() {
                         val contentId = mediaInfo?.contentId ?: "unknown"
                         val contentType = mediaInfo?.contentType ?: "unknown"
                         val streamType = mediaInfo?.streamType ?: -1
+                        val streamTypeName = when (streamType) {
+                            MediaInfo.STREAM_TYPE_BUFFERED -> "BUFFERED"
+                            MediaInfo.STREAM_TYPE_LIVE -> "LIVE"
+                            MediaInfo.STREAM_TYPE_NONE -> "NONE"
+                            else -> "UNKNOWN($streamType)"
+                        }
                         val customData = status.customData
-                        AppLogger.error(TAG, "Cast playback error: contentId=$contentId, contentType=$contentType, streamType=$streamType, customData=$customData")
+                        AppLogger.error(TAG, "Cast playback error: contentId=$contentId, contentType=$contentType, streamType=$streamTypeName, customData=$customData")
+                        AppLogger.error(TAG, "  Cast device: ${castSession?.castDevice?.friendlyName ?: "unknown"}, model=${castSession?.castDevice?.modelName ?: "unknown"}")
+                        AppLogger.error(TAG, "  Media server running: ${mediaServerService?.isServerRunning()}")
+                        if (mediaInfo != null) {
+                            AppLogger.error(TAG, "  MediaInfo streamDuration=${mediaInfo.streamDuration}, mediaTracks=${mediaInfo.mediaTracks?.size ?: 0}")
+                        }
                     }
                     com.google.android.gms.cast.MediaStatus.IDLE_REASON_CANCELED ->
                         AppLogger.warn(TAG, "Cast playback canceled")
@@ -1142,7 +1154,9 @@ class VideoDetailActivity : AppCompatActivity() {
             }
             .build()
 
-        AppLogger.info(TAG, "castTranscodedVideo: sending load request")
+        AppLogger.info(TAG, "castTranscodedVideo: sending load request (startPosition=${formatDuration(pendingSeekPositionMs)}, contentType=${contentType})")
+        AppLogger.info(TAG, "castTranscodedVideo: mediaInfo contentId=$videoUrl")
+        AppLogger.info(TAG, "castTranscodedVideo: device=${session.castDevice?.friendlyName}, model=${session.castDevice?.modelName}")
         val remoteMediaClient = session.remoteMediaClient
         if (remoteMediaClient == null) {
             AppLogger.error(TAG, "castTranscodedVideo: remoteMediaClient is null!")
@@ -1156,7 +1170,7 @@ class VideoDetailActivity : AppCompatActivity() {
             if (status.isSuccess) {
                 AppLogger.info(TAG, "castTranscodedVideo: load SUCCESS")
             } else {
-                AppLogger.error(TAG, "castTranscodedVideo: load FAILED - ${status.statusMessage}")
+                AppLogger.error(TAG, "castTranscodedVideo: load FAILED - statusCode=${status.statusCode}, statusMessage=${status.statusMessage}")
                 runOnUiThread {
                     Toast.makeText(this, getString(R.string.cast_load_failed, status.statusMessage ?: "Unknown error"), Toast.LENGTH_LONG).show()
                 }
@@ -1239,6 +1253,7 @@ class VideoDetailActivity : AppCompatActivity() {
 
         AppLogger.info(TAG, "castVideo: sending load request to cast device (startPosition=${formatDuration(startPositionMs)}, streamType=BUFFERED, contentType=${video.mimeType})")
         AppLogger.info(TAG, "castVideo: mediaInfo contentId=$videoUrl")
+        AppLogger.info(TAG, "castVideo: device=${session.castDevice?.friendlyName}, model=${session.castDevice?.modelName}")
         val remoteMediaClient = session.remoteMediaClient
         if (remoteMediaClient == null) {
             AppLogger.error(TAG, "castVideo: remoteMediaClient is null!")

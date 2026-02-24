@@ -66,6 +66,10 @@ class MediaServerService : Service() {
                             AppLogger.info("NanoHTTPD", "$msg: ${thrown.javaClass.simpleName}: ${thrown.message}")
                         } else {
                             AppLogger.warn("NanoHTTPD", "$msg: ${thrown.javaClass.simpleName}: ${thrown.message}")
+                            val cause = thrown.cause
+                            if (cause != null) {
+                                AppLogger.warn("NanoHTTPD", "  caused by: ${cause.javaClass.simpleName}: ${cause.message}")
+                            }
                         }
                     } else {
                         AppLogger.info("NanoHTTPD", msg)
@@ -140,8 +144,14 @@ class MediaServerService : Service() {
         private val delegate: InputStream,
         private val fileName: String
     ) : InputStream() {
+        companion object {
+            private const val PROGRESS_LOG_INTERVAL_MS = 5000L
+        }
+
         private var totalBytesRead = 0L
         private var firstBytesLogged = false
+        private var lastProgressLog = System.currentTimeMillis()
+        private var readCount = 0
 
         override fun read(): Int {
             val b = delegate.read()
@@ -153,12 +163,13 @@ class MediaServerService : Service() {
             val result = try {
                 delegate.read(b, off, len)
             } catch (e: IOException) {
-                AppLogger.error("MediaServer", "READ ERROR for $fileName after $totalBytesRead bytes: ${e.javaClass.simpleName}: ${e.message}")
+                AppLogger.error("MediaServer", "READ ERROR for $fileName after $totalBytesRead bytes ($readCount reads): ${e.javaClass.simpleName}: ${e.message}")
                 throw e
             }
 
             if (result > 0) {
                 totalBytesRead += result
+                readCount++
                 if (!firstBytesLogged) {
                     firstBytesLogged = true
                     val previewLen = minOf(result, 16)
@@ -166,10 +177,18 @@ class MediaServerService : Service() {
                         .joinToString(" ") { "%02x".format(it) }
                     AppLogger.info("MediaServer", "First bytes of $fileName: $hex (read $result bytes)")
                 }
+                // Log progress every 5 seconds during active transfer
+                val now = System.currentTimeMillis()
+                if (now - lastProgressLog >= PROGRESS_LOG_INTERVAL_MS) {
+                    val mb = totalBytesRead / (1024.0 * 1024.0)
+                    AppLogger.info("MediaServer", "Transfer progress for $fileName: %.1f MB sent ($readCount reads)".format(mb))
+                    lastProgressLog = now
+                }
             }
 
             if (result <= 0) {
-                AppLogger.info("MediaServer", "Stream ended for $fileName: read()=$result, totalBytesRead=$totalBytesRead")
+                val mb = totalBytesRead / (1024.0 * 1024.0)
+                AppLogger.info("MediaServer", "Stream ended for $fileName: read()=$result, totalBytesRead=$totalBytesRead (%.1f MB, $readCount reads)".format(mb))
             }
 
             return result
@@ -184,7 +203,8 @@ class MediaServerService : Service() {
         }
 
         override fun close() {
-            AppLogger.info("MediaServer", "Stream closed for $fileName, totalBytesRead=$totalBytesRead")
+            val mb = totalBytesRead / (1024.0 * 1024.0)
+            AppLogger.info("MediaServer", "Stream closed for $fileName, totalBytesRead=$totalBytesRead (%.1f MB, $readCount reads)".format(mb))
             delegate.close()
         }
     }
@@ -210,7 +230,8 @@ class MediaServerService : Service() {
 
         override fun serve(session: IHTTPSession): Response {
             val uri = session.uri
-            AppLogger.info("MediaServer", "HTTP ${session.method} $uri (headers: ${session.headers.filterKeys { it in listOf("range", "accept", "user-agent", "connection") }})")
+            AppLogger.info("MediaServer", "HTTP ${session.method} $uri")
+            AppLogger.info("MediaServer", "  Request headers: ${session.headers}")
 
             // Handle CORS preflight requests
             if (session.method == Method.OPTIONS) {
@@ -341,6 +362,8 @@ class MediaServerService : Service() {
                 } else {
                     fileLength - 1
                 }
+
+                AppLogger.info("MediaServer", "Parsed range: start=$start, end=$end, fileLength=$fileLength")
 
                 // If range covers the entire file (e.g. "bytes=0-"), serve as
                 // full 200 OK with Accept-Ranges so the client knows it can
