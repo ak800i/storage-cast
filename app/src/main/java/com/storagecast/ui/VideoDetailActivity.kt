@@ -543,6 +543,7 @@ class VideoDetailActivity : AppCompatActivity() {
         return TextTrackStyle().apply {
             foregroundColor = Color.WHITE
             backgroundColor = Color.TRANSPARENT
+            windowColor = Color.TRANSPARENT
             windowType = TextTrackStyle.WINDOW_TYPE_NONE
             edgeType = TextTrackStyle.EDGE_TYPE_OUTLINE
             edgeColor = Color.BLACK
