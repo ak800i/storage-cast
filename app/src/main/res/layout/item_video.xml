@@ -20,7 +20,7 @@
             android:layout_width="80dp"
             android:layout_height="60dp"
             android:scaleType="centerCrop"
-            android:background="#E0E0E0"
+            android:background="@color/surface_dark"
             android:contentDescription="Video thumbnail" />
 
         <LinearLayout
