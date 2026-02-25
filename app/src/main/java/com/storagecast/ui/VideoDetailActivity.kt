@@ -1341,9 +1341,13 @@ class VideoDetailActivity : AppCompatActivity() {
 
     private fun bindMediaServer() {
         AppLogger.info(TAG, "Binding media server service")
-        Intent(this, MediaServerService::class.java).also { intent ->
-            bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
+        val intent = Intent(this, MediaServerService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
         }
+        bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {

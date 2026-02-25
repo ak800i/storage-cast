@@ -1,13 +1,21 @@
 package com.storagecast.server
 
+import android.app.PendingIntent
 import android.app.Service
 import android.content.ContentResolver
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.Uri
+import android.net.wifi.WifiManager
 import android.os.Binder
+import android.os.Build
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
+import androidx.core.app.NotificationCompat
+import com.storagecast.R
+import com.storagecast.StorageCastApp
 import com.storagecast.log.AppLogger
+import com.storagecast.ui.VideoDetailActivity
 import fi.iki.elonen.NanoHTTPD
 import java.io.File
 import java.io.FileInputStream
@@ -21,12 +29,16 @@ import java.util.logging.LogRecord
 class MediaServerService : Service() {
 
     companion object {
+        private const val NOTIFICATION_ID = 1
+        private const val TAG = "MediaServerService"
+
         @Volatile
         private var logHandlerInstalled = false
     }
 
     private val binder = LocalBinder()
     private var server: MediaServer? = null
+    private var wifiLock: WifiManager.WifiLock? = null
 
     inner class LocalBinder : Binder() {
         fun getService(): MediaServerService = this@MediaServerService
@@ -34,20 +46,26 @@ class MediaServerService : Service() {
 
     override fun onBind(intent: Intent?): IBinder = binder
 
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        return START_STICKY
+    }
+
     fun startServer(port: Int = 8080): Int {
         installNanoHttpdLogHandler()
         if (server?.isAlive == true) {
-            AppLogger.info("MediaServer", "Server already running on port ${server!!.listeningPort}")
+            AppLogger.info(TAG, "Server already running on port ${server!!.listeningPort}")
             return server!!.listeningPort
         }
         return try {
             server = MediaServer(port, contentResolver)
             server?.start()
             val actualPort = server!!.listeningPort
-            AppLogger.info("MediaServer", "Server started on port $actualPort")
+            AppLogger.info(TAG, "Server started on port $actualPort")
+            promoteToForeground()
+            acquireWifiLock()
             actualPort
         } catch (e: Exception) {
-            AppLogger.error("MediaServer", "Failed to start server on port $port: ${e.message}")
+            AppLogger.error(TAG, "Failed to start server on port $port: ${e.message}")
             throw e
         }
     }
@@ -86,7 +104,10 @@ class MediaServerService : Service() {
     fun stopServer() {
         server?.stop()
         server = null
-        AppLogger.info("MediaServer", "Server stopped")
+        releaseWifiLock()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+        AppLogger.info(TAG, "Server stopped")
     }
 
     fun isServerRunning(): Boolean = server?.isAlive == true
@@ -121,8 +142,49 @@ class MediaServerService : Service() {
 
     fun getServerPort(): Int = server?.listeningPort ?: 8080
 
+    private fun promoteToForeground() {
+        val contentIntent = PendingIntent.getActivity(
+            this, 0,
+            Intent(this, VideoDetailActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val notification = NotificationCompat.Builder(this, StorageCastApp.CHANNEL_MEDIA_SERVER)
+            .setContentTitle(getString(R.string.media_server_notification_title))
+            .setContentText(getString(R.string.media_server_notification_text))
+            .setSmallIcon(R.drawable.ic_play)
+            .setOngoing(true)
+            .setContentIntent(contentIntent)
+            .build()
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+        AppLogger.info(TAG, "Promoted to foreground service")
+    }
+
+    @Suppress("DEPRECATION")
+    private fun acquireWifiLock() {
+        if (wifiLock == null) {
+            val wifiManager = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+            wifiLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "StorageCast:MediaServer")
+        }
+        wifiLock?.takeIf { !it.isHeld }?.acquire()
+        AppLogger.info(TAG, "WiFi lock acquired")
+    }
+
+    private fun releaseWifiLock() {
+        wifiLock?.takeIf { it.isHeld }?.release()
+        wifiLock = null
+        AppLogger.info(TAG, "WiFi lock released")
+    }
+
     override fun onDestroy() {
-        stopServer()
+        server?.stop()
+        server = null
+        releaseWifiLock()
+        AppLogger.info(TAG, "Service destroyed")
         super.onDestroy()
     }
 

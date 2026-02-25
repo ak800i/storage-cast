@@ -69,4 +69,8 @@
     <string name="battery_optimization_settings">Settings</string>
     <string name="battery_optimization_later">Later</string>
     <string name="battery_optimization_open_settings">Please disable battery optimization for StorageCast in Settings</string>
+    <string name="notification_channel_name">Media Server</string>
+    <string name="notification_channel_description">Shows while the media server is streaming to a Cast device</string>
+    <string name="media_server_notification_title">StorageCast</string>
+    <string name="media_server_notification_text">Media server is running</string>
 </resources>
