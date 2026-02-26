@@ -11,7 +11,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * Client for the OpenSubtitles.com REST API (v1).
+ * Client for the OpenSubtitles.org REST API (v1).
  * Supports login, subtitle search by movie hash / query, and download.
  */
 class OpenSubtitlesClient {

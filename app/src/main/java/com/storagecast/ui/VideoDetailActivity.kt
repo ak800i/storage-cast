@@ -4,6 +4,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.net.Uri
@@ -26,6 +27,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
 import com.google.android.gms.cast.MediaError
 import com.google.android.gms.cast.MediaInfo
 import com.google.android.gms.cast.MediaLoadRequestData
@@ -71,6 +74,8 @@ class VideoDetailActivity : AppCompatActivity() {
         const val EXTRA_VIDEO = "extra_video"
         private const val TAG = "VideoDetail"
         private const val SEEK_OFFSET_MS = 30_000L
+        private val FILE_EXTENSION_REGEX = Regex("\\.[^.]+$")
+        private val SEPARATOR_REGEX = Regex("[._]")
     }
 
     private lateinit var binding: ActivityVideoDetailBinding
@@ -553,7 +558,7 @@ class VideoDetailActivity : AppCompatActivity() {
     }
 
     private fun startOpenSubtitlesSearch(video: VideoItem) {
-        val prefs = getSharedPreferences("opensubtitles", MODE_PRIVATE)
+        val prefs = getOpenSubtitlesPrefs()
         val apiKey = prefs.getString("api_key", null)
         val username = prefs.getString("username", null)
         val password = prefs.getString("password", null)
@@ -566,7 +571,7 @@ class VideoDetailActivity : AppCompatActivity() {
     }
 
     private fun showOpenSubtitlesCredentialsDialog(video: VideoItem?) {
-        val prefs = getSharedPreferences("opensubtitles", MODE_PRIVATE)
+        val prefs = getOpenSubtitlesPrefs()
 
         val layout = WidgetLinearLayout(this).apply {
             orientation = WidgetLinearLayout.VERTICAL
@@ -625,8 +630,8 @@ class VideoDetailActivity : AppCompatActivity() {
 
                 val hash = openSubtitlesClient.computeHash(video.path)
                 val query = video.title
-                    .replace(Regex("\\.[^.]+$"), "")
-                    .replace(Regex("[._]"), " ")
+                    .replace(FILE_EXTENSION_REGEX, "")
+                    .replace(SEPARATOR_REGEX, " ")
 
                 openSubtitlesClient.search(apiKey, query = query, movieHash = hash)
             }
@@ -1453,6 +1458,19 @@ class VideoDetailActivity : AppCompatActivity() {
             Locale.US, "%d.%d.%d.%d",
             ipInt and 0xff, ipInt shr 8 and 0xff,
             ipInt shr 16 and 0xff, ipInt shr 24 and 0xff
+        )
+    }
+
+    private fun getOpenSubtitlesPrefs(): SharedPreferences {
+        val masterKey = MasterKey.Builder(this)
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build()
+        return EncryptedSharedPreferences.create(
+            this,
+            "opensubtitles_secure",
+            masterKey,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
         )
     }
 
