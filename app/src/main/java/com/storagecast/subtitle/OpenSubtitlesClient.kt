@@ -56,7 +56,7 @@ class OpenSubtitlesClient(
             if (responseCode == 200) {
                 val response = conn.inputStream.bufferedReader().readText()
                 val json = JSONObject(response)
-                authToken = json.optString("token", null)
+                authToken = json.optString("token").takeIf { it.isNotEmpty() }
                 AppLogger.info(TAG, "Login successful")
                 true
             } else {
@@ -154,11 +154,11 @@ class OpenSubtitlesClient(
 
             val response = conn.inputStream.bufferedReader().readText()
             val json = JSONObject(response)
-            val downloadLink = json.optString("link", null) ?: run {
+            val downloadLink = json.optString("link").takeIf { it.isNotEmpty() } ?: run {
                 AppLogger.error(TAG, "No download link in response")
                 return null
             }
-            val fileName = json.optString("file_name", "subtitle.srt")
+            val fileName = json.optString("file_name").takeIf { it.isNotEmpty() } ?: "subtitle.srt"
 
             // Step 2: Download the actual subtitle file
             AppLogger.info(TAG, "Downloading subtitle: $fileName")
@@ -225,7 +225,7 @@ class OpenSubtitlesClient(
         conn.setRequestProperty("Api-Key", apiKey)
         conn.setRequestProperty("Content-Type", "application/json")
         conn.setRequestProperty("Accept", "application/json")
-        conn.setRequestProperty("User-Agent", "StorageCast v1.0")
+        conn.setRequestProperty("User-Agent", "StorageCast")
         if (method == "POST") {
             conn.doOutput = true
         }

@@ -28,6 +28,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKeys
 import com.google.android.gms.cast.MediaError
 import com.google.android.gms.cast.MediaInfo
 import com.google.android.gms.cast.MediaLoadRequestData
@@ -74,6 +76,7 @@ class VideoDetailActivity : AppCompatActivity() {
         const val EXTRA_VIDEO = "extra_video"
         private const val TAG = "VideoDetail"
         private const val SEEK_OFFSET_MS = 30_000L
+        private const val OPENSUBTITLES_PREFS = "opensubtitles"
     }
 
     private lateinit var binding: ActivityVideoDetailBinding
@@ -555,7 +558,14 @@ class VideoDetailActivity : AppCompatActivity() {
     }
 
     private fun getOpenSubtitlesPrefs(): SharedPreferences {
-        return getSharedPreferences("opensubtitles", Context.MODE_PRIVATE)
+        val masterKeyAlias = MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC)
+        return EncryptedSharedPreferences.create(
+            OPENSUBTITLES_PREFS,
+            masterKeyAlias,
+            this,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+        )
     }
 
     private fun searchOpenSubtitles(video: VideoItem) {
@@ -644,6 +654,7 @@ class VideoDetailActivity : AppCompatActivity() {
 
                 // Fall back to text query if no hash results
                 if (subtitles.isEmpty()) {
+                    // Strip file extension from title for better search results
                     val query = video.title.replace(Regex("\\.[^.]+$"), "")
                     AppLogger.info(TAG, "Hash search returned no results, trying query: $query")
                     subtitles = client.searchByQuery(query)
