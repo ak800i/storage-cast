@@ -173,6 +173,19 @@ class VideoDetailActivity : AppCompatActivity() {
                         if (appStatus != null) {
                             AppLogger.error(TAG, "  Receiver app status: $appStatus")
                         }
+                        try {
+                            val statusJson = status.toJson()
+                            val extStatus = statusJson.optJSONObject("extendedStatus")
+                            if (extStatus != null) {
+                                AppLogger.error(TAG, "  Receiver extendedStatus: $extStatus")
+                                val mediaErrorJson = extStatus.optJSONObject("mediaError")
+                                if (mediaErrorJson != null) {
+                                    AppLogger.error(TAG, "  Receiver mediaError: $mediaErrorJson")
+                                }
+                            }
+                        } catch (e: Exception) {
+                            AppLogger.warn(TAG, "  Failed to parse MediaStatus JSON: ${e.message}")
+                        }
                     }
                     MediaStatus.IDLE_REASON_CANCELED ->
                         AppLogger.warn(TAG, "Cast playback canceled")
@@ -693,6 +706,10 @@ class VideoDetailActivity : AppCompatActivity() {
                 AppLogger.info(TAG, "Live subtitle switch: load SUCCESS")
             } else {
                 AppLogger.error(TAG, "Live subtitle switch: load FAILED - ${result.status.statusMessage}")
+                val mediaError = result.mediaError
+                if (mediaError != null) {
+                    logMediaError(mediaError)
+                }
             }
         }
         Toast.makeText(this, R.string.subtitle_switched_live, Toast.LENGTH_SHORT).show()
@@ -1274,6 +1291,14 @@ class VideoDetailActivity : AppCompatActivity() {
                 AppLogger.info(TAG, "castTranscodedVideo: load SUCCESS")
             } else {
                 AppLogger.error(TAG, "castTranscodedVideo: load FAILED - statusCode=${status.statusCode}, statusMessage=${status.statusMessage}")
+                val mediaError = result.mediaError
+                if (mediaError != null) {
+                    logMediaError(mediaError)
+                }
+                val resultCustomData = result.customData
+                if (resultCustomData != null) {
+                    AppLogger.error(TAG, "castTranscodedVideo: result customData=$resultCustomData")
+                }
                 runOnUiThread {
                     Toast.makeText(this, getString(R.string.cast_load_failed, status.statusMessage ?: "Unknown error"), Toast.LENGTH_LONG).show()
                 }
@@ -1375,6 +1400,14 @@ class VideoDetailActivity : AppCompatActivity() {
                 AppLogger.info(TAG, "castVideo: load SUCCESS")
             } else {
                 AppLogger.error(TAG, "castVideo: load FAILED - statusCode=${status.statusCode}, statusMessage=${status.statusMessage}")
+                val mediaError = result.mediaError
+                if (mediaError != null) {
+                    logMediaError(mediaError)
+                }
+                val resultCustomData = result.customData
+                if (resultCustomData != null) {
+                    AppLogger.error(TAG, "castVideo: result customData=$resultCustomData")
+                }
                 runOnUiThread {
                     Toast.makeText(this, getString(R.string.cast_load_failed, status.statusMessage ?: "Unknown error"), Toast.LENGTH_LONG).show()
                 }
