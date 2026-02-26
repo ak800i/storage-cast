@@ -73,6 +73,8 @@
     <string name="opensubtitles_results_title">OpenSubtitles results</string>
     <string name="opensubtitles_subtitle_selected">Subtitle: OpenSubtitles (%s)</string>
     <string name="opensubtitles_download_failed">Failed to download subtitle</string>
+    <string name="opensubtitles_edit_credentials">OpenSubtitles Account…</string>
+    <string name="opensubtitles_credentials_saved">OpenSubtitles credentials saved</string>
     <string name="battery_optimization_title">Battery Optimization</string>
     <string name="battery_optimization_message">Battery optimization may kill the media server while casting. Please disable it for StorageCast to ensure reliable playback.</string>
     <string name="battery_optimization_disable">Disable</string>

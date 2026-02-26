@@ -6,6 +6,10 @@
         app:actionProviderClass="androidx.mediarouter.app.MediaRouteActionProvider"
         app:showAsAction="always" />
     <item
+        android:id="@+id/action_opensubtitles_credentials"
+        android:title="@string/opensubtitles_edit_credentials"
+        app:showAsAction="never" />
+    <item
         android:id="@+id/action_logs"
         android:title="@string/view_logs"
         app:showAsAction="never" />
