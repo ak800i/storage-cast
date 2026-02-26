@@ -132,6 +132,7 @@ class VideoDetailActivity : AppCompatActivity() {
             }
             AppLogger.info(TAG, "RemoteMediaClient status: playerState=$playerStateName, idleReason=$idleReasonName")
             AppLogger.info(TAG, "  streamPosition=${status.streamPosition}, streamDuration=${client.streamDuration}, volume=${status.streamVolume}, muted=${status.isMute}")
+            AppLogger.info(TAG, "  playbackRate=${status.playbackRate}, activeTrackIds=${status.activeTrackIds?.toList()}, currentItemId=${status.currentItemId}, loadingItemId=${status.loadingItemId}")
             updateProgressTracking(playerState)
             if (playerState == com.google.android.gms.cast.MediaStatus.PLAYER_STATE_IDLE) {
                 when (status.idleReason) {
@@ -153,6 +154,11 @@ class VideoDetailActivity : AppCompatActivity() {
                         if (mediaInfo != null) {
                             AppLogger.error(TAG, "  MediaInfo streamDuration=${mediaInfo.streamDuration}, mediaTracks=${mediaInfo.mediaTracks?.size ?: 0}")
                         }
+                        val statusMediaError = status.mediaError
+                        if (statusMediaError != null) {
+                            AppLogger.error(TAG, "  Cast receiver MediaError from status:")
+                            logMediaError(statusMediaError)
+                        }
                     }
                     com.google.android.gms.cast.MediaStatus.IDLE_REASON_CANCELED ->
                         AppLogger.warn(TAG, "Cast playback canceled")
@@ -168,7 +174,24 @@ class VideoDetailActivity : AppCompatActivity() {
             AppLogger.info(TAG, "RemoteMediaClient metadata updated")
         }
 
+        override fun onQueueStatusUpdated() {
+            val client = castSession?.remoteMediaClient
+            val status = client?.mediaStatus
+            val queueItemCount = status?.queueItemCount ?: 0
+            val currentItemId = status?.currentItemId ?: -1
+            AppLogger.info(TAG, "Cast queue status updated: queueItemCount=$queueItemCount, currentItemId=$currentItemId")
+        }
+
+        override fun onPreloadStatusUpdated() {
+            AppLogger.info(TAG, "Cast preload status updated")
+        }
+
+        override fun onSendingRemoteMediaRequest() {
+            AppLogger.info(TAG, "Sending remote media request to Cast device")
+        }
+
         override fun onMediaError(mediaError: MediaError) {
+            AppLogger.error(TAG, "Cast receiver reported media error (onMediaError callback):")
             logMediaError(mediaError)
         }
     }
@@ -404,7 +427,8 @@ class VideoDetailActivity : AppCompatActivity() {
             client.seek(MediaSeekOptions.Builder().setPosition(target).build())
                 .setResultCallback { result ->
                     if (!result.status.isSuccess) {
-                        AppLogger.error(TAG, "Seek failed: ${result.status.statusMessage}")
+                        AppLogger.error(TAG, "Seek failed: statusCode=${result.status.statusCode}, statusMessage=${result.status.statusMessage}")
+                        logMediaChannelResult(result, "seekRelative")
                     }
                 }
         } else {
@@ -615,7 +639,8 @@ class VideoDetailActivity : AppCompatActivity() {
             if (result.status.isSuccess) {
                 AppLogger.info(TAG, "Live subtitle switch: load SUCCESS")
             } else {
-                AppLogger.error(TAG, "Live subtitle switch: load FAILED - ${result.status.statusMessage}")
+                AppLogger.error(TAG, "Live subtitle switch: load FAILED - statusCode=${result.status.statusCode}, statusMessage=${result.status.statusMessage}")
+                logMediaChannelResult(result, "liveSubtitleSwitch")
             }
         }
         Toast.makeText(this, R.string.subtitle_switched_live, Toast.LENGTH_SHORT).show()
@@ -1197,6 +1222,7 @@ class VideoDetailActivity : AppCompatActivity() {
                 AppLogger.info(TAG, "castTranscodedVideo: load SUCCESS")
             } else {
                 AppLogger.error(TAG, "castTranscodedVideo: load FAILED - statusCode=${status.statusCode}, statusMessage=${status.statusMessage}")
+                logMediaChannelResult(result, "castTranscodedVideo")
                 runOnUiThread {
                     Toast.makeText(this, getString(R.string.cast_load_failed, status.statusMessage ?: "Unknown error"), Toast.LENGTH_LONG).show()
                 }
@@ -1298,6 +1324,7 @@ class VideoDetailActivity : AppCompatActivity() {
                 AppLogger.info(TAG, "castVideo: load SUCCESS")
             } else {
                 AppLogger.error(TAG, "castVideo: load FAILED - statusCode=${status.statusCode}, statusMessage=${status.statusMessage}")
+                logMediaChannelResult(result, "castVideo")
                 runOnUiThread {
                     Toast.makeText(this, getString(R.string.cast_load_failed, status.statusMessage ?: "Unknown error"), Toast.LENGTH_LONG).show()
                 }
@@ -1396,7 +1423,8 @@ class VideoDetailActivity : AppCompatActivity() {
                     AppLogger.info(TAG, "Seeking cast to ${formatDuration(position)}")
                     client.seek(MediaSeekOptions.Builder().setPosition(position).build()).setResultCallback { result ->
                         if (!result.status.isSuccess) {
-                            AppLogger.error(TAG, "Seek failed: ${result.status.statusMessage}")
+                            AppLogger.error(TAG, "Seek failed: statusCode=${result.status.statusCode}, statusMessage=${result.status.statusMessage}")
+                            logMediaChannelResult(result, "seekBarSeek")
                         }
                     }
                 } else {
@@ -1494,6 +1522,22 @@ class VideoDetailActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
+    private fun logMediaChannelResult(result: RemoteMediaClient.MediaChannelResult, context: String) {
+        try {
+            val mediaError = result.mediaError
+            if (mediaError != null) {
+                AppLogger.error(TAG, "$context: Cast receiver MediaError from load result:")
+                logMediaError(mediaError)
+            }
+            val customData = result.customData
+            if (customData != null) {
+                AppLogger.error(TAG, "$context: load result customData: $customData")
+            }
+        } catch (e: Exception) {
+            AppLogger.error(TAG, "$context: Failed to read MediaChannelResult details: ${e.message}")
+        }
+    }
+
     private fun logMediaError(mediaError: MediaError) {
         try {
             val errorType = mediaError.type ?: "unknown"
@@ -1528,6 +1572,13 @@ class VideoDetailActivity : AppCompatActivity() {
             205 -> "REQUEST_LANGUAGE_NOT_SUPPORTED ($code) — Language not supported"
             300 -> "GENERIC_LOAD ($code) — Generic load error"
             301 -> "LOAD_INTERRUPTED ($code) — Load was interrupted"
+            400 -> "SEGMENT_UNKNOWN ($code) — Unknown segment error"
+            401 -> "SEGMENT_NETWORK ($code) — Network error fetching segment"
+            402 -> "SEGMENT_DECRYPT ($code) — Error decrypting segment"
+            410 -> "MANIFEST_UNKNOWN ($code) — Unknown manifest error"
+            411 -> "MANIFEST_NETWORK ($code) — Network error fetching manifest"
+            412 -> "MANIFEST_PARSE ($code) — Error parsing manifest"
+            420 -> "SEGMENT_UNKNOWN_VARIANT ($code) — Unknown variant segment error"
             else -> "UNKNOWN_ERROR ($code) — Unrecognized error code"
         }
     }
