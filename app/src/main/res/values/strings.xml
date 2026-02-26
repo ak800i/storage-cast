@@ -73,4 +73,18 @@
     <string name="notification_channel_description">Shows while the media server is streaming to a Cast device</string>
     <string name="media_server_notification_title">StorageCast</string>
     <string name="media_server_notification_text">Media server is running</string>
+
+    <string name="subtitle_source_opensubtitles">Search OpenSubtitles.org…</string>
+    <string name="opensubtitles_credentials_title">OpenSubtitles credentials</string>
+    <string name="opensubtitles_api_key">API Key</string>
+    <string name="opensubtitles_username">Username</string>
+    <string name="opensubtitles_password">Password</string>
+    <string name="opensubtitles_searching">Searching OpenSubtitles…</string>
+    <string name="opensubtitles_no_results">No subtitles found</string>
+    <string name="opensubtitles_login_failed">OpenSubtitles login failed</string>
+    <string name="opensubtitles_select_title">Select subtitle</string>
+    <string name="opensubtitles_download_failed">Failed to download subtitle</string>
+    <string name="opensubtitles_selected">Subtitle: OpenSubtitles</string>
+    <string name="opensubtitles_settings">OpenSubtitles settings</string>
+    <string name="opensubtitles_credentials_saved">OpenSubtitles credentials saved</string>
 </resources>

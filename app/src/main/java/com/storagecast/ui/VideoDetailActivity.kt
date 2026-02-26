@@ -18,6 +18,8 @@ import android.util.Size
 import android.view.Menu
 import android.view.MenuItem
 import android.view.View
+import android.widget.EditText
+import android.widget.LinearLayout as WidgetLinearLayout
 import android.widget.SeekBar
 import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
@@ -49,6 +51,7 @@ import com.storagecast.media.VideoTranscoder
 import com.storagecast.model.SubtitleTrack
 import com.storagecast.model.VideoItem
 import com.storagecast.server.MediaServerService
+import com.storagecast.subtitle.OpenSubtitlesClient
 import com.storagecast.subtitle.SubtitleConverter
 import com.storagecast.subtitle.SubtitleExtractor
 import kotlinx.coroutines.CoroutineScope
@@ -81,6 +84,7 @@ class VideoDetailActivity : AppCompatActivity() {
 
     private val subtitleExtractor = SubtitleExtractor()
     private val subtitleConverter = SubtitleConverter()
+    private val openSubtitlesClient = OpenSubtitlesClient()
     private var selectedSubtitleFile: File? = null
     private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var selectedAudioTrack: AudioTrackInfo? = null
@@ -444,6 +448,9 @@ class VideoDetailActivity : AppCompatActivity() {
         options.add(getString(R.string.subtitle_source_file))
         val fileOptionIndex = options.size - 1
 
+        options.add(getString(R.string.subtitle_source_opensubtitles))
+        val openSubtitlesIndex = options.size - 1
+
         val headerIndex = if (tracks.isNotEmpty()) embeddedStartIndex else -1
 
         AlertDialog.Builder(this)
@@ -467,6 +474,9 @@ class VideoDetailActivity : AppCompatActivity() {
                             "text/x-ass",
                             "application/octet-stream"
                         ))
+                    }
+                    which == openSubtitlesIndex -> {
+                        startOpenSubtitlesSearch(video)
                     }
                     tracks.isNotEmpty() && which > headerIndex && which < fileOptionIndex -> {
                         val trackIndex = which - headerIndex - 1
@@ -538,6 +548,133 @@ class VideoDetailActivity : AppCompatActivity() {
             } else {
                 Toast.makeText(this@VideoDetailActivity, R.string.error_subtitle, Toast.LENGTH_SHORT).show()
                 AppLogger.error(TAG, "Failed to extract subtitle for track ${track.index}")
+            }
+        }
+    }
+
+    private fun startOpenSubtitlesSearch(video: VideoItem) {
+        val prefs = getSharedPreferences("opensubtitles", MODE_PRIVATE)
+        val apiKey = prefs.getString("api_key", null)
+        val username = prefs.getString("username", null)
+        val password = prefs.getString("password", null)
+
+        if (apiKey.isNullOrBlank() || username.isNullOrBlank() || password.isNullOrBlank()) {
+            showOpenSubtitlesCredentialsDialog(video)
+        } else {
+            searchOpenSubtitles(video, apiKey, username, password)
+        }
+    }
+
+    private fun showOpenSubtitlesCredentialsDialog(video: VideoItem?) {
+        val prefs = getSharedPreferences("opensubtitles", MODE_PRIVATE)
+
+        val layout = WidgetLinearLayout(this).apply {
+            orientation = WidgetLinearLayout.VERTICAL
+            setPadding(48, 32, 48, 0)
+        }
+
+        val apiKeyInput = EditText(this).apply {
+            hint = getString(R.string.opensubtitles_api_key)
+            setText(prefs.getString("api_key", ""))
+            inputType = android.text.InputType.TYPE_CLASS_TEXT
+            isSingleLine = true
+        }
+        val usernameInput = EditText(this).apply {
+            hint = getString(R.string.opensubtitles_username)
+            setText(prefs.getString("username", ""))
+            inputType = android.text.InputType.TYPE_CLASS_TEXT
+            isSingleLine = true
+        }
+        val passwordInput = EditText(this).apply {
+            hint = getString(R.string.opensubtitles_password)
+            setText(prefs.getString("password", ""))
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            isSingleLine = true
+        }
+
+        layout.addView(apiKeyInput)
+        layout.addView(usernameInput)
+        layout.addView(passwordInput)
+
+        AlertDialog.Builder(this)
+            .setTitle(R.string.opensubtitles_credentials_title)
+            .setView(layout)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                val key = apiKeyInput.text.toString().trim()
+                val user = usernameInput.text.toString().trim()
+                val pass = passwordInput.text.toString().trim()
+                prefs.edit()
+                    .putString("api_key", key)
+                    .putString("username", user)
+                    .putString("password", pass)
+                    .apply()
+                if (video != null && key.isNotBlank() && user.isNotBlank() && pass.isNotBlank()) {
+                    searchOpenSubtitles(video, key, user, pass)
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun searchOpenSubtitles(video: VideoItem, apiKey: String, username: String, password: String) {
+        binding.progressBar.visibility = View.VISIBLE
+        activityScope.launch {
+            val results = withContext(Dispatchers.IO) {
+                val loggedIn = openSubtitlesClient.login(apiKey, username, password)
+                if (!loggedIn) return@withContext null
+
+                val hash = openSubtitlesClient.computeHash(video.path)
+                val query = video.title
+                    .replace(Regex("\\.[^.]+$"), "")
+                    .replace(Regex("[._]"), " ")
+
+                openSubtitlesClient.search(apiKey, query = query, movieHash = hash)
+            }
+            binding.progressBar.visibility = View.GONE
+
+            if (results == null) {
+                Toast.makeText(this@VideoDetailActivity, R.string.opensubtitles_login_failed, Toast.LENGTH_SHORT).show()
+            } else if (results.isEmpty()) {
+                Toast.makeText(this@VideoDetailActivity, R.string.opensubtitles_no_results, Toast.LENGTH_SHORT).show()
+            } else {
+                showOpenSubtitlesResultsDialog(apiKey, results)
+            }
+        }
+    }
+
+    private fun showOpenSubtitlesResultsDialog(apiKey: String, results: List<com.storagecast.subtitle.OpenSubtitlesResult>) {
+        val items = results.map { "${it.language} — ${it.release} (${it.downloadCount} downloads)" }
+        AlertDialog.Builder(this)
+            .setTitle(R.string.opensubtitles_select_title)
+            .setItems(items.toTypedArray()) { _, which ->
+                downloadOpenSubtitle(apiKey, results[which])
+            }
+            .show()
+    }
+
+    private fun downloadOpenSubtitle(apiKey: String, result: com.storagecast.subtitle.OpenSubtitlesResult) {
+        binding.progressBar.visibility = View.VISIBLE
+        activityScope.launch {
+            val subtitleFile = withContext(Dispatchers.IO) {
+                val outputDir = File(cacheDir, "subtitles")
+                val downloaded = openSubtitlesClient.download(apiKey, result.fileId, outputDir)
+                    ?: return@withContext null
+                subtitleConverter.convertToVtt(
+                    downloaded.inputStream(),
+                    downloaded.name,
+                    outputDir
+                )
+            }
+            binding.progressBar.visibility = View.GONE
+
+            if (subtitleFile != null) {
+                selectedSubtitleFile = subtitleFile
+                binding.subtitleStatus.text = getString(R.string.opensubtitles_selected)
+                binding.subtitleStatus.visibility = View.VISIBLE
+                AppLogger.info(TAG, "OpenSubtitles subtitle loaded: ${subtitleFile.name}")
+                applyLiveSubtitleChange(subtitleFile)
+            } else {
+                Toast.makeText(this@VideoDetailActivity, R.string.opensubtitles_download_failed, Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -1365,6 +1502,10 @@ class VideoDetailActivity : AppCompatActivity() {
         return when (item.itemId) {
             R.id.action_logs -> {
                 startActivity(Intent(this, LogActivity::class.java))
+                true
+            }
+            R.id.action_opensubtitles_settings -> {
+                showOpenSubtitlesCredentialsDialog(null)
                 true
             }
             else -> super.onOptionsItemSelected(item)
