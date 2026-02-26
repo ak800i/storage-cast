@@ -70,6 +70,8 @@ class VideoDetailActivity : AppCompatActivity() {
         const val EXTRA_VIDEO = "extra_video"
         private const val TAG = "VideoDetail"
         private const val SEEK_OFFSET_MS = 30_000L
+        private const val NORMAL_PLAYBACK_RATE = 1.0
+        private const val NO_LOADING_ITEM = 0
     }
 
     private lateinit var binding: ActivityVideoDetailBinding
@@ -141,7 +143,7 @@ class VideoDetailActivity : AppCompatActivity() {
             val playbackRate = status.playbackRate
             val activeTrackIds = status.activeTrackIds
             val loadingItemId = status.loadingItemId
-            if (playbackRate != 1.0 || activeTrackIds != null || loadingItemId != 0) {
+            if (playbackRate != NORMAL_PLAYBACK_RATE || activeTrackIds != null || loadingItemId != NO_LOADING_ITEM) {
                 AppLogger.info(TAG, "  playbackRate=$playbackRate, activeTrackIds=${activeTrackIds?.toList()}, loadingItemId=$loadingItemId")
             }
             val customData = status.customData
