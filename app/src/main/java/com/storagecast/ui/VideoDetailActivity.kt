@@ -24,11 +24,13 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import com.google.android.gms.cast.Cast
 import com.google.android.gms.cast.MediaError
 import com.google.android.gms.cast.MediaInfo
 import com.google.android.gms.cast.MediaLoadRequestData
 import com.google.android.gms.cast.MediaMetadata
 import com.google.android.gms.cast.MediaSeekOptions
+import com.google.android.gms.cast.MediaStatus
 import com.google.android.gms.cast.MediaTrack
 import com.google.android.gms.cast.TextTrackStyle
 import com.google.android.gms.cast.framework.CastButtonFactory
@@ -115,28 +117,41 @@ class VideoDetailActivity : AppCompatActivity() {
             val status = client?.mediaStatus ?: return
             val playerState = status.playerState
             val playerStateName = when (playerState) {
-                com.google.android.gms.cast.MediaStatus.PLAYER_STATE_IDLE -> "IDLE"
-                com.google.android.gms.cast.MediaStatus.PLAYER_STATE_PLAYING -> "PLAYING"
-                com.google.android.gms.cast.MediaStatus.PLAYER_STATE_PAUSED -> "PAUSED"
-                com.google.android.gms.cast.MediaStatus.PLAYER_STATE_BUFFERING -> "BUFFERING"
-                com.google.android.gms.cast.MediaStatus.PLAYER_STATE_LOADING -> "LOADING"
+                MediaStatus.PLAYER_STATE_IDLE -> "IDLE"
+                MediaStatus.PLAYER_STATE_PLAYING -> "PLAYING"
+                MediaStatus.PLAYER_STATE_PAUSED -> "PAUSED"
+                MediaStatus.PLAYER_STATE_BUFFERING -> "BUFFERING"
+                MediaStatus.PLAYER_STATE_LOADING -> "LOADING"
                 else -> "UNKNOWN($playerState)"
             }
             val idleReasonName = when (status.idleReason) {
-                com.google.android.gms.cast.MediaStatus.IDLE_REASON_NONE -> "NONE"
-                com.google.android.gms.cast.MediaStatus.IDLE_REASON_FINISHED -> "FINISHED"
-                com.google.android.gms.cast.MediaStatus.IDLE_REASON_CANCELED -> "CANCELED"
-                com.google.android.gms.cast.MediaStatus.IDLE_REASON_INTERRUPTED -> "INTERRUPTED"
-                com.google.android.gms.cast.MediaStatus.IDLE_REASON_ERROR -> "ERROR"
+                MediaStatus.IDLE_REASON_NONE -> "NONE"
+                MediaStatus.IDLE_REASON_FINISHED -> "FINISHED"
+                MediaStatus.IDLE_REASON_CANCELED -> "CANCELED"
+                MediaStatus.IDLE_REASON_INTERRUPTED -> "INTERRUPTED"
+                MediaStatus.IDLE_REASON_ERROR -> "ERROR"
                 else -> "UNKNOWN(${status.idleReason})"
             }
-            AppLogger.info(TAG, "RemoteMediaClient status: playerState=$playerStateName, idleReason=$idleReasonName")
+            AppLogger.info(TAG, "Cast receiver status: playerState=$playerStateName, idleReason=$idleReasonName")
             AppLogger.info(TAG, "  streamPosition=${status.streamPosition}, streamDuration=${client.streamDuration}, volume=${status.streamVolume}, muted=${status.isMute}")
+            val mediaInfo = status.mediaInfo
+            if (mediaInfo != null) {
+                AppLogger.info(TAG, "  receiver mediaInfo: contentId=${mediaInfo.contentId}, contentType=${mediaInfo.contentType}, streamDuration=${mediaInfo.streamDuration}")
+            }
+            val playbackRate = status.playbackRate
+            val activeTrackIds = status.activeTrackIds
+            val loadingItemId = status.loadingItemId
+            if (playbackRate != 1.0 || activeTrackIds != null || loadingItemId != 0) {
+                AppLogger.info(TAG, "  playbackRate=$playbackRate, activeTrackIds=${activeTrackIds?.toList()}, loadingItemId=$loadingItemId")
+            }
+            val customData = status.customData
+            if (customData != null) {
+                AppLogger.info(TAG, "  receiver customData: $customData")
+            }
             updateProgressTracking(playerState)
-            if (playerState == com.google.android.gms.cast.MediaStatus.PLAYER_STATE_IDLE) {
+            if (playerState == MediaStatus.PLAYER_STATE_IDLE) {
                 when (status.idleReason) {
-                    com.google.android.gms.cast.MediaStatus.IDLE_REASON_ERROR -> {
-                        val mediaInfo = status.mediaInfo
+                    MediaStatus.IDLE_REASON_ERROR -> {
                         val contentId = mediaInfo?.contentId ?: "unknown"
                         val contentType = mediaInfo?.contentType ?: "unknown"
                         val streamType = mediaInfo?.streamType ?: -1
@@ -146,30 +161,83 @@ class VideoDetailActivity : AppCompatActivity() {
                             MediaInfo.STREAM_TYPE_NONE -> "NONE"
                             else -> "UNKNOWN($streamType)"
                         }
-                        val customData = status.customData
                         AppLogger.error(TAG, "Cast playback error: contentId=$contentId, contentType=$contentType, streamType=$streamTypeName, customData=$customData")
                         AppLogger.error(TAG, "  Cast device: ${castSession?.castDevice?.friendlyName ?: "unknown"}, model=${castSession?.castDevice?.modelName ?: "unknown"}")
                         AppLogger.error(TAG, "  Media server running: ${mediaServerService?.isServerRunning()}")
                         if (mediaInfo != null) {
                             AppLogger.error(TAG, "  MediaInfo streamDuration=${mediaInfo.streamDuration}, mediaTracks=${mediaInfo.mediaTracks?.size ?: 0}")
                         }
+                        val appStatus = castSession?.applicationStatus
+                        if (appStatus != null) {
+                            AppLogger.error(TAG, "  Receiver app status: $appStatus")
+                        }
                     }
-                    com.google.android.gms.cast.MediaStatus.IDLE_REASON_CANCELED ->
+                    MediaStatus.IDLE_REASON_CANCELED ->
                         AppLogger.warn(TAG, "Cast playback canceled")
-                    com.google.android.gms.cast.MediaStatus.IDLE_REASON_INTERRUPTED ->
+                    MediaStatus.IDLE_REASON_INTERRUPTED ->
                         AppLogger.warn(TAG, "Cast playback interrupted")
-                    com.google.android.gms.cast.MediaStatus.IDLE_REASON_FINISHED ->
+                    MediaStatus.IDLE_REASON_FINISHED ->
                         AppLogger.info(TAG, "Cast playback finished")
                 }
             }
         }
 
         override fun onMetadataUpdated() {
-            AppLogger.info(TAG, "RemoteMediaClient metadata updated")
+            val client = castSession?.remoteMediaClient
+            val mediaInfo = client?.mediaInfo
+            if (mediaInfo != null) {
+                val title = mediaInfo.metadata?.getString(MediaMetadata.KEY_TITLE)
+                AppLogger.info(TAG, "Cast receiver metadata updated: title=$title, contentType=${mediaInfo.contentType}")
+            } else {
+                AppLogger.info(TAG, "Cast receiver metadata updated")
+            }
+        }
+
+        override fun onQueueStatusUpdated() {
+            val client = castSession?.remoteMediaClient
+            val status = client?.mediaStatus
+            val queueItemCount = status?.queueItemCount ?: 0
+            AppLogger.info(TAG, "Cast receiver queue status updated: queueItemCount=$queueItemCount")
+        }
+
+        override fun onPreloadStatusUpdated() {
+            AppLogger.info(TAG, "Cast receiver preload status updated")
+        }
+
+        override fun onSendingRemoteMediaRequest() {
+            AppLogger.info(TAG, "Sending request to Cast receiver")
         }
 
         override fun onMediaError(mediaError: MediaError) {
             logMediaError(mediaError)
+        }
+    }
+
+    private val castListener = object : Cast.Listener() {
+        override fun onApplicationStatusChanged() {
+            val status = castSession?.applicationStatus
+            AppLogger.info(TAG, "Cast receiver app status changed: $status")
+        }
+
+        override fun onApplicationMetadataChanged(metadata: com.google.android.gms.cast.ApplicationMetadata?) {
+            val appName = metadata?.name
+            val appId = metadata?.applicationId
+            val namespaces = metadata?.supportedNamespaces
+            AppLogger.info(TAG, "Cast receiver app metadata changed: name=$appName, appId=$appId, namespaces=$namespaces")
+        }
+
+        override fun onVolumeChanged() {
+            AppLogger.info(TAG, "Cast receiver volume changed: volume=${castSession?.volume}, muted=${castSession?.isMute}")
+        }
+
+        override fun onActiveInputStateChanged(activeInputState: Int) {
+            val stateName = when (activeInputState) {
+                Cast.ACTIVE_INPUT_STATE_YES -> "ACTIVE"
+                Cast.ACTIVE_INPUT_STATE_NO -> "INACTIVE"
+                Cast.ACTIVE_INPUT_STATE_UNKNOWN -> "UNKNOWN"
+                else -> "UNRECOGNIZED($activeInputState)"
+            }
+            AppLogger.info(TAG, "Cast receiver active input state changed: $stateName")
         }
     }
 
@@ -194,7 +262,9 @@ class VideoDetailActivity : AppCompatActivity() {
     }
 
     private fun handleCastSessionFailure(session: CastSession, error: Int) {
+        AppLogger.error(TAG, "Cast session failure: error=$error, ${describeCastStatusCode(error)}")
         session.remoteMediaClient?.unregisterCallback(remoteMediaClientCallback)
+        session.removeCastListener(castListener)
         castSession = null
         updateCastStatus()
         stopProgressUpdates()
@@ -208,12 +278,14 @@ class VideoDetailActivity : AppCompatActivity() {
         }
         override fun onSessionStarted(session: CastSession, sessionId: String) {
             AppLogger.info(TAG, "Cast session started: $sessionId, device=${session.castDevice?.friendlyName}")
+            logCastDeviceInfo(session)
             castSession = session
             session.remoteMediaClient?.registerCallback(remoteMediaClientCallback)
+            session.addCastListener(castListener)
             updateCastStatus()
         }
         override fun onSessionStartFailed(session: CastSession, error: Int) {
-            AppLogger.error(TAG, "Cast session start failed: error=$error")
+            AppLogger.error(TAG, "Cast session start failed: error=$error, ${describeCastStatusCode(error)}")
             handleCastSessionFailure(session, error)
         }
         override fun onSessionEnding(session: CastSession) {
@@ -226,6 +298,7 @@ class VideoDetailActivity : AppCompatActivity() {
         override fun onSessionEnded(session: CastSession, error: Int) {
             AppLogger.info(TAG, "Cast session ended: error=$error")
             session.remoteMediaClient?.unregisterCallback(remoteMediaClientCallback)
+            session.removeCastListener(castListener)
             castSession = null
             updateCastStatus()
             stopProgressUpdates()
@@ -236,12 +309,14 @@ class VideoDetailActivity : AppCompatActivity() {
         }
         override fun onSessionResumed(session: CastSession, wasSuspended: Boolean) {
             AppLogger.info(TAG, "Cast session resumed, wasSuspended=$wasSuspended")
+            logCastDeviceInfo(session)
             castSession = session
             session.remoteMediaClient?.registerCallback(remoteMediaClientCallback)
+            session.addCastListener(castListener)
             updateCastStatus()
         }
         override fun onSessionResumeFailed(session: CastSession, error: Int) {
-            AppLogger.error(TAG, "Cast session resume failed: error=$error")
+            AppLogger.error(TAG, "Cast session resume failed: error=$error, ${describeCastStatusCode(error)}")
             handleCastSessionFailure(session, error)
         }
         override fun onSessionSuspended(session: CastSession, reason: Int) {
@@ -1462,6 +1537,7 @@ class VideoDetailActivity : AppCompatActivity() {
             val currentSession = castContext?.sessionManager?.currentCastSession
             castSession = currentSession
             currentSession?.remoteMediaClient?.registerCallback(remoteMediaClientCallback)
+            currentSession?.addCastListener(castListener)
             updateCastStatus()
             AppLogger.info(TAG, "onResume: castSession=${if (currentSession != null) "connected to ${currentSession.castDevice?.friendlyName}" else "null"}")
         } catch (e: Exception) {
@@ -1474,6 +1550,7 @@ class VideoDetailActivity : AppCompatActivity() {
         stopProgressUpdates()
         try {
             castSession?.remoteMediaClient?.unregisterCallback(remoteMediaClientCallback)
+            castSession?.removeCastListener(castListener)
             castContext?.sessionManager?.removeSessionManagerListener(
                 sessionManagerListener, CastSession::class.java
             )
@@ -1528,7 +1605,48 @@ class VideoDetailActivity : AppCompatActivity() {
             205 -> "REQUEST_LANGUAGE_NOT_SUPPORTED ($code) — Language not supported"
             300 -> "GENERIC_LOAD ($code) — Generic load error"
             301 -> "LOAD_INTERRUPTED ($code) — Load was interrupted"
+            302 -> "BREAK_CLIP_LOADING_ERROR ($code) — Break clip load error"
+            303 -> "BREAK_SEEK_INTERCEPTOR_ERROR ($code) — Break seek interceptor error"
+            304 -> "IMAGE_ERROR ($code) — Image loading error"
             else -> "UNKNOWN_ERROR ($code) — Unrecognized error code"
+        }
+    }
+
+    private fun logCastDeviceInfo(session: CastSession) {
+        try {
+            val device = session.castDevice
+            if (device != null) {
+                AppLogger.info(TAG, "Cast device: name=${device.friendlyName}, model=${device.modelName}")
+                AppLogger.info(TAG, "  deviceId=${device.deviceId}, deviceVersion=${device.deviceVersion}")
+                AppLogger.info(TAG, "  ipAddress=${device.inetAddress?.hostAddress}")
+            }
+            val appMetadata = session.applicationMetadata
+            if (appMetadata != null) {
+                AppLogger.info(TAG, "Cast receiver app: name=${appMetadata.name}, appId=${appMetadata.applicationId}")
+                AppLogger.info(TAG, "  namespaces=${appMetadata.supportedNamespaces}")
+            }
+            val appStatus = session.applicationStatus
+            if (appStatus != null) {
+                AppLogger.info(TAG, "Cast receiver app status: $appStatus")
+            }
+            AppLogger.info(TAG, "Cast receiver volume: ${session.volume}, muted=${session.isMute}")
+        } catch (e: Exception) {
+            AppLogger.warn(TAG, "Failed to log cast device info: ${e.message}")
+        }
+    }
+
+    private fun describeCastStatusCode(code: Int): String {
+        return when (code) {
+            0 -> "SUCCESS"
+            1 -> "CANCELED"
+            2 -> "TIMEOUT"
+            3 -> "INTERRUPTED"
+            4 -> "NETWORK_ERROR"
+            5 -> "AUTHENTICATION_ERROR"
+            6 -> "NOT_CONNECTED"
+            7 -> "SESSION_START_FAILED"
+            8 -> "INTERNAL_ERROR"
+            else -> "UNKNOWN_STATUS($code)"
         }
     }
 
