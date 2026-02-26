@@ -63,6 +63,16 @@
     <string name="audio_track_switch_reload">Switching audio track — stream will reload</string>
     <string name="subtitle_switched_live">Subtitles updated</string>
     <string name="subtitle_disabled_live">Subtitles disabled</string>
+    <string name="subtitle_source_opensubtitles">Search OpenSubtitles…</string>
+    <string name="opensubtitles_login_title">OpenSubtitles Account</string>
+    <string name="opensubtitles_api_key_hint">API Key</string>
+    <string name="opensubtitles_username_hint">Username</string>
+    <string name="opensubtitles_password_hint">Password</string>
+    <string name="opensubtitles_credentials_required">All fields are required</string>
+    <string name="opensubtitles_no_results">No subtitles found on OpenSubtitles</string>
+    <string name="opensubtitles_results_title">OpenSubtitles results</string>
+    <string name="opensubtitles_subtitle_selected">Subtitle: OpenSubtitles (%s)</string>
+    <string name="opensubtitles_download_failed">Failed to download subtitle</string>
     <string name="battery_optimization_title">Battery Optimization</string>
     <string name="battery_optimization_message">Battery optimization may kill the media server while casting. Please disable it for StorageCast to ensure reliable playback.</string>
     <string name="battery_optimization_disable">Disable</string>
