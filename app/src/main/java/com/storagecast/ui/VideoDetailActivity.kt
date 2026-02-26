@@ -1725,9 +1725,11 @@ class VideoDetailActivity : AppCompatActivity() {
         activityScope.launch {
             val success = withContext(Dispatchers.IO) {
                 try {
-                    contentResolver.openOutputStream(uri)?.use { output ->
+                    val output = contentResolver.openOutputStream(uri)
+                        ?: return@withContext false
+                    output.use { out ->
                         file.inputStream().use { input ->
-                            input.copyTo(output)
+                            input.copyTo(out)
                         }
                     }
                     true
