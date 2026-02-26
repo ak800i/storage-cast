@@ -16,6 +16,7 @@ import com.storagecast.R
 import com.storagecast.StorageCastApp
 import com.storagecast.log.AppLogger
 import com.storagecast.ui.VideoDetailActivity
+import fi.iki.elonen.NanoFixedLengthResponse
 import fi.iki.elonen.NanoHTTPD
 import java.io.File
 import java.io.FileInputStream
@@ -395,10 +396,28 @@ class MediaServerService : Service() {
             return MonitoredInputStream(fis, entry.file.name)
         }
 
+        /**
+         * Creates a fixed-length response that avoids NanoHTTPD's duplicate
+         * Content-Length header bug.  NanoHTTPD.newFixedLengthResponse() adds
+         * Content-Length to the header map, but Response.send() unconditionally
+         * emits another Content-Length via sendContentLengthHeaderIfNotAlreadyPresent(),
+         * producing duplicate headers that some HTTP clients reject (notably
+         * CrKey/Chrome 92 Cast receivers).  NanoFixedLengthResponse uses the
+         * protected Response constructor which sets contentLength internally
+         * without adding to the header map, so send() emits exactly one
+         * Content-Length.
+         */
+        private fun newResponse(
+            status: Response.IStatus,
+            mimeType: String,
+            data: java.io.InputStream,
+            totalBytes: Long
+        ): Response = NanoFixedLengthResponse.create(status, mimeType, data, totalBytes)
+
         private fun serveFullContent(entry: FileEntry): Response {
             return try {
                 val fis = openFileStream(entry)
-                val response = newFixedLengthResponse(
+                val response = newResponse(
                     Response.Status.OK, entry.mimeType, fis, entry.file.length()
                 )
                 response.addHeader("Accept-Ranges", "bytes")
@@ -442,7 +461,7 @@ class MediaServerService : Service() {
                 val fis = openFileStreamAtOffset(entry, start)
 
                 val contentRange = "bytes $start-$end/$fileLength"
-                val response = newFixedLengthResponse(
+                val response = newResponse(
                     Response.Status.PARTIAL_CONTENT, entry.mimeType, fis, contentLength
                 )
                 response.addHeader("Content-Range", contentRange)
