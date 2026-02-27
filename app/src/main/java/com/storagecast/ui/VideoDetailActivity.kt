@@ -496,7 +496,7 @@ class VideoDetailActivity : AppCompatActivity() {
 
     private fun seekRelative(offsetMs: Long) {
         val client = castSession?.remoteMediaClient
-        if (client?.hasMediaSession() == true) {
+        if (client?.hasMediaSession() == true && isMediaActive(client.mediaStatus?.playerState)) {
             val current = client.approximateStreamPosition
             val duration = client.streamDuration
             val target = (current + offsetMs).coerceIn(0, duration.coerceAtLeast(0))
@@ -1870,7 +1870,7 @@ class VideoDetailActivity : AppCompatActivity() {
                 isSeekBarDragging = false
                 val position = seekBar?.progress?.toLong() ?: return
                 val client = castSession?.remoteMediaClient
-                if (client?.hasMediaSession() == true) {
+                if (client?.hasMediaSession() == true && isMediaActive(client.mediaStatus?.playerState)) {
                     AppLogger.info(TAG, "Seeking cast to ${formatDuration(position)}")
                     client.seek(MediaSeekOptions.Builder().setPosition(position).build()).setResultCallback { result ->
                         if (!result.status.isSuccess) {
