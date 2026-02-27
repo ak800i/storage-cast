@@ -13,6 +13,31 @@ class SubtitleConverter {
     companion object {
         private const val TAG = "SubtitleConverter"
 
+        /**
+         * VTT STYLE block that forces transparent background with white text
+         * and black outline. The Cast Default Media Receiver ignores the
+         * sender-side TextTrackStyle for backgroundColor, so the style must
+         * be embedded directly in the VTT content.
+         */
+        private const val VTT_STYLE_BLOCK =
+            "STYLE\n" +
+            "::cue {\n" +
+            "  background-color: transparent;\n" +
+            "}\n"
+
+        /**
+         * Ensures the VTT content contains a STYLE block for transparent
+         * cue background. Injects one after the WEBVTT header if missing.
+         */
+        fun ensureVttStyle(vttContent: String): String {
+            if (vttContent.contains("STYLE", ignoreCase = false) &&
+                vttContent.contains("::cue", ignoreCase = true)) return vttContent
+            val headerEnd = vttContent.indexOf('\n')
+            if (headerEnd < 0) return vttContent
+            return vttContent.substring(0, headerEnd + 1) + "\n" +
+                    VTT_STYLE_BLOCK + vttContent.substring(headerEnd + 1)
+        }
+
         private val SRT_TIMESTAMP_REGEX = Regex(
             "(\\d{2}:\\d{2}:\\d{2},\\d{3})\\s*-->\\s*(\\d{2}:\\d{2}:\\d{2},\\d{3})"
         )
@@ -45,7 +70,7 @@ class SubtitleConverter {
             }
 
             if (vttContent != null) {
-                outputFile.writeText(vttContent)
+                outputFile.writeText(ensureVttStyle(vttContent))
                 AppLogger.info(TAG, "Converted $fileName to VTT (${outputFile.length()} bytes)")
                 outputFile
             } else {
