@@ -1321,19 +1321,15 @@ class VideoDetailActivity : AppCompatActivity() {
                     }
                     val tempFile = File(outputDir, "filtered_${System.currentTimeMillis()}.mkv")
 
-                    val sourceStream = if (videoUri != null) {
-                        try {
-                            val pfd = contentResolver.openFileDescriptor(videoUri, "r")
-                            if (pfd != null) {
-                                android.os.ParcelFileDescriptor.AutoCloseInputStream(pfd)
-                            } else {
-                                java.io.FileInputStream(videoPath)
-                            }
-                        } catch (e: Exception) {
-                            AppLogger.warn(TAG, "ContentResolver failed, falling back to FileInputStream: ${e.message}")
+                    val sourceStream = try {
+                        val pfd = contentResolver.openFileDescriptor(videoUri, "r")
+                        if (pfd != null) {
+                            android.os.ParcelFileDescriptor.AutoCloseInputStream(pfd)
+                        } else {
                             java.io.FileInputStream(videoPath)
                         }
-                    } else {
+                    } catch (e: Exception) {
+                        AppLogger.warn(TAG, "ContentResolver failed, falling back to FileInputStream: ${e.message}")
                         java.io.FileInputStream(videoPath)
                     }
 
