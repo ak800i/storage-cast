@@ -27,7 +27,7 @@
     <string name="stop">Stop</string>
     <string name="rewind_30">Rewind 30s</string>
     <string name="forward_30">Forward 30s</string>
-    <string name="rotate_video">Rotate</string>
+
     <string name="video_thumbnail_desc">Video thumbnail</string>
     <string name="select_subtitles">Subtitles</string>
     <string name="cast_video">Cast Video</string>

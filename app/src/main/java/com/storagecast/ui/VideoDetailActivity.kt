@@ -85,7 +85,6 @@ class VideoDetailActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityVideoDetailBinding
     private var videoItem: VideoItem? = null
-    private var thumbnailRotation = 0f
 
     private var castContext: CastContext? = null
     private var castSession: CastSession? = null
@@ -483,14 +482,6 @@ class VideoDetailActivity : AppCompatActivity() {
             seekRelative(SEEK_OFFSET_MS)
         }
 
-        binding.rotateButton.setOnClickListener {
-            thumbnailRotation = (thumbnailRotation + 90f) % 360f
-            binding.videoThumbnail.animate()
-                .rotation(thumbnailRotation)
-                .setDuration(200)
-                .start()
-            AppLogger.info(TAG, "Thumbnail rotated to ${thumbnailRotation.toInt()}°")
-        }
 
         binding.subtitleButton.setOnClickListener {
             val video = videoItem ?: return@setOnClickListener
