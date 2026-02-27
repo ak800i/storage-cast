@@ -250,92 +250,31 @@
                 android:orientation="vertical"
                 android:paddingHorizontal="16dp">
 
-                <TextView
-                    android:id="@+id/subtitleStatus"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:textSize="12sp"
-                    android:textColor="@color/accent_light"
-                    android:drawablePadding="6dp"
-                    android:visibility="gone" />
-
-                <!-- Subtitle sync controls -->
                 <LinearLayout
-                    android:id="@+id/subtitleSyncContainer"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="horizontal"
-                    android:gravity="center_vertical"
-                    android:layout_marginTop="6dp"
-                    android:visibility="gone">
+                    android:gravity="center_vertical">
 
                     <TextView
-                        android:id="@+id/subtitleSyncLabel"
-                        android:layout_width="wrap_content"
+                        android:id="@+id/subtitleStatus"
+                        android:layout_width="0dp"
                         android:layout_height="wrap_content"
-                        android:text="@string/subtitle_sync_label"
-                        android:textSize="12sp"
-                        android:textColor="@color/text_secondary_dark" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/syncMinus1s"
-                        android:layout_width="wrap_content"
-                        android:layout_height="32dp"
-                        android:layout_marginStart="8dp"
-                        android:text="@string/subtitle_sync_minus_1s"
-                        android:textSize="11sp"
-                        android:minWidth="0dp"
-                        android:paddingHorizontal="8dp"
-                        style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-                        app:strokeColor="@color/text_tertiary_dark"
-                        android:textColor="@color/text_primary_dark" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/syncMinus01s"
-                        android:layout_width="wrap_content"
-                        android:layout_height="32dp"
-                        android:layout_marginStart="4dp"
-                        android:text="@string/subtitle_sync_minus_01s"
-                        android:textSize="11sp"
-                        android:minWidth="0dp"
-                        android:paddingHorizontal="8dp"
-                        style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-                        app:strokeColor="@color/text_tertiary_dark"
-                        android:textColor="@color/text_primary_dark" />
-
-                    <TextView
-                        android:id="@+id/subtitleSyncValue"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginHorizontal="6dp"
+                        android:layout_weight="1"
                         android:textSize="12sp"
                         android:textColor="@color/accent_light"
-                        android:text="0.0s" />
+                        android:drawablePadding="6dp"
+                        android:visibility="gone" />
 
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/syncPlus01s"
-                        android:layout_width="wrap_content"
-                        android:layout_height="32dp"
-                        android:text="@string/subtitle_sync_plus_01s"
-                        android:textSize="11sp"
-                        android:minWidth="0dp"
-                        android:paddingHorizontal="8dp"
-                        style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-                        app:strokeColor="@color/text_tertiary_dark"
-                        android:textColor="@color/text_primary_dark" />
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/syncPlus1s"
-                        android:layout_width="wrap_content"
-                        android:layout_height="32dp"
-                        android:layout_marginStart="4dp"
-                        android:text="@string/subtitle_sync_plus_1s"
-                        android:textSize="11sp"
-                        android:minWidth="0dp"
-                        android:paddingHorizontal="8dp"
-                        style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-                        app:strokeColor="@color/text_tertiary_dark"
-                        android:textColor="@color/text_primary_dark" />
+                    <ImageButton
+                        android:id="@+id/subtitleOffsetButton"
+                        android:layout_width="40dp"
+                        android:layout_height="40dp"
+                        android:background="?attr/selectableItemBackgroundBorderless"
+                        android:src="@drawable/ic_timer"
+                        android:contentDescription="@string/subtitle_offset_button_desc"
+                        android:visibility="gone"
+                        app:tint="@color/accent_light" />
                 </LinearLayout>
 
                 <TextView
