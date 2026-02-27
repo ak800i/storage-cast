@@ -71,6 +71,8 @@
     <string name="opensubtitles_credentials_required">All fields are required</string>
     <string name="opensubtitles_no_results">No subtitles found on OpenSubtitles</string>
     <string name="opensubtitles_results_title">OpenSubtitles results</string>
+    <string name="opensubtitles_hash_matches">Hash matches</string>
+    <string name="opensubtitles_title_matches">Title matches</string>
     <string name="opensubtitles_subtitle_selected">Subtitle: OpenSubtitles (%s)</string>
     <string name="opensubtitles_download_failed">Failed to download subtitle</string>
     <string name="opensubtitles_edit_credentials">OpenSubtitles Account…</string>
