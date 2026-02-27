@@ -46,6 +46,7 @@
                 android:textSize="11sp"
                 android:maxLines="1"
                 android:ellipsize="middle"
+                android:importantForAccessibility="no"
                 android:textColor="?android:attr/textColorSecondary" />
 
             <TextView
