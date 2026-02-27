@@ -575,16 +575,20 @@ class VideoDetailActivity : AppCompatActivity() {
             .create()
 
         dialogView.findViewById<View>(R.id.offsetMinus1s).setOnClickListener {
-            adjustSubtitleSync(-1000L); updateDisplay()
+            adjustSubtitleSync(-1000L)
+            updateDisplay()
         }
         dialogView.findViewById<View>(R.id.offsetMinus01s).setOnClickListener {
-            adjustSubtitleSync(-100L); updateDisplay()
+            adjustSubtitleSync(-100L)
+            updateDisplay()
         }
         dialogView.findViewById<View>(R.id.offsetPlus01s).setOnClickListener {
-            adjustSubtitleSync(100L); updateDisplay()
+            adjustSubtitleSync(100L)
+            updateDisplay()
         }
         dialogView.findViewById<View>(R.id.offsetPlus1s).setOnClickListener {
-            adjustSubtitleSync(1000L); updateDisplay()
+            adjustSubtitleSync(1000L)
+            updateDisplay()
         }
         dialogView.findViewById<View>(R.id.offsetReset).setOnClickListener {
             if (subtitleSyncOffsetMs != 0L) {
