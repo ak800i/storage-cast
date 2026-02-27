@@ -7,6 +7,7 @@ import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.viewModelScope
 import com.storagecast.model.BrowseItem
 import com.storagecast.model.VideoItem
+import com.storagecast.ui.SettingsActivity
 import com.storagecast.video.VideoRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -20,6 +21,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var allVideos: List<VideoItem> = emptyList()
     private var currentPath: String? = null
     private var isSearching = false
+    private var minDurationMs: Long = 0L
 
     private val _browseItems = MutableLiveData<List<BrowseItem>>()
     val browseItems: LiveData<List<BrowseItem>> = _browseItems
@@ -30,6 +32,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _currentFolder = MutableLiveData<String?>()
     val currentFolder: LiveData<String?> = _currentFolder
 
+    private val filteredVideos: List<VideoItem>
+        get() = if (minDurationMs > 0) {
+            allVideos.filter { it.duration >= minDurationMs }
+        } else {
+            allVideos
+        }
+
+    fun refreshFilter() {
+        minDurationMs = SettingsActivity.getMinDurationMs(getApplication())
+        if (allVideos.isNotEmpty()) updateBrowseItems()
+    }
+
     fun loadVideos() {
         viewModelScope.launch {
             _loading.value = true
@@ -37,6 +51,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 videoRepository.getVideos()
             }
             allVideos = videoList
+            minDurationMs = SettingsActivity.getMinDurationMs(getApplication())
             currentPath = null
             isSearching = false
             updateBrowseItems()
@@ -76,7 +91,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         } else {
             isSearching = true
             val lowerQuery = query.lowercase()
-            val filtered = allVideos.filter { it.title.lowercase().contains(lowerQuery) }
+            val filtered = filteredVideos.filter { it.title.lowercase().contains(lowerQuery) }
             _browseItems.value = filtered.map { BrowseItem.Video(it) }
             _currentFolder.value = null
         }
@@ -94,7 +109,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun computeBasePath(): String {
-        val paths = allVideos.map { File(it.path).parent ?: "" }.filter { it.isNotEmpty() }
+        val paths = filteredVideos.map { File(it.path).parent ?: "" }.filter { it.isNotEmpty() }
         if (paths.isEmpty()) return ""
         var common = paths[0]
         for (p in paths) {
@@ -106,7 +121,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun buildTopLevelItems(): List<BrowseItem> {
-        if (allVideos.isEmpty()) return emptyList()
+        if (filteredVideos.isEmpty()) return emptyList()
         val basePath = computeBasePath()
         return buildItemsForPath(basePath)
     }
@@ -116,7 +131,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val folders = mutableMapOf<String, Int>()
         val videosHere = mutableListOf<VideoItem>()
 
-        for (video in allVideos) {
+        for (video in filteredVideos) {
             val videoDir = File(video.path).parent ?: continue
             if (videoDir == path) {
                 videosHere.add(video)

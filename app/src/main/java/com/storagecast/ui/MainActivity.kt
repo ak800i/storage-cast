@@ -75,6 +75,11 @@ class MainActivity : AppCompatActivity() {
         intent?.let { handleIncomingIntent(it) }
     }
 
+    override fun onResume() {
+        super.onResume()
+        viewModel.refreshFilter()
+    }
+
     private fun handleIncomingIntent(intent: Intent) {
         if (intent.action == Intent.ACTION_VIEW) {
             val videoUri = intent.data ?: return
@@ -224,6 +229,10 @@ class MainActivity : AppCompatActivity() {
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         return when (item.itemId) {
+            R.id.action_settings -> {
+                startActivity(Intent(this, SettingsActivity::class.java))
+                true
+            }
             R.id.action_logs -> {
                 startActivity(Intent(this, LogActivity::class.java))
                 true

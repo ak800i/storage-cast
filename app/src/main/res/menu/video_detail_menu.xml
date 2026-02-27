@@ -10,8 +10,8 @@
         android:title="@string/save_subtitle"
         app:showAsAction="never" />
     <item
-        android:id="@+id/action_opensubtitles_credentials"
-        android:title="@string/opensubtitles_edit_credentials"
+        android:id="@+id/action_settings"
+        android:title="@string/settings"
         app:showAsAction="never" />
     <item
         android:id="@+id/action_logs"

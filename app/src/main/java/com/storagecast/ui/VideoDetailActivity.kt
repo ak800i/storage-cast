@@ -1816,8 +1816,8 @@ class VideoDetailActivity : AppCompatActivity() {
                 startActivity(Intent(this, LogActivity::class.java))
                 true
             }
-            R.id.action_opensubtitles_credentials -> {
-                showOpenSubtitlesCredentialsDialog()
+            R.id.action_settings -> {
+                startActivity(Intent(this, SettingsActivity::class.java))
                 true
             }
             R.id.action_save_subtitle -> {
