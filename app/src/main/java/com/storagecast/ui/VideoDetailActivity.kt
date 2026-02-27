@@ -526,19 +526,48 @@ class VideoDetailActivity : AppCompatActivity() {
         subtitleSyncOffsetMs += deltaMs
         updateSubtitleSyncUi()
 
-        if (subtitleSyncOffsetMs == 0L) {
-            // No offset — use original file directly
-            applyLiveSubtitleChange(baseVtt)
-            return
-        }
-
         activityScope.launch {
-            val offsetFile = withContext(Dispatchers.IO) {
-                val outputFile = File(cacheDir, "subtitles/offset_subtitle.vtt")
-                subtitleConverter.applySubtitleOffset(baseVtt, subtitleSyncOffsetMs, outputFile)
+            val effectiveFile = if (subtitleSyncOffsetMs == 0L) {
+                baseVtt
+            } else {
+                withContext(Dispatchers.IO) {
+                    val outputFile = File(cacheDir, "subtitles/offset_subtitle.vtt")
+                    subtitleConverter.applySubtitleOffset(baseVtt, subtitleSyncOffsetMs, outputFile)
+                } ?: return@launch
             }
-            if (offsetFile != null) {
-                applyLiveSubtitleChange(offsetFile)
+
+            // If Cast already has an active subtitle track, just update the file
+            // and toggle the track to force a re-fetch — no video reload needed.
+            val client = castSession?.remoteMediaClient
+            val hasActiveSubtitle = client?.hasMediaSession() == true &&
+                    client.mediaStatus?.activeTrackIds?.contains(1L) == true
+            if (hasActiveSubtitle) {
+                refreshCastSubtitle(effectiveFile)
+            } else {
+                applyLiveSubtitleChange(effectiveFile)
+            }
+        }
+    }
+
+    /**
+     * Updates the subtitle content on the Cast receiver without reloading video.
+     * Re-registers the file with the server (same stable URL) then toggles
+     * the text track off and back on so the receiver re-fetches the VTT.
+     */
+    private fun refreshCastSubtitle(subtitleFile: File) {
+        val client = castSession?.remoteMediaClient ?: return
+        val service = mediaServerService ?: return
+
+        service.registerSubtitle(subtitleFile)
+        AppLogger.info(TAG, "Refreshing cast subtitle (no reload): ${subtitleFile.name}")
+
+        client.setActiveMediaTracks(longArrayOf()).setResultCallback {
+            client.setActiveMediaTracks(longArrayOf(1)).setResultCallback { result ->
+                if (result.status.isSuccess) {
+                    AppLogger.info(TAG, "Subtitle offset refreshed successfully")
+                } else {
+                    AppLogger.warn(TAG, "Subtitle refresh failed: ${result.status.statusMessage}")
+                }
             }
         }
     }

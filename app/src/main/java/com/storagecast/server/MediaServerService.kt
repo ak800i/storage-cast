@@ -32,6 +32,8 @@ class MediaServerService : Service() {
     companion object {
         private const val NOTIFICATION_ID = 1
         private const val TAG = "MediaServerService"
+        /** Stable ID so the subtitle URL never changes between offset adjustments. */
+        private const val ACTIVE_SUBTITLE_ID = "active_subtitle"
 
         @Volatile
         private var logHandlerInstalled = false
@@ -123,7 +125,7 @@ class MediaServerService : Service() {
     }
 
     fun registerSubtitle(subtitleFile: File): String {
-        val id = subtitleFile.name.hashCode().toUInt().toString()
+        val id = ACTIVE_SUBTITLE_ID
         server?.registerFile(id, subtitleFile, "text/vtt", null)
         AppLogger.info("MediaServer", "Register subtitle: ${subtitleFile.name}, id=$id, exists=${subtitleFile.exists()}")
         return "/media/$id"
