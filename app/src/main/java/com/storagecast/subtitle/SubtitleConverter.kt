@@ -30,7 +30,8 @@ class SubtitleConverter {
          * cue background. Injects one after the WEBVTT header if missing.
          */
         fun ensureVttStyle(vttContent: String): String {
-            if (vttContent.contains("background-color", ignoreCase = true)) return vttContent
+            if (vttContent.contains("STYLE", ignoreCase = false) &&
+                vttContent.contains("::cue", ignoreCase = true)) return vttContent
             val headerEnd = vttContent.indexOf('\n')
             if (headerEnd < 0) return vttContent
             return vttContent.substring(0, headerEnd + 1) + "\n" +
