@@ -41,7 +41,8 @@ class SubtitleExtractor {
                 ?.filter { file ->
                     file.isFile && SIDECAR_EXTENSIONS.any { ext ->
                         file.name.endsWith(ext, ignoreCase = true)
-                    } && file.name.startsWith(baseName, ignoreCase = true)
+                    } && (file.nameWithoutExtension.equals(baseName, ignoreCase = true) ||
+                          file.name.startsWith("$baseName.", ignoreCase = true))
                 }
                 ?.sortedBy { it.name }
                 ?: emptyList()
