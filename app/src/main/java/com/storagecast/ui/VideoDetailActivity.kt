@@ -53,6 +53,7 @@ import com.storagecast.media.MediaProbeResult
 import com.storagecast.media.MediaProber
 import com.storagecast.media.Mp4ToMkvStreamer
 import com.storagecast.media.MkvTrackFilter
+import com.storagecast.media.TranscodeStreamer
 import com.storagecast.media.VideoTranscoder
 import com.storagecast.model.SubtitleTrack
 import com.storagecast.model.VideoItem
@@ -68,7 +69,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.io.IOException
+import java.io.InputStream
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
@@ -119,6 +120,7 @@ class VideoDetailActivity : AppCompatActivity() {
     private val mediaProber = MediaProber()
     private val castCompatibility = CastCompatibility()
     private var videoTranscoder: VideoTranscoder? = null
+    private var transcodeStreamer: TranscodeStreamer? = null
     private var transcodedFile: File? = null
 
     private val progressHandler = Handler(Looper.getMainLooper())
@@ -1299,61 +1301,26 @@ class VideoDetailActivity : AppCompatActivity() {
         val audioTrackNum = audioTrack.trackIndex + 1
         val keepTrackNumbers = setOf(videoTrackNum, audioTrackNum)
 
-        AppLogger.info(TAG, "MKV filter: keeping track numbers $keepTrackNumbers " +
+        AppLogger.info(TAG, "MKV filter (streaming): keeping track numbers $keepTrackNumbers " +
             "(video=${probe.primaryVideo?.codec}, audio=${audioTrack.codec} ${audioTrack.language})")
-
-        val progressDialog = AlertDialog.Builder(this)
-            .setTitle(R.string.remuxing_title)
-            .setMessage(getString(R.string.loading_video))
-            .setCancelable(false)
-            .show()
 
         val filter = MkvTrackFilter()
         val videoPath = video.path
         val videoUri = video.uri
 
-        activityScope.launch {
-            try {
-                val outputFile = withContext(Dispatchers.IO) {
-                    val outputDir = File(cacheDir, "mkvfilter")
-                    if (!outputDir.exists() && !outputDir.mkdirs()) {
-                        throw IOException("Cannot create output directory")
-                    }
-                    val tempFile = File(outputDir, "filtered_${System.currentTimeMillis()}.mkv")
-
-                    val sourceStream = try {
-                        val pfd = contentResolver.openFileDescriptor(videoUri, "r")
-                        if (pfd != null) {
-                            android.os.ParcelFileDescriptor.AutoCloseInputStream(pfd)
-                        } else {
-                            java.io.FileInputStream(videoPath)
-                        }
-                    } catch (e: Exception) {
-                        AppLogger.warn(TAG, "ContentResolver failed, falling back to FileInputStream: ${e.message}")
-                        java.io.FileInputStream(videoPath)
-                    }
-
-                    try {
-                        java.io.FileOutputStream(tempFile).use { fos ->
-                            filter.filter(sourceStream, fos, keepTrackNumbers)
-                        }
-                    } finally {
-                        try { sourceStream.close() } catch (_: Exception) {}
-                    }
-
-                    AppLogger.info(TAG, "MKV filter complete: ${tempFile.name}, ${tempFile.length()} bytes")
-                    tempFile
+        castStreamingSource(video, "video/x-matroska") {
+            val sourceStream = try {
+                val pfd = contentResolver.openFileDescriptor(videoUri, "r")
+                if (pfd != null) {
+                    android.os.ParcelFileDescriptor.AutoCloseInputStream(pfd)
+                } else {
+                    java.io.FileInputStream(videoPath)
                 }
-
-                progressDialog.dismiss()
-                transcodedFile?.delete()
-                transcodedFile = outputFile
-                castTranscodedVideo(video, outputFile, "video/x-matroska")
             } catch (e: Exception) {
-                AppLogger.error(TAG, "MKV filter failed: ${e.message}")
-                progressDialog.dismiss()
-                Toast.makeText(this@VideoDetailActivity, getString(R.string.remux_failed, e.message ?: "Unknown error"), Toast.LENGTH_LONG).show()
+                AppLogger.warn(TAG, "ContentResolver failed, falling back to FileInputStream: ${e.message}")
+                java.io.FileInputStream(videoPath)
             }
+            filter.createFilteredStream(sourceStream, keepTrackNumbers)
         }
     }
 
@@ -1365,44 +1332,15 @@ class VideoDetailActivity : AppCompatActivity() {
             return
         }
 
-        AppLogger.info(TAG, "MP4→MKV remux: video=${videoTrack.codec} (track ${videoTrack.trackIndex}), " +
+        AppLogger.info(TAG, "MP4→MKV remux (streaming): video=${videoTrack.codec} (track ${videoTrack.trackIndex}), " +
             "audio=${audioTrack.codec} ${audioTrack.language} (track ${audioTrack.trackIndex})")
 
-        val progressDialog = AlertDialog.Builder(this)
-            .setTitle(R.string.remuxing_title)
-            .setMessage(getString(R.string.loading_video))
-            .setCancelable(false)
-            .show()
-
-        val streamer = Mp4ToMkvStreamer()
         val videoPath = video.path
+        val videoTrackIndex = videoTrack.trackIndex
+        val audioTrackIndex = audioTrack.trackIndex
 
-        activityScope.launch {
-            try {
-                val outputFile = withContext(Dispatchers.IO) {
-                    val outputDir = File(cacheDir, "mkvfilter")
-                    if (!outputDir.exists() && !outputDir.mkdirs()) {
-                        throw IOException("Cannot create output directory")
-                    }
-                    val tempFile = File(outputDir, "remuxed_${System.currentTimeMillis()}.mkv")
-
-                    java.io.FileOutputStream(tempFile).use { fos ->
-                        streamer.writeTo(videoPath, videoTrack.trackIndex, audioTrack.trackIndex, fos)
-                    }
-
-                    AppLogger.info(TAG, "MP4→MKV remux complete: ${tempFile.name}, ${tempFile.length()} bytes")
-                    tempFile
-                }
-
-                progressDialog.dismiss()
-                transcodedFile?.delete()
-                transcodedFile = outputFile
-                castTranscodedVideo(video, outputFile, "video/x-matroska")
-            } catch (e: Exception) {
-                AppLogger.error(TAG, "MP4→MKV remux failed: ${e.message}")
-                progressDialog.dismiss()
-                Toast.makeText(this@VideoDetailActivity, getString(R.string.remux_failed, e.message ?: "Unknown error"), Toast.LENGTH_LONG).show()
-            }
+        castStreamingSource(video, "video/x-matroska") {
+            Mp4ToMkvStreamer().createStream(videoPath, videoTrackIndex, audioTrackIndex)
         }
     }
 
@@ -1461,195 +1399,176 @@ class VideoDetailActivity : AppCompatActivity() {
     }
 
     private fun startTranscoding(video: VideoItem, probeResult: MediaProbeResult) {
-        val transcoder = VideoTranscoder()
-        videoTranscoder = transcoder
+        val streamer = TranscodeStreamer()
+        transcodeStreamer = streamer
 
-        val progressDialog = AlertDialog.Builder(this)
-            .setTitle(R.string.transcoding_title)
-            .setMessage(getString(R.string.transcoding_progress, 0))
-            .setNegativeButton(R.string.cancel) { _, _ ->
-                transcoder.cancel()
-            }
-            .setCancelable(false)
-            .show()
+        AppLogger.info(TAG, "Starting streaming transcode to MKV")
 
-        activityScope.launch {
-            withContext(Dispatchers.IO) {
-                val outputDir = File(cacheDir, "transcode")
-                if (!outputDir.exists() && !outputDir.mkdirs()) {
-                    runOnUiThread {
-                        Toast.makeText(
-                            this@VideoDetailActivity,
-                            getString(R.string.transcode_failed, "Cannot create output directory"),
-                            Toast.LENGTH_LONG
-                        ).show()
+        val inputPath = video.path
+        val audioTrack = selectedAudioTrack
+
+        castStreamingSource(video, "video/x-matroska") {
+            streamer.createTranscodeStream(inputPath, probeResult, audioTrack,
+                object : TranscodeStreamer.ProgressListener {
+                    override fun onProgress(percent: Int) {
+                        AppLogger.info(TAG, "Transcode progress: $percent%")
                     }
-                    return@withContext
+                    override fun onError(error: String) {
+                        AppLogger.error(TAG, "Transcode stream error: $error")
+                        runOnUiThread {
+                            Toast.makeText(this@VideoDetailActivity,
+                                getString(R.string.transcode_failed, error), Toast.LENGTH_LONG).show()
+                        }
+                    }
                 }
-
-                transcoder.transcode(video.path, outputDir, probeResult,
-                    object : VideoTranscoder.ProgressListener {
-                        override fun onProgress(percent: Int) {
-                            runOnUiThread {
-                                progressDialog.setMessage(getString(R.string.transcoding_progress, percent))
-                            }
-                        }
-
-                        override fun onCompleted(outputFile: File) {
-                            runOnUiThread {
-                                progressDialog.dismiss()
-                                transcodedFile = outputFile
-                                AppLogger.info(TAG, "Transcode complete: ${outputFile.name}, ${outputFile.length()} bytes")
-                                castTranscodedVideo(video, outputFile)
-                            }
-                        }
-
-                        override fun onError(error: String) {
-                            runOnUiThread {
-                                progressDialog.dismiss()
-                                AppLogger.error(TAG, "Transcode error: $error")
-                                Toast.makeText(
-                                    this@VideoDetailActivity,
-                                    getString(R.string.transcode_failed, error),
-                                    Toast.LENGTH_LONG
-                                ).show()
-                            }
-                        }
-                    },
-                    selectedAudioTrack = selectedAudioTrack
-                )
-            }
+            )
         }
     }
 
     private fun startRemuxAndCast(video: VideoItem, probeResult: MediaProbeResult) {
         val audioTrack = selectedAudioTrack ?: return
-        val transcoder = VideoTranscoder()
-        videoTranscoder = transcoder
+        val videoTrack = probeResult.primaryVideo ?: return
 
-        AppLogger.info(TAG, "Remuxing to select audio track: ${audioTrack.codec} ${audioTrack.language} (index=${audioTrack.trackIndex})")
+        AppLogger.info(TAG, "Remuxing (streaming) to select audio track: ${audioTrack.codec} ${audioTrack.language} (index=${audioTrack.trackIndex})")
 
-        val progressDialog = AlertDialog.Builder(this)
-            .setTitle(R.string.remuxing_title)
-            .setMessage(getString(R.string.remuxing_progress, 0))
-            .setNegativeButton(R.string.cancel) { _, _ ->
-                transcoder.cancel()
-            }
-            .setCancelable(false)
-            .show()
+        val videoPath = video.path
+        val videoTrackIndex = videoTrack.trackIndex
+        val audioTrackIndex = audioTrack.trackIndex
 
-        activityScope.launch {
-            withContext(Dispatchers.IO) {
-                val outputDir = File(cacheDir, "remux")
-                if (!outputDir.exists() && !outputDir.mkdirs()) {
-                    runOnUiThread {
-                        progressDialog.dismiss()
-                        Toast.makeText(
-                            this@VideoDetailActivity,
-                            getString(R.string.remux_failed, "Cannot create output directory"),
-                            Toast.LENGTH_LONG
-                        ).show()
-                    }
-                    return@withContext
-                }
-
-                transcoder.remux(video.path, outputDir, probeResult, audioTrack,
-                    object : VideoTranscoder.ProgressListener {
-                        override fun onProgress(percent: Int) {
-                            runOnUiThread {
-                                progressDialog.setMessage(getString(R.string.remuxing_progress, percent))
-                            }
-                        }
-
-                        override fun onCompleted(outputFile: File) {
-                            runOnUiThread {
-                                progressDialog.dismiss()
-                                transcodedFile = outputFile
-                                AppLogger.info(TAG, "Remux complete: ${outputFile.name}, ${outputFile.length()} bytes")
-                                castTranscodedVideo(video, outputFile)
-                            }
-                        }
-
-                        override fun onError(error: String) {
-                            runOnUiThread {
-                                progressDialog.dismiss()
-                                AppLogger.error(TAG, "Remux error: $error")
-                                Toast.makeText(
-                                    this@VideoDetailActivity,
-                                    getString(R.string.remux_failed, error),
-                                    Toast.LENGTH_LONG
-                                ).show()
-                            }
-                        }
-                    }
-                )
-            }
+        castStreamingSource(video, "video/x-matroska") {
+            Mp4ToMkvStreamer().createStream(videoPath, videoTrackIndex, audioTrackIndex)
         }
     }
 
     private fun startRemuxWithAudioTranscodeAndCast(video: VideoItem, probeResult: MediaProbeResult) {
         val audioTrack = selectedAudioTrack ?: return
-        val transcoder = VideoTranscoder()
-        videoTranscoder = transcoder
+        val streamer = TranscodeStreamer()
+        transcodeStreamer = streamer
 
-        AppLogger.info(TAG, "Remuxing with audio transcode: ${audioTrack.codec} ${audioTrack.language} (index=${audioTrack.trackIndex})")
+        AppLogger.info(TAG, "Remuxing with audio transcode (streaming): ${audioTrack.codec} ${audioTrack.language} (index=${audioTrack.trackIndex})")
 
-        val progressDialog = AlertDialog.Builder(this)
-            .setTitle(R.string.remuxing_title)
-            .setMessage(getString(R.string.remuxing_progress, 0))
-            .setNegativeButton(R.string.cancel) { _, _ ->
-                transcoder.cancel()
-            }
-            .setCancelable(false)
-            .show()
+        val inputPath = video.path
 
-        activityScope.launch {
-            withContext(Dispatchers.IO) {
-                val outputDir = File(cacheDir, "remux")
-                if (!outputDir.exists() && !outputDir.mkdirs()) {
-                    runOnUiThread {
-                        progressDialog.dismiss()
-                        Toast.makeText(
-                            this@VideoDetailActivity,
-                            getString(R.string.remux_failed, "Cannot create output directory"),
-                            Toast.LENGTH_LONG
-                        ).show()
+        castStreamingSource(video, "video/x-matroska") {
+            streamer.createRemuxWithAudioTranscodeStream(inputPath, probeResult, audioTrack,
+                object : TranscodeStreamer.ProgressListener {
+                    override fun onProgress(percent: Int) {
+                        AppLogger.info(TAG, "Remux with audio transcode progress: $percent%")
                     }
-                    return@withContext
+                    override fun onError(error: String) {
+                        AppLogger.error(TAG, "Remux with audio transcode error: $error")
+                        runOnUiThread {
+                            Toast.makeText(this@VideoDetailActivity,
+                                getString(R.string.remux_failed, error), Toast.LENGTH_LONG).show()
+                        }
+                    }
                 }
+            )
+        }
+    }
 
-                transcoder.remuxWithAudioTranscode(video.path, outputDir, probeResult, audioTrack,
-                    object : VideoTranscoder.ProgressListener {
-                        override fun onProgress(percent: Int) {
-                            runOnUiThread {
-                                progressDialog.setMessage(getString(R.string.remuxing_progress, percent))
-                            }
-                        }
+    /**
+     * Registers a streaming source factory and immediately sends it to the Cast device.
+     * The factory lambda creates a fresh InputStream each time the Cast device requests data.
+     * Streaming starts immediately — no need to wait for the full transcode/remux to complete.
+     */
+    private fun castStreamingSource(video: VideoItem, contentType: String, factory: () -> InputStream) {
+        val service = mediaServerService
+        if (service == null) {
+            AppLogger.error(TAG, "castStreamingSource: media server service is null")
+            Toast.makeText(this, R.string.server_not_ready, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val session = castSession
+        if (session == null) {
+            AppLogger.error(TAG, "castStreamingSource: cast session is null")
+            Toast.makeText(this, R.string.not_connected, Toast.LENGTH_SHORT).show()
+            return
+        }
 
-                        override fun onCompleted(outputFile: File) {
-                            runOnUiThread {
-                                progressDialog.dismiss()
-                                transcodedFile = outputFile
-                                AppLogger.info(TAG, "Remux with audio transcode complete: ${outputFile.name}, ${outputFile.length()} bytes")
-                                castTranscodedVideo(video, outputFile)
-                            }
-                        }
+        val serverIp = getDeviceIpAddress()
+        val serverPort = service.getServerPort()
 
-                        override fun onError(error: String) {
-                            runOnUiThread {
-                                progressDialog.dismiss()
-                                AppLogger.error(TAG, "Remux with audio transcode error: $error")
-                                Toast.makeText(
-                                    this@VideoDetailActivity,
-                                    getString(R.string.remux_failed, error),
-                                    Toast.LENGTH_LONG
-                                ).show()
-                            }
-                        }
-                    }
-                )
+        val streamPath = service.registerStreamingSource(video.title, contentType, factory)
+        val streamUrl = "http://$serverIp:$serverPort$streamPath"
+
+        AppLogger.info(TAG, "castStreamingSource: url=$streamUrl, contentType=$contentType")
+
+        val metadata = MediaMetadata(MediaMetadata.MEDIA_TYPE_MOVIE).apply {
+            putString(MediaMetadata.KEY_TITLE, video.title)
+        }
+
+        val mediaTracks = mutableListOf<MediaTrack>()
+
+        val effectiveSubtitle = getEffectiveSubtitleFile()
+        if (effectiveSubtitle != null) {
+            val subtitlePath = service.registerSubtitle(effectiveSubtitle)
+            val subtitleUrl = "http://$serverIp:$serverPort$subtitlePath"
+            val subtitleTrack = MediaTrack.Builder(1, MediaTrack.TYPE_TEXT)
+                .setName("Subtitles")
+                .setSubtype(MediaTrack.SUBTYPE_SUBTITLES)
+                .setContentId(subtitleUrl)
+                .setContentType("text/vtt")
+                .setLanguage("en")
+                .build()
+            mediaTracks.add(subtitleTrack)
+        }
+
+        val mediaInfo = MediaInfo.Builder(streamUrl)
+            .setStreamType(MediaInfo.STREAM_TYPE_LIVE)
+            .setContentType(contentType)
+            .setMetadata(metadata)
+            .apply {
+                if (mediaTracks.isNotEmpty()) {
+                    setMediaTracks(mediaTracks)
+                }
+            }
+            .build()
+
+        val loadRequest = MediaLoadRequestData.Builder()
+            .setMediaInfo(mediaInfo)
+            .setAutoplay(true)
+            .apply {
+                if (mediaTracks.isNotEmpty()) {
+                    setActiveTrackIds(longArrayOf(1))
+                }
+            }
+            .build()
+
+        AppLogger.info(TAG, "castStreamingSource: sending load request (streamType=LIVE, contentType=$contentType)")
+        AppLogger.info(TAG, "castStreamingSource: device=${session.castDevice?.friendlyName}, model=${session.castDevice?.modelName}")
+        val remoteMediaClient = session.remoteMediaClient
+        if (remoteMediaClient == null) {
+            AppLogger.error(TAG, "castStreamingSource: remoteMediaClient is null!")
+            Toast.makeText(this, R.string.error_cast, Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        if (mediaTracks.isNotEmpty()) {
+            remoteMediaClient.setTextTrackStyle(createSubtitleStyle())
+        }
+
+        val pendingResult = remoteMediaClient.load(loadRequest)
+        pendingResult.setResultCallback { result ->
+            val status = result.status
+            if (status.isSuccess) {
+                AppLogger.info(TAG, "castStreamingSource: load SUCCESS")
+                if (mediaTracks.isNotEmpty()) {
+                    remoteMediaClient.setTextTrackStyle(createSubtitleStyle())
+                }
+            } else {
+                AppLogger.error(TAG, "castStreamingSource: load FAILED - statusCode=${status.statusCode}, statusMessage=${status.statusMessage}")
+                val mediaError = result.mediaError
+                if (mediaError != null) {
+                    logMediaError(mediaError)
+                }
+                runOnUiThread {
+                    Toast.makeText(this, getString(R.string.cast_load_failed, status.statusMessage ?: "Unknown error"), Toast.LENGTH_LONG).show()
+                }
             }
         }
+        updateCastStatus(video.title)
+        Toast.makeText(this, R.string.loading_video, Toast.LENGTH_SHORT).show()
     }
 
     private fun castTranscodedVideo(originalVideo: VideoItem, transcodedFile: File, contentType: String = "video/mp4") {
@@ -2092,6 +2011,7 @@ class VideoDetailActivity : AppCompatActivity() {
     override fun onDestroy() {
         stopProgressUpdates()
         videoTranscoder?.cancel()
+        transcodeStreamer?.cancel()
         activityScope.cancel()
         transcodedFile?.delete()
         if (serviceBound) {
