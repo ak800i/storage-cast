@@ -573,7 +573,7 @@ class VideoDetailActivity : AppCompatActivity() {
 
     private fun updateSubtitleSyncUi() {
         val seconds = subtitleSyncOffsetMs / 1000.0
-        binding.subtitleSyncValue.text = getString(R.string.subtitle_sync_status, seconds.toFloat())
+        binding.subtitleSyncValue.text = getString(R.string.subtitle_sync_status, seconds)
         binding.subtitleSyncContainer.visibility =
             if (selectedSubtitleFile != null) View.VISIBLE else View.GONE
     }
