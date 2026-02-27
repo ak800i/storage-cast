@@ -43,31 +43,13 @@
             android:layout_height="wrap_content"
             android:orientation="vertical">
 
-            <!-- Thumbnail with rotate overlay -->
-            <FrameLayout
+            <ImageView
+                android:id="@+id/videoThumbnail"
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content">
-
-                <ImageView
-                    android:id="@+id/videoThumbnail"
-                    android:layout_width="match_parent"
-                    android:layout_height="220dp"
-                    android:scaleType="centerCrop"
-                    android:background="@color/surface_dark"
-                    android:contentDescription="@string/video_thumbnail_desc" />
-
-                <ImageButton
-                    android:id="@+id/rotateButton"
-                    android:layout_width="40dp"
-                    android:layout_height="40dp"
-                    android:layout_gravity="top|end"
-                    android:layout_margin="8dp"
-                    android:background="@drawable/bg_circle_button"
-                    android:src="@drawable/ic_rotate_right"
-                    android:contentDescription="@string/rotate_video"
-                    android:padding="8dp"
-                    app:tint="@android:color/white" />
-            </FrameLayout>
+                android:layout_height="220dp"
+                android:scaleType="centerCrop"
+                android:background="@color/surface_dark"
+                android:contentDescription="@string/video_thumbnail_desc" />
 
             <!-- Video info section -->
             <LinearLayout
