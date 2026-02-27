@@ -40,6 +40,16 @@
                 android:ellipsize="end" />
 
             <TextView
+                android:id="@+id/videoPath"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textSize="11sp"
+                android:maxLines="1"
+                android:ellipsize="middle"
+                android:importantForAccessibility="no"
+                android:textColor="?android:attr/textColorSecondary" />
+
+            <TextView
                 android:id="@+id/videoDuration"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
