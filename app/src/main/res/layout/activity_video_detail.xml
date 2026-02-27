@@ -259,6 +259,85 @@
                     android:drawablePadding="6dp"
                     android:visibility="gone" />
 
+                <!-- Subtitle sync controls -->
+                <LinearLayout
+                    android:id="@+id/subtitleSyncContainer"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:layout_marginTop="6dp"
+                    android:visibility="gone">
+
+                    <TextView
+                        android:id="@+id/subtitleSyncLabel"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/subtitle_sync_label"
+                        android:textSize="12sp"
+                        android:textColor="@color/text_secondary_dark" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/syncMinus1s"
+                        android:layout_width="wrap_content"
+                        android:layout_height="32dp"
+                        android:layout_marginStart="8dp"
+                        android:text="@string/subtitle_sync_minus_1s"
+                        android:textSize="11sp"
+                        android:minWidth="0dp"
+                        android:paddingHorizontal="8dp"
+                        style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                        app:strokeColor="@color/text_tertiary_dark"
+                        android:textColor="@color/text_primary_dark" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/syncMinus01s"
+                        android:layout_width="wrap_content"
+                        android:layout_height="32dp"
+                        android:layout_marginStart="4dp"
+                        android:text="@string/subtitle_sync_minus_01s"
+                        android:textSize="11sp"
+                        android:minWidth="0dp"
+                        android:paddingHorizontal="8dp"
+                        style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                        app:strokeColor="@color/text_tertiary_dark"
+                        android:textColor="@color/text_primary_dark" />
+
+                    <TextView
+                        android:id="@+id/subtitleSyncValue"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginHorizontal="6dp"
+                        android:textSize="12sp"
+                        android:textColor="@color/accent_light"
+                        android:text="0.0s" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/syncPlus01s"
+                        android:layout_width="wrap_content"
+                        android:layout_height="32dp"
+                        android:text="@string/subtitle_sync_plus_01s"
+                        android:textSize="11sp"
+                        android:minWidth="0dp"
+                        android:paddingHorizontal="8dp"
+                        style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                        app:strokeColor="@color/text_tertiary_dark"
+                        android:textColor="@color/text_primary_dark" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/syncPlus1s"
+                        android:layout_width="wrap_content"
+                        android:layout_height="32dp"
+                        android:layout_marginStart="4dp"
+                        android:text="@string/subtitle_sync_plus_1s"
+                        android:textSize="11sp"
+                        android:minWidth="0dp"
+                        android:paddingHorizontal="8dp"
+                        style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                        app:strokeColor="@color/text_tertiary_dark"
+                        android:textColor="@color/text_primary_dark" />
+                </LinearLayout>
+
                 <TextView
                     android:id="@+id/audioTrackStatus"
                     android:layout_width="match_parent"
