@@ -1726,10 +1726,6 @@ class VideoDetailActivity : AppCompatActivity() {
             return
         }
 
-        if (mediaTracks.isNotEmpty()) {
-            remoteMediaClient.setTextTrackStyle(createSubtitleStyle())
-        }
-
         val pendingResult = remoteMediaClient.load(loadRequest)
         pendingResult.setResultCallback { result ->
             val status = result.status
@@ -1836,10 +1832,6 @@ class VideoDetailActivity : AppCompatActivity() {
             AppLogger.error(TAG, "castVideo: remoteMediaClient is null!")
             Toast.makeText(this, R.string.error_cast, Toast.LENGTH_SHORT).show()
             return
-        }
-
-        if (mediaTracks.isNotEmpty()) {
-            remoteMediaClient.setTextTrackStyle(createSubtitleStyle())
         }
 
         val pendingResult = remoteMediaClient.load(loadRequest)
