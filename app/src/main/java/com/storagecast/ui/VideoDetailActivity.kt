@@ -1941,7 +1941,9 @@ class VideoDetailActivity : AppCompatActivity() {
             R.id.action_save_subtitle -> {
                 val file = downloadedSubtitleFile
                 if (file != null) {
-                    val suggestedName = file.name.removePrefix("opensubtitles_")
+                    val subtitleExt = file.name.removePrefix("opensubtitles_").substringAfterLast('.', "srt")
+                    val videoBaseName = videoItem?.path?.let { File(it).nameWithoutExtension }?.ifEmpty { null } ?: "subtitle"
+                    val suggestedName = "$videoBaseName.$subtitleExt"
                     saveSubtitleLauncher.launch(suggestedName)
                 }
                 true
