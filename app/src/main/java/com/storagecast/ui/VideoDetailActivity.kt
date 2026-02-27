@@ -1031,15 +1031,18 @@ class VideoDetailActivity : AppCompatActivity() {
             .build()
 
         AppLogger.info(TAG, "Reloading media with new subtitle at position ${formatDuration(currentPosition)}")
-        client.setTextTrackStyle(createSubtitleStyle())
-        client.load(loadRequest).setResultCallback { result ->
-            if (result.status.isSuccess) {
-                AppLogger.info(TAG, "Live subtitle switch: load SUCCESS")
-            } else {
-                AppLogger.error(TAG, "Live subtitle switch: load FAILED - ${result.status.statusMessage}")
-                val mediaError = result.mediaError
-                if (mediaError != null) {
-                    logMediaError(mediaError)
+        // Clear previous subtitle track first to avoid the last rendered line persisting
+        client.setActiveMediaTracks(longArrayOf()).setResultCallback {
+            client.setTextTrackStyle(createSubtitleStyle())
+            client.load(loadRequest).setResultCallback { result ->
+                if (result.status.isSuccess) {
+                    AppLogger.info(TAG, "Live subtitle switch: load SUCCESS")
+                } else {
+                    AppLogger.error(TAG, "Live subtitle switch: load FAILED - ${result.status.statusMessage}")
+                    val mediaError = result.mediaError
+                    if (mediaError != null) {
+                        logMediaError(mediaError)
+                    }
                 }
             }
         }
