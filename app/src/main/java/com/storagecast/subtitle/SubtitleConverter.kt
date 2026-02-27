@@ -16,6 +16,10 @@ class SubtitleConverter {
         private val SRT_TIMESTAMP_REGEX = Regex(
             "(\\d{2}:\\d{2}:\\d{2},\\d{3})\\s*-->\\s*(\\d{2}:\\d{2}:\\d{2},\\d{3})"
         )
+
+        private val VTT_TIMESTAMP_REGEX = Regex(
+            "(\\d{2}:\\d{2}:\\d{2}\\.\\d{3})\\s*-->\\s*(\\d{2}:\\d{2}:\\d{2}\\.\\d{3})"
+        )
     }
 
     /**
@@ -137,5 +141,43 @@ class SubtitleConverter {
         val s = parts[2].toIntOrNull() ?: 0
         val cs = parts[3].toIntOrNull() ?: 0
         return String.format("%02d:%02d:%02d.%03d", h, m, s, minOf(cs * 10, 999))
+    }
+
+    /**
+     * Reads a VTT file, shifts all cue timestamps by [offsetMs] milliseconds,
+     * and writes the result to [outputFile]. Negative values shift earlier,
+     * positive values shift later. Timestamps are clamped to 00:00:00.000.
+     * Returns the output file, or null on failure.
+     */
+    fun applySubtitleOffset(vttFile: File, offsetMs: Long, outputFile: File): File? {
+        return try {
+            val content = vttFile.readText(Charsets.UTF_8)
+            val shifted = VTT_TIMESTAMP_REGEX.replace(content) { match ->
+                val start = shiftVttTimestamp(match.groupValues[1], offsetMs)
+                val end = shiftVttTimestamp(match.groupValues[2], offsetMs)
+                "$start --> $end"
+            }
+            outputFile.writeText(shifted)
+            AppLogger.info(TAG, "Applied subtitle offset ${offsetMs}ms -> ${outputFile.name}")
+            outputFile
+        } catch (e: Exception) {
+            AppLogger.error(TAG, "Failed to apply subtitle offset: ${e.message}")
+            null
+        }
+    }
+
+    private fun shiftVttTimestamp(timestamp: String, offsetMs: Long): String {
+        val parts = timestamp.split(":", ".")
+        if (parts.size < 4) return timestamp
+        val h = parts[0].toLongOrNull() ?: 0
+        val m = parts[1].toLongOrNull() ?: 0
+        val s = parts[2].toLongOrNull() ?: 0
+        val ms = parts[3].toLongOrNull() ?: 0
+        val totalMs = (h * 3_600_000 + m * 60_000 + s * 1_000 + ms + offsetMs).coerceAtLeast(0)
+        val newH = totalMs / 3_600_000
+        val newM = (totalMs % 3_600_000) / 60_000
+        val newS = (totalMs % 60_000) / 1_000
+        val newMs = totalMs % 1_000
+        return String.format("%02d:%02d:%02d.%03d", newH, newM, newS, newMs)
     }
 }

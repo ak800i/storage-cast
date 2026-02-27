@@ -96,6 +96,7 @@ class VideoDetailActivity : AppCompatActivity() {
     private val subtitleConverter = SubtitleConverter()
     private var selectedSubtitleFile: File? = null
     private var downloadedSubtitleFile: File? = null
+    private var subtitleSyncOffsetMs = 0L
     private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var selectedAudioTrack: AudioTrackInfo? = null
     private var cachedProbeResult: MediaProbeResult? = null
@@ -501,6 +502,16 @@ class VideoDetailActivity : AppCompatActivity() {
             val video = videoItem ?: return@setOnClickListener
             loadAudioTracks(video)
         }
+
+        binding.syncMinus1s.setOnClickListener { adjustSubtitleSync(-1000L) }
+        binding.syncMinus01s.setOnClickListener { adjustSubtitleSync(-100L) }
+        binding.syncPlus01s.setOnClickListener { adjustSubtitleSync(100L) }
+        binding.syncPlus1s.setOnClickListener { adjustSubtitleSync(1000L) }
+        binding.subtitleSyncValue.setOnClickListener {
+            if (subtitleSyncOffsetMs != 0L) {
+                adjustSubtitleSync(-subtitleSyncOffsetMs)
+            }
+        }
     }
 
     private fun seekRelative(offsetMs: Long) {
@@ -527,6 +538,46 @@ class VideoDetailActivity : AppCompatActivity() {
         }
     }
 
+    private fun adjustSubtitleSync(deltaMs: Long) {
+        val baseVtt = selectedSubtitleFile ?: return
+        subtitleSyncOffsetMs += deltaMs
+        updateSubtitleSyncUi()
+
+        if (subtitleSyncOffsetMs == 0L) {
+            // No offset — use original file directly
+            applyLiveSubtitleChange(baseVtt)
+            return
+        }
+
+        activityScope.launch {
+            val offsetFile = withContext(Dispatchers.IO) {
+                val outputFile = File(cacheDir, "subtitles/offset_subtitle.vtt")
+                subtitleConverter.applySubtitleOffset(baseVtt, subtitleSyncOffsetMs, outputFile)
+            }
+            if (offsetFile != null) {
+                applyLiveSubtitleChange(offsetFile)
+            }
+        }
+    }
+
+    /**
+     * Returns the effective subtitle file for casting, applying the current
+     * sync offset if non-zero.
+     */
+    private fun getEffectiveSubtitleFile(): File? {
+        val base = selectedSubtitleFile ?: return null
+        if (subtitleSyncOffsetMs == 0L) return base
+        val outputFile = File(cacheDir, "subtitles/offset_subtitle.vtt")
+        return subtitleConverter.applySubtitleOffset(base, subtitleSyncOffsetMs, outputFile) ?: base
+    }
+
+    private fun updateSubtitleSyncUi() {
+        val seconds = subtitleSyncOffsetMs / 1000.0
+        binding.subtitleSyncValue.text = getString(R.string.subtitle_sync_status, seconds.toFloat())
+        binding.subtitleSyncContainer.visibility =
+            if (selectedSubtitleFile != null) View.VISIBLE else View.GONE
+    }
+
     private fun autoLoadSidecarSubtitle() {
         val video = videoItem ?: return
         activityScope.launch {
@@ -548,6 +599,8 @@ class VideoDetailActivity : AppCompatActivity() {
                 selectedSubtitleFile = sidecarFile
                 binding.subtitleStatus.text = getString(R.string.subtitle_sidecar_loaded)
                 binding.subtitleStatus.visibility = View.VISIBLE
+                subtitleSyncOffsetMs = 0L
+                updateSubtitleSyncUi()
                 AppLogger.info(TAG, "Auto-loaded sidecar subtitle: ${sidecarFile.name}")
             }
         }
@@ -603,7 +656,9 @@ class VideoDetailActivity : AppCompatActivity() {
                     which == 0 -> {
                         selectedSubtitleFile = null
                         downloadedSubtitleFile = null
+                        subtitleSyncOffsetMs = 0L
                         binding.subtitleStatus.visibility = View.GONE
+                        updateSubtitleSyncUi()
                         applyLiveSubtitleChange(null)
                         invalidateOptionsMenu()
                     }
@@ -656,6 +711,8 @@ class VideoDetailActivity : AppCompatActivity() {
                 selectedSubtitleFile = subtitleFile
                 binding.subtitleStatus.text = getString(R.string.subtitle_sidecar_selected, file.name)
                 binding.subtitleStatus.visibility = View.VISIBLE
+                subtitleSyncOffsetMs = 0L
+                updateSubtitleSyncUi()
                 AppLogger.info(TAG, "Sidecar subtitle loaded: ${file.name}")
                 applyLiveSubtitleChange(subtitleFile)
             } else {
@@ -686,6 +743,8 @@ class VideoDetailActivity : AppCompatActivity() {
                 downloadedSubtitleFile = null
                 binding.subtitleStatus.text = getString(R.string.subtitle_file_selected)
                 binding.subtitleStatus.visibility = View.VISIBLE
+                subtitleSyncOffsetMs = 0L
+                updateSubtitleSyncUi()
                 AppLogger.info(TAG, "Local subtitle loaded: ${subtitleFile.name}")
                 applyLiveSubtitleChange(subtitleFile)
                 invalidateOptionsMenu()
@@ -722,6 +781,8 @@ class VideoDetailActivity : AppCompatActivity() {
                 downloadedSubtitleFile = null
                 binding.subtitleStatus.text = getString(R.string.subtitle_selected, track.language)
                 binding.subtitleStatus.visibility = View.VISIBLE
+                subtitleSyncOffsetMs = 0L
+                updateSubtitleSyncUi()
                 AppLogger.info(TAG, "Subtitle extracted: ${subtitleFile.name}")
                 applyLiveSubtitleChange(subtitleFile)
                 invalidateOptionsMenu()
@@ -954,6 +1015,8 @@ class VideoDetailActivity : AppCompatActivity() {
                 downloadedSubtitleFile = rawFile
                 binding.subtitleStatus.text = getString(R.string.opensubtitles_subtitle_selected, result.language)
                 binding.subtitleStatus.visibility = View.VISIBLE
+                subtitleSyncOffsetMs = 0L
+                updateSubtitleSyncUi()
                 AppLogger.info(TAG, "OpenSubtitles subtitle loaded: ${vttFile.name}")
                 applyLiveSubtitleChange(vttFile)
                 invalidateOptionsMenu()
@@ -1162,7 +1225,7 @@ class VideoDetailActivity : AppCompatActivity() {
                 startStreamingMp4AsMkvAndCast(video, probe, audioTrack)
             }
         } else {
-            castVideo(video, selectedSubtitleFile)
+            castVideo(video, getEffectiveSubtitleFile())
         }
     }
 
@@ -1177,7 +1240,7 @@ class VideoDetailActivity : AppCompatActivity() {
         val videoTrack = probe.primaryVideo
         if (videoTrack == null) {
             AppLogger.warn(TAG, "No video track found, falling back to direct cast")
-            castVideo(video, selectedSubtitleFile)
+            castVideo(video, getEffectiveSubtitleFile())
             return
         }
         val videoTrackNum = videoTrack.trackIndex + 1
@@ -1250,7 +1313,7 @@ class VideoDetailActivity : AppCompatActivity() {
         val videoTrack = probe.primaryVideo
         if (videoTrack == null) {
             AppLogger.warn(TAG, "No video track found, falling back to direct cast")
-            castVideo(video, selectedSubtitleFile)
+            castVideo(video, getEffectiveSubtitleFile())
             return
         }
 
@@ -1306,7 +1369,7 @@ class VideoDetailActivity : AppCompatActivity() {
             if (probeResult == null) {
                 AppLogger.warn(TAG, "Media probe failed, casting directly")
                 Toast.makeText(this@VideoDetailActivity, R.string.probe_failed, Toast.LENGTH_SHORT).show()
-                castVideo(video, selectedSubtitleFile)
+                castVideo(video, getEffectiveSubtitleFile())
                 return@launch
             }
             cachedProbeResult = probeResult
@@ -1569,8 +1632,9 @@ class VideoDetailActivity : AppCompatActivity() {
 
         val mediaTracks = mutableListOf<MediaTrack>()
 
-        if (selectedSubtitleFile != null) {
-            val subtitlePath = service.registerSubtitle(selectedSubtitleFile!!)
+        val effectiveSubtitle = getEffectiveSubtitleFile()
+        if (effectiveSubtitle != null) {
+            val subtitlePath = service.registerSubtitle(effectiveSubtitle)
             val subtitleUrl = "http://$serverIp:$serverPort$subtitlePath"
             val subtitleTrack = MediaTrack.Builder(1, MediaTrack.TYPE_TEXT)
                 .setName("Subtitles")

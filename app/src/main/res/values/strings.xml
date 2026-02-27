@@ -94,6 +94,14 @@
     <string name="media_server_notification_title">StorageCast</string>
     <string name="media_server_notification_text">Media server is running</string>
 
+    <string name="subtitle_sync_label">Subtitle sync</string>
+    <string name="subtitle_sync_minus_1s">−1s</string>
+    <string name="subtitle_sync_minus_01s">−0.1s</string>
+    <string name="subtitle_sync_plus_01s">+0.1s</string>
+    <string name="subtitle_sync_plus_1s">+1s</string>
+    <string name="subtitle_sync_reset">Reset</string>
+    <string name="subtitle_sync_status">Sync: %+.1fs</string>
+
     <string name="settings">Settings</string>
     <string name="settings_filter_short_videos">Filter short videos</string>
     <string name="settings_min_duration_label">Minimum duration (minutes)</string>
