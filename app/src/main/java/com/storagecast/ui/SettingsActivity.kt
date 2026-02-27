@@ -84,7 +84,8 @@ class SettingsActivity : AppCompatActivity() {
 
     private fun saveMinDuration() {
         val text = binding.minDurationInput.text.toString()
-        val minutes = text.toIntOrNull() ?: DEFAULT_MIN_DURATION_MINUTES
+        val minutes = text.toIntOrNull()?.coerceAtLeast(0) ?: DEFAULT_MIN_DURATION_MINUTES
+        binding.minDurationInput.setText(minutes.toString())
         getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
             .putInt(KEY_MIN_DURATION_MINUTES, minutes)
             .apply()

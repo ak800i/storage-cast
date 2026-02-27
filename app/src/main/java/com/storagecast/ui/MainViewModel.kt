@@ -40,8 +40,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
     fun refreshFilter() {
-        minDurationMs = SettingsActivity.getMinDurationMs(getApplication())
-        if (allVideos.isNotEmpty()) updateBrowseItems()
+        val newMinDurationMs = SettingsActivity.getMinDurationMs(getApplication())
+        if (newMinDurationMs != minDurationMs && allVideos.isNotEmpty()) {
+            minDurationMs = newMinDurationMs
+            isSearching = false
+            updateBrowseItems()
+        }
     }
 
     fun loadVideos() {
