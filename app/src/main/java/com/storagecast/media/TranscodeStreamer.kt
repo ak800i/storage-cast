@@ -41,6 +41,9 @@ class TranscodeStreamer {
         private const val MAX_WIDTH = 1920
         private const val MAX_HEIGHT = 1080
 
+        /** Max attempts to pump encoder before falling back to configured format. */
+        private const val ENCODER_FORMAT_PUMP_ATTEMPTS = 100
+
         // ──── EBML Element IDs ────
         private const val EBML_HEADER = 0x1A45DFA3L
         private const val EBML_VERSION = 0x4286L
@@ -328,7 +331,7 @@ class TranscodeStreamer {
      */
     private fun pumpEncoderForOutputFormat(encoder: MediaCodec): MediaFormat {
         val bufferInfo = MediaCodec.BufferInfo()
-        for (i in 0 until 100) {
+        for (i in 0 until ENCODER_FORMAT_PUMP_ATTEMPTS) {
             val status = encoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
             if (status == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                 return encoder.outputFormat
@@ -563,28 +566,7 @@ class TranscodeStreamer {
             val videoDone = videoEncoder == null || (videoEncoderEosSent && videoDecoderDone)
             val audioDone = audioEncoder == null || (audioEncoderEosSent && audioDecoderDone)
             if (videoDone && audioDone) {
-                // Drain remaining encoder output
-                var drained = false
-                if (videoEncoder != null) {
-                    val s = videoEncoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
-                    if (s >= 0) {
-                        if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) drained = true
-                        videoEncoder.releaseOutputBuffer(s, false)
-                    } else {
-                        drained = true
-                    }
-                } else {
-                    drained = true
-                }
-                if (audioEncoder != null && drained) {
-                    val s = audioEncoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
-                    if (s >= 0) {
-                        audioEncoder.releaseOutputBuffer(s, false)
-                    }
-                    allDone = true
-                } else if (drained) {
-                    allDone = true
-                }
+                allDone = drainRemainingEncoderOutput(videoEncoder, audioEncoder, bufferInfo)
             }
         }
 
@@ -595,6 +577,31 @@ class TranscodeStreamer {
             clusterBuffer.writeTo(out)
             out.flush()
         }
+    }
+
+    /** Drains any remaining encoder output buffers and returns true when fully drained. */
+    private fun drainRemainingEncoderOutput(
+        videoEncoder: MediaCodec?,
+        audioEncoder: MediaCodec?,
+        bufferInfo: MediaCodec.BufferInfo
+    ): Boolean {
+        var videoDrained = videoEncoder == null
+        if (videoEncoder != null) {
+            val s = videoEncoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
+            if (s >= 0) {
+                videoDrained = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
+                videoEncoder.releaseOutputBuffer(s, false)
+            } else {
+                videoDrained = true
+            }
+        }
+        if (!videoDrained) return false
+
+        if (audioEncoder != null) {
+            val s = audioEncoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
+            if (s >= 0) audioEncoder.releaseOutputBuffer(s, false)
+        }
+        return true
     }
 
     // ──── Video Passthrough + Audio Transcode → MKV ────

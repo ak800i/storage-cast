@@ -1415,6 +1415,10 @@ class VideoDetailActivity : AppCompatActivity() {
                     }
                     override fun onError(error: String) {
                         AppLogger.error(TAG, "Transcode stream error: $error")
+                        runOnUiThread {
+                            Toast.makeText(this@VideoDetailActivity,
+                                getString(R.string.transcode_failed, error), Toast.LENGTH_LONG).show()
+                        }
                     }
                 }
             )
@@ -1453,6 +1457,10 @@ class VideoDetailActivity : AppCompatActivity() {
                     }
                     override fun onError(error: String) {
                         AppLogger.error(TAG, "Remux with audio transcode error: $error")
+                        runOnUiThread {
+                            Toast.makeText(this@VideoDetailActivity,
+                                getString(R.string.remux_failed, error), Toast.LENGTH_LONG).show()
+                        }
                     }
                 }
             )
