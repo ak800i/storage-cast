@@ -494,15 +494,7 @@ class VideoDetailActivity : AppCompatActivity() {
             loadAudioTracks(video)
         }
 
-        binding.syncMinus1s.setOnClickListener { adjustSubtitleSync(-1000L) }
-        binding.syncMinus01s.setOnClickListener { adjustSubtitleSync(-100L) }
-        binding.syncPlus01s.setOnClickListener { adjustSubtitleSync(100L) }
-        binding.syncPlus1s.setOnClickListener { adjustSubtitleSync(1000L) }
-        binding.subtitleSyncValue.setOnClickListener {
-            if (subtitleSyncOffsetMs != 0L) {
-                adjustSubtitleSync(-subtitleSyncOffsetMs)
-            }
-        }
+        binding.subtitleOffsetButton.setOnClickListener { showSubtitleOffsetDialog() }
     }
 
     private fun seekRelative(offsetMs: Long) {
@@ -563,10 +555,49 @@ class VideoDetailActivity : AppCompatActivity() {
     }
 
     private fun updateSubtitleSyncUi() {
-        val seconds = subtitleSyncOffsetMs / 1000.0
-        binding.subtitleSyncValue.text = getString(R.string.subtitle_sync_status, seconds)
-        binding.subtitleSyncContainer.visibility =
+        binding.subtitleOffsetButton.visibility =
             if (selectedSubtitleFile != null) View.VISIBLE else View.GONE
+    }
+
+    private fun showSubtitleOffsetDialog() {
+        val dialogView = layoutInflater.inflate(R.layout.dialog_subtitle_offset, null)
+        val offsetValue = dialogView.findViewById<android.widget.TextView>(R.id.subtitleOffsetValue)
+        val updateDisplay = {
+            val seconds = subtitleSyncOffsetMs / 1000.0
+            offsetValue.text = getString(R.string.subtitle_sync_status, seconds)
+        }
+        updateDisplay()
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(R.string.subtitle_offset_title)
+            .setView(dialogView)
+            .setPositiveButton(android.R.string.ok, null)
+            .create()
+
+        dialogView.findViewById<View>(R.id.offsetMinus1s).setOnClickListener {
+            adjustSubtitleSync(-1000L)
+            updateDisplay()
+        }
+        dialogView.findViewById<View>(R.id.offsetMinus01s).setOnClickListener {
+            adjustSubtitleSync(-100L)
+            updateDisplay()
+        }
+        dialogView.findViewById<View>(R.id.offsetPlus01s).setOnClickListener {
+            adjustSubtitleSync(100L)
+            updateDisplay()
+        }
+        dialogView.findViewById<View>(R.id.offsetPlus1s).setOnClickListener {
+            adjustSubtitleSync(1000L)
+            updateDisplay()
+        }
+        dialogView.findViewById<View>(R.id.offsetReset).setOnClickListener {
+            if (subtitleSyncOffsetMs != 0L) {
+                adjustSubtitleSync(-subtitleSyncOffsetMs)
+                updateDisplay()
+            }
+        }
+
+        dialog.show()
     }
 
     private fun autoLoadSidecarSubtitle() {

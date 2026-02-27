@@ -95,6 +95,8 @@
     <string name="media_server_notification_text">Media server is running</string>
 
     <string name="subtitle_sync_label">Subtitle sync</string>
+    <string name="subtitle_offset_title">Subtitles offset</string>
+    <string name="subtitle_offset_button_desc">Adjust subtitle offset</string>
     <string name="subtitle_sync_minus_1s">−1s</string>
     <string name="subtitle_sync_minus_01s">−0.1s</string>
     <string name="subtitle_sync_plus_01s">+0.1s</string>
