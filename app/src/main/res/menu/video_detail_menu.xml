@@ -6,6 +6,14 @@
         app:actionProviderClass="androidx.mediarouter.app.MediaRouteActionProvider"
         app:showAsAction="always" />
     <item
+        android:id="@+id/action_save_subtitle"
+        android:title="@string/save_subtitle"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_settings"
+        android:title="@string/settings"
+        app:showAsAction="never" />
+    <item
         android:id="@+id/action_logs"
         android:title="@string/view_logs"
         app:showAsAction="never" />

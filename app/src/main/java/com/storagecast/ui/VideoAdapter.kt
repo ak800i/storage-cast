@@ -12,6 +12,7 @@ import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.storagecast.databinding.ItemVideoBinding
 import com.storagecast.model.VideoItem
+import java.io.File
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
@@ -37,6 +38,7 @@ class VideoAdapter(
 
         fun bind(video: VideoItem) {
             binding.videoTitle.text = video.title
+            binding.videoPath.text = File(video.path).parent ?: ""
             binding.videoDuration.text = formatDuration(video.duration)
             binding.videoSize.text = formatSize(video.size)
 
