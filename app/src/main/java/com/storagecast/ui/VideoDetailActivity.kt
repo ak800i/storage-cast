@@ -375,6 +375,7 @@ class VideoDetailActivity : AppCompatActivity() {
         displayVideoInfo()
         setupControls()
         setupSeekBar()
+        autoLoadSidecarSubtitle()
     }
 
     private fun displayVideoInfo() {
@@ -517,20 +518,58 @@ class VideoDetailActivity : AppCompatActivity() {
         }
     }
 
-    private fun loadSubtitleTracks(video: VideoItem) {
-        binding.progressBar.visibility = View.VISIBLE
+    private fun autoLoadSidecarSubtitle() {
+        val video = videoItem ?: return
         activityScope.launch {
-            val tracks = withContext(Dispatchers.IO) {
-                subtitleExtractor.getSubtitleTracks(video.path)
+            val sidecarFile = withContext(Dispatchers.IO) {
+                val sidecars = subtitleExtractor.findSidecarSubtitles(video.path)
+                if (sidecars.isEmpty()) return@withContext null
+                val file = sidecars.first()
+                try {
+                    val outputDir = File(cacheDir, "subtitles")
+                    file.inputStream().use { stream ->
+                        subtitleConverter.convertToVtt(stream, file.name, outputDir)
+                    }
+                } catch (e: Exception) {
+                    AppLogger.error(TAG, "Failed to auto-load sidecar subtitle: ${e.message}")
+                    null
+                }
             }
-            binding.progressBar.visibility = View.GONE
-            showSubtitleDialog(video, tracks)
+            if (sidecarFile != null) {
+                selectedSubtitleFile = sidecarFile
+                binding.subtitleStatus.text = getString(R.string.subtitle_sidecar_loaded)
+                binding.subtitleStatus.visibility = View.VISIBLE
+                AppLogger.info(TAG, "Auto-loaded sidecar subtitle: ${sidecarFile.name}")
+            }
         }
     }
 
-    private fun showSubtitleDialog(video: VideoItem, tracks: List<SubtitleTrack>) {
+    private fun loadSubtitleTracks(video: VideoItem) {
+        binding.progressBar.visibility = View.VISIBLE
+        activityScope.launch {
+            val (tracks, sidecars) = withContext(Dispatchers.IO) {
+                Pair(
+                    subtitleExtractor.getSubtitleTracks(video.path),
+                    subtitleExtractor.findSidecarSubtitles(video.path)
+                )
+            }
+            binding.progressBar.visibility = View.GONE
+            showSubtitleDialog(video, tracks, sidecars)
+        }
+    }
+
+    private fun showSubtitleDialog(video: VideoItem, tracks: List<SubtitleTrack>, sidecars: List<File> = emptyList()) {
         val options = mutableListOf<String>()
         options.add(getString(R.string.subtitle_source_none))
+
+        val sidecarStartIndex = options.size
+        if (sidecars.isNotEmpty()) {
+            options.add(getString(R.string.subtitle_sidecar_header))
+            sidecars.forEach { file ->
+                options.add("    ${file.name}")
+            }
+        }
+        val sidecarHeaderIndex = if (sidecars.isNotEmpty()) sidecarStartIndex else -1
 
         val embeddedStartIndex = options.size
         if (tracks.isNotEmpty()) {
@@ -546,7 +585,7 @@ class VideoDetailActivity : AppCompatActivity() {
         options.add(getString(R.string.subtitle_source_opensubtitles))
         val openSubtitlesIndex = options.size - 1
 
-        val headerIndex = if (tracks.isNotEmpty()) embeddedStartIndex else -1
+        val embeddedHeaderIndex = if (tracks.isNotEmpty()) embeddedStartIndex else -1
 
         AlertDialog.Builder(this)
             .setTitle(R.string.subtitle_source_title)
@@ -557,7 +596,7 @@ class VideoDetailActivity : AppCompatActivity() {
                         binding.subtitleStatus.visibility = View.GONE
                         applyLiveSubtitleChange(null)
                     }
-                    which == headerIndex -> {
+                    which == sidecarHeaderIndex || which == embeddedHeaderIndex -> {
                         // Header item tapped, ignore
                     }
                     which == fileOptionIndex -> {
@@ -573,14 +612,45 @@ class VideoDetailActivity : AppCompatActivity() {
                     which == openSubtitlesIndex -> {
                         searchOpenSubtitles(video)
                     }
-                    tracks.isNotEmpty() && which > headerIndex && which < fileOptionIndex -> {
-                        val trackIndex = which - headerIndex - 1
+                    sidecars.isNotEmpty() && which > sidecarHeaderIndex && which < embeddedStartIndex -> {
+                        val sidecarIndex = which - sidecarHeaderIndex - 1
+                        loadSidecarSubtitle(sidecars[sidecarIndex])
+                    }
+                    tracks.isNotEmpty() && which > embeddedHeaderIndex && which < fileOptionIndex -> {
+                        val trackIndex = which - embeddedHeaderIndex - 1
                         val track = tracks[trackIndex]
                         extractSubtitle(video.path, track)
                     }
                 }
             }
             .show()
+    }
+
+    private fun loadSidecarSubtitle(file: File) {
+        binding.progressBar.visibility = View.VISIBLE
+        activityScope.launch {
+            val subtitleFile = withContext(Dispatchers.IO) {
+                try {
+                    val outputDir = File(cacheDir, "subtitles")
+                    file.inputStream().use { stream ->
+                        subtitleConverter.convertToVtt(stream, file.name, outputDir)
+                    }
+                } catch (e: Exception) {
+                    AppLogger.error(TAG, "Failed to load sidecar subtitle: ${e.message}")
+                    null
+                }
+            }
+            binding.progressBar.visibility = View.GONE
+            if (subtitleFile != null) {
+                selectedSubtitleFile = subtitleFile
+                binding.subtitleStatus.text = getString(R.string.subtitle_sidecar_selected, file.name)
+                binding.subtitleStatus.visibility = View.VISIBLE
+                AppLogger.info(TAG, "Sidecar subtitle loaded: ${file.name}")
+                applyLiveSubtitleChange(subtitleFile)
+            } else {
+                Toast.makeText(this@VideoDetailActivity, R.string.subtitle_file_error, Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     private fun handleSubtitleFileSelected(uri: Uri) {

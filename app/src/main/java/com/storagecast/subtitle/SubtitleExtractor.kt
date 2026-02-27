@@ -21,6 +21,33 @@ class SubtitleExtractor {
             "text/x-ass",
             "application/ttml+xml"
         )
+
+        val SIDECAR_EXTENSIONS = listOf(".srt", ".vtt", ".ass", ".ssa")
+    }
+
+    /**
+     * Finds subtitle files adjacent to the video file that share the same base name.
+     * For example, for "movie.mkv", finds "movie.srt", "movie.en.srt", etc.
+     */
+    fun findSidecarSubtitles(videoPath: String): List<File> {
+        val videoFile = File(videoPath)
+        val parentDir = videoFile.parentFile ?: return emptyList()
+        val baseName = videoFile.nameWithoutExtension
+
+        if (!parentDir.canRead()) return emptyList()
+
+        return try {
+            parentDir.listFiles()
+                ?.filter { file ->
+                    file.isFile && SIDECAR_EXTENSIONS.any { ext ->
+                        file.name.endsWith(ext, ignoreCase = true)
+                    } && file.name.startsWith(baseName, ignoreCase = true)
+                }
+                ?.sortedBy { it.name }
+                ?: emptyList()
+        } catch (e: Exception) {
+            emptyList()
+        }
     }
 
     fun getSubtitleTracks(videoPath: String): List<SubtitleTrack> {

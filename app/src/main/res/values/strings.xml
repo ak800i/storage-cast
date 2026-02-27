@@ -16,6 +16,9 @@
     <string name="subtitle_embedded_header">── Embedded tracks ──</string>
     <string name="subtitle_file_selected">Subtitle: local file loaded</string>
     <string name="subtitle_file_error">Failed to load subtitle file</string>
+    <string name="subtitle_sidecar_header">── Sidecar files ──</string>
+    <string name="subtitle_sidecar_loaded">Subtitle: auto-loaded from file</string>
+    <string name="subtitle_sidecar_selected">Subtitle: %s</string>
     <string name="subtitle_track" formatted="false">Subtitle track %d: %s</string>
     <string name="search_videos">Search videos</string>
     <string name="no_search_results">No matching videos found</string>
