@@ -1122,6 +1122,7 @@ class VideoDetailActivity : AppCompatActivity() {
             client.load(loadRequest).setResultCallback { result ->
                 if (result.status.isSuccess) {
                     AppLogger.info(TAG, "Live subtitle switch: load SUCCESS")
+                    client.setTextTrackStyle(createSubtitleStyle())
                 } else {
                     AppLogger.error(TAG, "Live subtitle switch: load FAILED - ${result.status.statusMessage}")
                     val mediaError = result.mediaError
@@ -1709,6 +1710,9 @@ class VideoDetailActivity : AppCompatActivity() {
             val status = result.status
             if (status.isSuccess) {
                 AppLogger.info(TAG, "castTranscodedVideo: load SUCCESS")
+                if (mediaTracks.isNotEmpty()) {
+                    remoteMediaClient.setTextTrackStyle(createSubtitleStyle())
+                }
             } else {
                 AppLogger.error(TAG, "castTranscodedVideo: load FAILED - statusCode=${status.statusCode}, statusMessage=${status.statusMessage}")
                 val mediaError = result.mediaError
@@ -1818,6 +1822,9 @@ class VideoDetailActivity : AppCompatActivity() {
             val status = result.status
             if (status.isSuccess) {
                 AppLogger.info(TAG, "castVideo: load SUCCESS")
+                if (mediaTracks.isNotEmpty()) {
+                    remoteMediaClient.setTextTrackStyle(createSubtitleStyle())
+                }
             } else {
                 AppLogger.error(TAG, "castVideo: load FAILED - statusCode=${status.statusCode}, statusMessage=${status.statusMessage}")
                 val mediaError = result.mediaError

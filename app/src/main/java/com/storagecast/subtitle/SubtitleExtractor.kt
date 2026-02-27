@@ -135,7 +135,7 @@ class SubtitleExtractor {
                 }
             }
 
-            outputFile.writeText(vttContent)
+            outputFile.writeText(SubtitleConverter.ensureVttStyle(vttContent))
             return outputFile
         } catch (e: Exception) {
             // Failed to extract subtitles
