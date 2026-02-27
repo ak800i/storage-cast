@@ -752,55 +752,99 @@ class VideoDetailActivity : AppCompatActivity() {
     private fun performOpenSubtitlesSearch(video: VideoItem, apiKey: String, username: String, password: String) {
         binding.progressBar.visibility = View.VISIBLE
         activityScope.launch {
-            val results = withContext(Dispatchers.IO) {
+            val (hashResults, queryResults) = withContext(Dispatchers.IO) {
                 val client = OpenSubtitlesClient(apiKey, username, password)
 
-                // First try hash-based search (MPC-HC approach)
+                // Hash-based search (MPC-HC approach)
                 val videoFile = File(video.path)
                 val hash = OpenSubtitlesHash.computeHash(videoFile)
-                var subtitles = emptyList<OpenSubtitlesClient.SubtitleResult>()
+                var hashSubtitles = emptyList<OpenSubtitlesClient.SubtitleResult>()
 
                 if (hash != null) {
                     AppLogger.info(TAG, "OpenSubtitles hash: $hash (size: ${videoFile.length()})")
-                    subtitles = client.searchByHash(hash)
+                    hashSubtitles = client.searchByHash(hash)
                 }
 
-                // Fall back to text query if no hash results
-                if (subtitles.isEmpty()) {
-                    // Strip file extension from title for better search results
-                    val query = video.title.replace(Regex("\\.[^.]+$"), "")
-                    AppLogger.info(TAG, "Hash search returned no results, trying query: $query")
-                    subtitles = client.searchByQuery(query)
-                }
+                // Text query search
+                val query = video.title.replace(Regex("\\.[^.]+$"), "")
+                AppLogger.info(TAG, "Searching by query: $query")
+                val querySubtitles = client.searchByQuery(query)
 
-                subtitles
+                // Deduplicate: remove query results already found by hash
+                val hashFileIds = hashSubtitles.map { it.fileId }.toSet()
+                val uniqueQuerySubtitles = querySubtitles.filter { it.fileId !in hashFileIds }
+
+                Pair(hashSubtitles, uniqueQuerySubtitles)
             }
             binding.progressBar.visibility = View.GONE
 
-            if (results.isEmpty()) {
+            if (hashResults.isEmpty() && queryResults.isEmpty()) {
                 Toast.makeText(this@VideoDetailActivity, R.string.opensubtitles_no_results, Toast.LENGTH_SHORT).show()
             } else {
-                showOpenSubtitlesResults(video, results, apiKey, username, password)
+                showOpenSubtitlesResults(video, hashResults, queryResults, apiKey, username, password)
             }
         }
     }
 
     private fun showOpenSubtitlesResults(
         video: VideoItem,
-        results: List<OpenSubtitlesClient.SubtitleResult>,
+        hashResults: List<OpenSubtitlesClient.SubtitleResult>,
+        queryResults: List<OpenSubtitlesClient.SubtitleResult>,
         apiKey: String,
         username: String,
         password: String
     ) {
-        val displayItems = results.map { result ->
-            val name = result.release.ifBlank { result.fileName }
-            "[${result.language}] $name (${result.downloadCount} downloads)"
+        // Sort each group by download count descending
+        val sortedHash = hashResults.sortedByDescending { it.downloadCount }
+        val sortedQuery = queryResults.sortedByDescending { it.downloadCount }
+
+        // Build combined list: null entries are section headers
+        val allResults = mutableListOf<OpenSubtitlesClient.SubtitleResult?>()
+        val displayItems = mutableListOf<String>()
+
+        if (sortedHash.isNotEmpty()) {
+            allResults.add(null)
+            displayItems.add(getString(R.string.opensubtitles_hash_matches))
+            for (result in sortedHash) {
+                allResults.add(result)
+                val name = result.release.ifBlank { result.fileName }
+                displayItems.add("[${result.language}] $name (${result.downloadCount} downloads)")
+            }
+        }
+
+        if (sortedQuery.isNotEmpty()) {
+            allResults.add(null)
+            displayItems.add(getString(R.string.opensubtitles_title_matches))
+            for (result in sortedQuery) {
+                allResults.add(result)
+                val name = result.release.ifBlank { result.fileName }
+                displayItems.add("[${result.language}] $name (${result.downloadCount} downloads)")
+            }
+        }
+
+        val adapter = object : ArrayAdapter<String>(this, android.R.layout.simple_list_item_1, displayItems) {
+            override fun isEnabled(position: Int): Boolean = allResults[position] != null
+
+            override fun getView(position: Int, convertView: android.view.View?, parent: android.view.ViewGroup): android.view.View {
+                val view = super.getView(position, convertView, parent)
+                val textView = view.findViewById<android.widget.TextView>(android.R.id.text1)
+                if (allResults[position] == null) {
+                    textView.setTypeface(null, android.graphics.Typeface.BOLD)
+                    textView.setTextColor(getColor(com.google.android.material.R.color.material_on_surface_emphasis_medium))
+                    textView.textSize = 13f
+                } else {
+                    textView.setTypeface(null, android.graphics.Typeface.NORMAL)
+                    textView.setTextColor(getColor(com.google.android.material.R.color.material_on_surface_emphasis_high_type))
+                    textView.textSize = 16f
+                }
+                return view
+            }
         }
 
         AlertDialog.Builder(this)
             .setTitle(R.string.opensubtitles_results_title)
-            .setItems(displayItems.toTypedArray()) { _, which ->
-                val selected = results[which]
+            .setAdapter(adapter) { _, which ->
+                val selected = allResults[which] ?: return@setAdapter
                 downloadOpenSubtitle(selected, apiKey, username, password)
             }
             .setNegativeButton(android.R.string.cancel, null)
