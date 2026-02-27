@@ -293,6 +293,18 @@ class MediaServerService : Service() {
             response.addHeader("Access-Control-Expose-Headers", "Content-Range, Content-Length, Accept-Ranges")
         }
 
+        /**
+         * Prevents the Cast receiver from caching subtitle responses.
+         * Without this, toggling setActiveMediaTracks off/on to refresh
+         * subtitles after an offset change returns stale cached content
+         * because the subtitle URL stays the same.
+         */
+        private fun addNoCacheHeadersIfSubtitle(response: Response, mimeType: String) {
+            if (mimeType == "text/vtt") {
+                response.addHeader("Cache-Control", "no-store")
+            }
+        }
+
         override fun serve(session: IHTTPSession): Response {
             val uri = session.uri
             AppLogger.info("MediaServer", "HTTP ${session.method} $uri")
@@ -423,6 +435,7 @@ class MediaServerService : Service() {
                     Response.Status.OK, entry.mimeType, fis, entry.file.length()
                 )
                 response.addHeader("Accept-Ranges", "bytes")
+                addNoCacheHeadersIfSubtitle(response, entry.mimeType)
                 addCorsHeaders(response)
                 AppLogger.info("MediaServer", "Response: 200 OK, Content-Type=${entry.mimeType}, Content-Length=${entry.file.length()}")
                 response
@@ -457,6 +470,7 @@ class MediaServerService : Service() {
                 )
                 response.addHeader("Content-Range", contentRange)
                 response.addHeader("Accept-Ranges", "bytes")
+                addNoCacheHeadersIfSubtitle(response, entry.mimeType)
                 addCorsHeaders(response)
                 AppLogger.info("MediaServer", "Response: 206 Partial Content, Content-Type=${entry.mimeType}, Content-Range=$contentRange, Content-Length=$contentLength")
                 response
