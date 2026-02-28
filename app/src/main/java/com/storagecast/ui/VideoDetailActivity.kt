@@ -87,6 +87,8 @@ class VideoDetailActivity : AppCompatActivity() {
         private const val NORMAL_PLAYBACK_RATE = 1.0
         private const val NO_LOADING_ITEM = 0
         private const val SUBTITLE_APPLY_DEBOUNCE_MS = 800L
+        private val PLAYBACK_SPEEDS = doubleArrayOf(0.5, 0.75, 1.0, 1.25, 1.5, 2.0)
+        private val PLAYBACK_SPEED_LABELS = arrayOf("0.5x", "0.75x", "1x (Normal)", "1.25x", "1.5x", "2x")
     }
 
     private lateinit var binding: ActivityVideoDetailBinding
@@ -106,6 +108,7 @@ class VideoDetailActivity : AppCompatActivity() {
     private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var selectedAudioTrack: AudioTrackInfo? = null
     private var cachedProbeResult: MediaProbeResult? = null
+    private var currentPlaybackSpeed = NORMAL_PLAYBACK_RATE
 
     private val subtitleFilePicker = registerForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -506,6 +509,8 @@ class VideoDetailActivity : AppCompatActivity() {
         }
 
         binding.subtitleOffsetButton.setOnClickListener { showSubtitleOffsetDialog() }
+
+        binding.speedButton.setOnClickListener { showPlaybackSpeedDialog() }
     }
 
     private fun seekRelative(offsetMs: Long) {
@@ -614,6 +619,39 @@ class VideoDetailActivity : AppCompatActivity() {
         }
 
         dialog.show()
+    }
+
+    private fun showPlaybackSpeedDialog() {
+        val currentIndex = PLAYBACK_SPEEDS.indexOfFirst { it == currentPlaybackSpeed }
+            .coerceAtLeast(0)
+
+        AlertDialog.Builder(this)
+            .setTitle(R.string.playback_speed_title)
+            .setSingleChoiceItems(PLAYBACK_SPEED_LABELS, currentIndex) { dialog, which ->
+                val speed = PLAYBACK_SPEEDS[which]
+                currentPlaybackSpeed = speed
+                AppLogger.info(TAG, "Playback speed set to ${PLAYBACK_SPEED_LABELS[which]}")
+
+                val client = castSession?.remoteMediaClient
+                if (client?.hasMediaSession() == true) {
+                    client.setPlaybackRate(speed)
+                }
+
+                updateSpeedButtonLabel()
+                dialog.dismiss()
+            }
+            .show()
+    }
+
+    private fun updateSpeedButtonLabel() {
+        if (currentPlaybackSpeed == NORMAL_PLAYBACK_RATE) {
+            binding.speedButton.text = getString(R.string.playback_speed)
+        } else {
+            val label = PLAYBACK_SPEED_LABELS[
+                PLAYBACK_SPEEDS.indexOfFirst { it == currentPlaybackSpeed }.coerceAtLeast(0)
+            ]
+            binding.speedButton.text = getString(R.string.playback_speed_status, label)
+        }
     }
 
     private fun autoLoadSidecarSubtitle() {

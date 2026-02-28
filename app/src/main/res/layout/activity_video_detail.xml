@@ -241,6 +241,21 @@
                     app:strokeColor="@color/text_tertiary_dark"
                     android:textColor="@color/text_primary_dark"
                     app:iconTint="@color/text_primary_dark" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/speedButton"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginStart="4dp"
+                    android:text="@string/playback_speed"
+                    android:textSize="12sp"
+                    app:icon="@drawable/ic_speed"
+                    app:iconSize="18dp"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                    app:strokeColor="@color/text_tertiary_dark"
+                    android:textColor="@color/text_primary_dark"
+                    app:iconTint="@color/text_primary_dark" />
             </LinearLayout>
 
             <!-- Status texts -->
