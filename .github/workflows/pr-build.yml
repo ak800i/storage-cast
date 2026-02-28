@@ -17,7 +17,16 @@ jobs:
       - name: Setup build environment
         uses: ./.github/actions/setup-build
 
+      - name: Decode keystore
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > app/keystore.jks
+
       - name: Build debug APK
+        env:
+          KEYSTORE_PATH: ${{ github.event.pull_request.head.repo.full_name == github.repository && format('{0}/app/keystore.jks', github.workspace) || '' }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: ./gradlew assembleDebug
 
       - name: Rename APK

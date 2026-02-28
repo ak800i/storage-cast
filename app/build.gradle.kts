@@ -14,7 +14,7 @@ android {
         versionName = (findProperty("releaseVersionName") as? String) ?: "1.0"
     }
 
-    if (System.getenv("KEYSTORE_PATH") != null) {
+    if (!System.getenv("KEYSTORE_PATH").isNullOrEmpty()) {
         signingConfigs {
             create("release") {
                 storeFile = file(System.getenv("KEYSTORE_PATH"))
@@ -27,8 +27,10 @@ android {
 
     buildTypes {
         debug {
-            applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
+            signingConfigs.findByName("release")?.let {
+                signingConfig = it
+            }
         }
         release {
             isMinifyEnabled = false
