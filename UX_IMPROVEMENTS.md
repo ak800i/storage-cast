@@ -162,5 +162,3 @@ The following improvements from the list above have been implemented in this PR:
 - **#3** — Settings inputs upgraded to Material `TextInputLayout` with floating labels
 - **#4** — Save button label changed to "Save"
 - **#6** — Added placeholder icon for video thumbnails
-- **#7** — Transport controls disabled/dimmed when not connected to Cast
-- **#8** — Battery dialog dismissal saved to preferences (remembers "Later")

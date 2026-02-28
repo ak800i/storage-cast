@@ -258,9 +258,6 @@ class MainActivity : AppCompatActivity() {
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         if (pm.isIgnoringBatteryOptimizations(packageName)) return
 
-        val prefs = getSharedPreferences(SettingsActivity.PREFS_NAME, Context.MODE_PRIVATE)
-        if (prefs.getBoolean(SettingsActivity.KEY_BATTERY_DIALOG_DISMISSED, false)) return
-
         AlertDialog.Builder(this)
             .setTitle(R.string.battery_optimization_title)
             .setMessage(R.string.battery_optimization_message)
@@ -279,9 +276,7 @@ class MainActivity : AppCompatActivity() {
             .setNeutralButton(R.string.battery_optimization_settings) { _, _ ->
                 openBatteryOptimizationSettings()
             }
-            .setNegativeButton(R.string.battery_optimization_later) { _, _ ->
-                prefs.edit().putBoolean(SettingsActivity.KEY_BATTERY_DIALOG_DISMISSED, true).apply()
-            }
+            .setNegativeButton(R.string.battery_optimization_later, null)
             .show()
     }
 
