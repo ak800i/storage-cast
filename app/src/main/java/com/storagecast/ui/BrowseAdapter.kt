@@ -65,7 +65,9 @@ class BrowseAdapter(
         fun bind(folder: BrowseItem.Folder) {
             binding.folderName.text = folder.name
             val count = folder.videoCount
-            binding.folderCount.text = "$count video${if (count != 1) "s" else ""}"
+            binding.folderCount.text = binding.root.resources.getQuantityString(
+                com.storagecast.R.plurals.folder_video_count, count, count
+            )
             binding.root.setOnClickListener { onFolderClick(folder) }
         }
     }
@@ -87,6 +89,8 @@ class BrowseAdapter(
         }
 
         private fun loadThumbnail(video: VideoItem) {
+            binding.videoThumbnail.setImageResource(com.storagecast.R.drawable.ic_video_placeholder)
+            binding.videoThumbnail.scaleType = android.widget.ImageView.ScaleType.CENTER
             try {
                 val thumbnail: Bitmap? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     binding.root.context.contentResolver.loadThumbnail(
@@ -103,9 +107,10 @@ class BrowseAdapter(
                 }
                 if (thumbnail != null) {
                     binding.videoThumbnail.setImageBitmap(thumbnail)
+                    binding.videoThumbnail.scaleType = android.widget.ImageView.ScaleType.CENTER_CROP
                 }
             } catch (e: Exception) {
-                // Thumbnail not available
+                // Thumbnail not available, placeholder already set
             }
         }
 

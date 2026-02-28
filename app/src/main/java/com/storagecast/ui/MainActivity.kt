@@ -35,6 +35,7 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "MainActivity"
+        private const val KEY_BATTERY_DIALOG_DISMISSED = "battery_dialog_dismissed"
     }
 
     private lateinit var binding: ActivityMainBinding
@@ -258,6 +259,9 @@ class MainActivity : AppCompatActivity() {
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         if (pm.isIgnoringBatteryOptimizations(packageName)) return
 
+        val prefs = getSharedPreferences(SettingsActivity.PREFS_NAME, Context.MODE_PRIVATE)
+        if (prefs.getBoolean(KEY_BATTERY_DIALOG_DISMISSED, false)) return
+
         AlertDialog.Builder(this)
             .setTitle(R.string.battery_optimization_title)
             .setMessage(R.string.battery_optimization_message)
@@ -276,7 +280,9 @@ class MainActivity : AppCompatActivity() {
             .setNeutralButton(R.string.battery_optimization_settings) { _, _ ->
                 openBatteryOptimizationSettings()
             }
-            .setNegativeButton(R.string.battery_optimization_later, null)
+            .setNegativeButton(R.string.battery_optimization_later) { _, _ ->
+                prefs.edit().putBoolean(KEY_BATTERY_DIALOG_DISMISSED, true).apply()
+            }
             .show()
     }
 

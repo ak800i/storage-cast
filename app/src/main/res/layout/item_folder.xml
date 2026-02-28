@@ -19,7 +19,7 @@
             android:layout_width="40dp"
             android:layout_height="40dp"
             android:src="@drawable/ic_folder"
-            android:contentDescription="Folder"
+            android:contentDescription="@string/folder_icon_desc"
             android:tint="?attr/colorPrimary" />
 
         <LinearLayout

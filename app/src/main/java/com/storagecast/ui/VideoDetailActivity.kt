@@ -389,6 +389,7 @@ class VideoDetailActivity : AppCompatActivity() {
         bindMediaServer()
         displayVideoInfo()
         setupControls()
+        updateTransportControls(false)
         setupSeekBar()
         autoLoadSidecarSubtitle()
     }
@@ -416,6 +417,8 @@ class VideoDetailActivity : AppCompatActivity() {
     }
 
     private fun loadThumbnail(video: VideoItem) {
+        binding.videoThumbnail.setImageResource(R.drawable.ic_video_placeholder)
+        binding.videoThumbnail.scaleType = android.widget.ImageView.ScaleType.CENTER
         try {
             val thumbnail: Bitmap? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 contentResolver.loadThumbnail(video.uri, Size(640, 360), null)
@@ -428,9 +431,10 @@ class VideoDetailActivity : AppCompatActivity() {
             }
             if (thumbnail != null) {
                 binding.videoThumbnail.setImageBitmap(thumbnail)
+                binding.videoThumbnail.scaleType = android.widget.ImageView.ScaleType.CENTER_CROP
             }
         } catch (e: Exception) {
-            // Thumbnail not available
+            // Thumbnail not available, placeholder already set
         }
     }
 
@@ -1773,7 +1777,8 @@ class VideoDetailActivity : AppCompatActivity() {
     }
 
     private fun updateCastStatus(videoTitle: String? = null) {
-        if (castSession?.isConnected == true) {
+        val connected = castSession?.isConnected == true
+        if (connected) {
             binding.castStatusBar.visibility = View.VISIBLE
             val deviceName = castSession?.castDevice?.friendlyName ?: "device"
             binding.castStatusText.text = if (videoTitle != null) {
@@ -1784,6 +1789,21 @@ class VideoDetailActivity : AppCompatActivity() {
         } else {
             binding.castStatusBar.visibility = View.GONE
         }
+        updateTransportControls(connected)
+    }
+
+    private fun updateTransportControls(connected: Boolean) {
+        val alpha = if (connected) 1.0f else 0.4f
+        binding.playButton.isEnabled = connected
+        binding.playButton.alpha = alpha
+        binding.pauseButton.isEnabled = connected
+        binding.pauseButton.alpha = alpha
+        binding.stopButton.isEnabled = connected
+        binding.stopButton.alpha = alpha
+        binding.rewindButton.isEnabled = connected
+        binding.rewindButton.alpha = alpha
+        binding.forwardButton.isEnabled = connected
+        binding.forwardButton.alpha = alpha
     }
 
     private fun setupCast() {
