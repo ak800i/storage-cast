@@ -60,6 +60,7 @@ import com.storagecast.model.VideoItem
 import com.storagecast.server.MediaServerService
 import com.storagecast.subtitle.OpenSubtitlesClient
 import com.storagecast.subtitle.OpenSubtitlesHash
+import com.storagecast.subtitle.GestdownClient
 import com.storagecast.subtitle.SubtitleConverter
 import com.storagecast.subtitle.SubtitleExtractor
 import kotlinx.coroutines.Job
@@ -683,6 +684,9 @@ class VideoDetailActivity : AppCompatActivity() {
         options.add(getString(R.string.subtitle_source_opensubtitles))
         val openSubtitlesIndex = options.size - 1
 
+        options.add(getString(R.string.subtitle_source_gestdown))
+        val gestdownIndex = options.size - 1
+
         val embeddedHeaderIndex = if (tracks.isNotEmpty()) embeddedStartIndex else -1
 
         AlertDialog.Builder(this)
@@ -713,6 +717,9 @@ class VideoDetailActivity : AppCompatActivity() {
                     }
                     which == openSubtitlesIndex -> {
                         searchOpenSubtitles(video)
+                    }
+                    which == gestdownIndex -> {
+                        searchGestdown(video)
                     }
                     sidecars.isNotEmpty() && which > sidecarHeaderIndex && which < embeddedStartIndex -> {
                         val sidecarIndex = which - sidecarHeaderIndex - 1
@@ -1058,6 +1065,192 @@ class VideoDetailActivity : AppCompatActivity() {
                 invalidateOptionsMenu()
             } else {
                 Toast.makeText(this@VideoDetailActivity, R.string.opensubtitles_download_failed, Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    // --- Gestdown (Addic7ed) subtitle search ---
+
+    private fun searchGestdown(video: VideoItem) {
+        // Try to extract show name from file name
+        val fileName = File(video.path).nameWithoutExtension
+        val guessedName = fileName
+            .replace(Regex("[._]"), " ")
+            .replace(Regex("[Ss]\\d{1,2}[Ee]\\d{1,2}.*"), "")
+            .replace(Regex("\\d{3,4}p.*", RegexOption.IGNORE_CASE), "")
+            .trim()
+
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(48, 32, 48, 0)
+        }
+        val searchInput = EditText(this).apply {
+            hint = getString(R.string.gestdown_show_search_hint)
+            setText(guessedName)
+            inputType = android.text.InputType.TYPE_CLASS_TEXT
+        }
+        layout.addView(searchInput)
+
+        AlertDialog.Builder(this)
+            .setTitle(R.string.gestdown_show_search_title)
+            .setView(layout)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                val query = searchInput.text.toString().trim()
+                if (query.isNotEmpty()) {
+                    performGestdownShowSearch(video, query)
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun performGestdownShowSearch(video: VideoItem, query: String) {
+        binding.progressBar.visibility = View.VISIBLE
+        activityScope.launch {
+            val shows = withContext(Dispatchers.IO) {
+                GestdownClient().searchShows(query)
+            }
+            binding.progressBar.visibility = View.GONE
+
+            if (shows.isEmpty()) {
+                Toast.makeText(this@VideoDetailActivity, R.string.gestdown_no_shows, Toast.LENGTH_SHORT).show()
+            } else {
+                showGestdownShowPicker(video, shows)
+            }
+        }
+    }
+
+    private fun showGestdownShowPicker(video: VideoItem, shows: List<GestdownClient.ShowResult>) {
+        val displayItems = shows.map { "${it.name} (${it.nbSeasons} seasons)" }
+
+        AlertDialog.Builder(this)
+            .setTitle(R.string.gestdown_select_show_title)
+            .setItems(displayItems.toTypedArray()) { _, which ->
+                showGestdownEpisodeDialog(video, shows[which])
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun showGestdownEpisodeDialog(video: VideoItem, show: GestdownClient.ShowResult) {
+        // Try to guess season/episode from file name
+        val fileName = File(video.path).nameWithoutExtension
+        val seMatch = Regex("[Ss](\\d{1,2})[Ee](\\d{1,2})").find(fileName)
+        val guessedSeason = seMatch?.groupValues?.get(1) ?: ""
+        val guessedEpisode = seMatch?.groupValues?.get(2) ?: ""
+
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(48, 32, 48, 0)
+        }
+        val seasonInput = EditText(this).apply {
+            hint = getString(R.string.gestdown_season_hint)
+            setText(guessedSeason)
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+        }
+        val episodeInput = EditText(this).apply {
+            hint = getString(R.string.gestdown_episode_hint)
+            setText(guessedEpisode)
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+        }
+        val languageInput = EditText(this).apply {
+            hint = getString(R.string.gestdown_language_hint)
+            setText("English")
+            inputType = android.text.InputType.TYPE_CLASS_TEXT
+        }
+        layout.addView(seasonInput)
+        layout.addView(episodeInput)
+        layout.addView(languageInput)
+
+        AlertDialog.Builder(this)
+            .setTitle(R.string.gestdown_episode_title)
+            .setView(layout)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                val season = seasonInput.text.toString().trim().toIntOrNull()
+                val episode = episodeInput.text.toString().trim().toIntOrNull()
+                val language = languageInput.text.toString().trim().ifEmpty { "English" }
+
+                if (season == null || episode == null) {
+                    Toast.makeText(this, R.string.gestdown_season_episode_required, Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+
+                performGestdownSubtitleSearch(video, show.id, season, episode, language)
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun performGestdownSubtitleSearch(
+        video: VideoItem,
+        showId: String,
+        season: Int,
+        episode: Int,
+        language: String
+    ) {
+        binding.progressBar.visibility = View.VISIBLE
+        activityScope.launch {
+            val results = withContext(Dispatchers.IO) {
+                GestdownClient().getSubtitles(showId, season, episode, language)
+            }
+            binding.progressBar.visibility = View.GONE
+
+            if (results.isEmpty()) {
+                Toast.makeText(this@VideoDetailActivity, R.string.gestdown_no_results, Toast.LENGTH_SHORT).show()
+            } else {
+                showGestdownResults(results)
+            }
+        }
+    }
+
+    private fun showGestdownResults(results: List<GestdownClient.SubtitleResult>) {
+        val sorted = results.sortedByDescending { it.downloadCount }
+        val displayItems = sorted.map { result ->
+            val flags = buildString {
+                if (result.hearingImpaired) append(" [HI]")
+                if (!result.completed) append(" [incomplete]")
+            }
+            "${result.version}$flags (${result.downloadCount} downloads)"
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle(R.string.gestdown_results_title)
+            .setItems(displayItems.toTypedArray()) { _, which ->
+                downloadGestdownSubtitle(sorted[which])
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun downloadGestdownSubtitle(result: GestdownClient.SubtitleResult) {
+        binding.progressBar.visibility = View.VISIBLE
+        activityScope.launch {
+            val (vttFile, rawFile) = withContext(Dispatchers.IO) {
+                val client = GestdownClient()
+                val outputDir = File(cacheDir, "subtitles")
+                val downloadedFile = client.download(result.subtitleId, outputDir)
+                    ?: return@withContext Pair(null, null)
+
+                val fileName = downloadedFile.name
+                val converted = downloadedFile.inputStream().use { stream ->
+                    subtitleConverter.convertToVtt(stream, fileName, outputDir)
+                }
+                Pair(converted, downloadedFile)
+            }
+            binding.progressBar.visibility = View.GONE
+
+            if (vttFile != null) {
+                selectedSubtitleFile = vttFile
+                downloadedSubtitleFile = rawFile
+                binding.subtitleStatus.text = getString(R.string.gestdown_subtitle_selected, result.language)
+                binding.subtitleStatus.visibility = View.VISIBLE
+                subtitleSyncOffsetMs = 0L
+                updateSubtitleSyncUi()
+                AppLogger.info(TAG, "Gestdown subtitle loaded: ${vttFile.name}")
+                applyLiveSubtitleChange(vttFile)
+                invalidateOptionsMenu()
+            } else {
+                Toast.makeText(this@VideoDetailActivity, R.string.gestdown_download_failed, Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -1835,7 +2028,9 @@ class VideoDetailActivity : AppCompatActivity() {
             R.id.action_save_subtitle -> {
                 val file = downloadedSubtitleFile
                 if (file != null) {
-                    val upstreamName = file.name.removePrefix("opensubtitles_")
+                    val upstreamName = file.name
+                        .removePrefix("opensubtitles_")
+                        .removePrefix("gestdown_")
                     val subtitleExt = upstreamName.substringAfterLast('.', "srt")
                     val videoBaseName = videoItem?.path?.let { File(it).nameWithoutExtension }?.ifEmpty { null }
                     val suggestedName = if (videoBaseName != null) "$videoBaseName.$subtitleExt" else upstreamName
