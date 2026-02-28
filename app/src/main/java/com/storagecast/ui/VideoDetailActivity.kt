@@ -622,8 +622,7 @@ class VideoDetailActivity : AppCompatActivity() {
     }
 
     private fun showPlaybackSpeedDialog() {
-        val currentIndex = PLAYBACK_SPEEDS.indexOfFirst { it == currentPlaybackSpeed }
-            .coerceAtLeast(0)
+        val currentIndex = currentSpeedIndex()
 
         AlertDialog.Builder(this)
             .setTitle(R.string.playback_speed_title)
@@ -635,6 +634,11 @@ class VideoDetailActivity : AppCompatActivity() {
                 val client = castSession?.remoteMediaClient
                 if (client?.hasMediaSession() == true) {
                     client.setPlaybackRate(speed)
+                        .setResultCallback { result ->
+                            if (!result.status.isSuccess) {
+                                AppLogger.error(TAG, "setPlaybackRate failed: ${result.status.statusMessage}")
+                            }
+                        }
                 }
 
                 updateSpeedButtonLabel()
@@ -643,13 +647,14 @@ class VideoDetailActivity : AppCompatActivity() {
             .show()
     }
 
+    private fun currentSpeedIndex(): Int =
+        PLAYBACK_SPEEDS.indexOfFirst { it == currentPlaybackSpeed }.coerceAtLeast(0)
+
     private fun updateSpeedButtonLabel() {
         if (currentPlaybackSpeed == NORMAL_PLAYBACK_RATE) {
             binding.speedButton.text = getString(R.string.playback_speed)
         } else {
-            val label = PLAYBACK_SPEED_LABELS[
-                PLAYBACK_SPEEDS.indexOfFirst { it == currentPlaybackSpeed }.coerceAtLeast(0)
-            ]
+            val label = PLAYBACK_SPEED_LABELS[currentSpeedIndex()]
             binding.speedButton.text = getString(R.string.playback_speed_status, label)
         }
     }
