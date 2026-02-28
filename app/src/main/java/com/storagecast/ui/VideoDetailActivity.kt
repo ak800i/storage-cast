@@ -1079,6 +1079,7 @@ class VideoDetailActivity : AppCompatActivity() {
             .replace(Regex("[Ss]\\d{1,2}[Ee]\\d{1,2}.*"), "")
             .replace(Regex("\\d{3,4}p.*", RegexOption.IGNORE_CASE), "")
             .trim()
+            .replace(Regex("^the\\s+", RegexOption.IGNORE_CASE), "")
 
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -1108,7 +1109,17 @@ class VideoDetailActivity : AppCompatActivity() {
         binding.progressBar.visibility = View.VISIBLE
         activityScope.launch {
             val shows = withContext(Dispatchers.IO) {
-                GestdownClient().searchShows(query)
+                val client = GestdownClient()
+                val results = client.searchShows(query)
+                if (results.isNotEmpty()) return@withContext results
+
+                // Retry without leading "the" if first search returned nothing
+                val withoutThe = query.replace(Regex("^the\\s+", RegexOption.IGNORE_CASE), "")
+                if (withoutThe != query && withoutThe.isNotEmpty()) {
+                    client.searchShows(withoutThe)
+                } else {
+                    results
+                }
             }
             binding.progressBar.visibility = View.GONE
 
