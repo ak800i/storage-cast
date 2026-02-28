@@ -424,6 +424,11 @@ class MediaServerService : Service() {
                 )
                 response.addHeader("Accept-Ranges", "bytes")
                 addCorsHeaders(response)
+                // Prevent the Cast receiver from caching subtitle content so
+                // that offset changes served from the same URL are always fresh.
+                if (entry.mimeType == "text/vtt") {
+                    response.addHeader("Cache-Control", "no-store")
+                }
                 AppLogger.info("MediaServer", "Response: 200 OK, Content-Type=${entry.mimeType}, Content-Length=${entry.file.length()}")
                 response
             } catch (e: Exception) {

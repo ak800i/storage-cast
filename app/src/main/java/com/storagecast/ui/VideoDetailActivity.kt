@@ -62,10 +62,12 @@ import com.storagecast.subtitle.OpenSubtitlesClient
 import com.storagecast.subtitle.OpenSubtitlesHash
 import com.storagecast.subtitle.SubtitleConverter
 import com.storagecast.subtitle.SubtitleExtractor
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -97,6 +99,7 @@ class VideoDetailActivity : AppCompatActivity() {
     private var selectedSubtitleFile: File? = null
     private var downloadedSubtitleFile: File? = null
     private var subtitleSyncOffsetMs = 0L
+    private var subtitleApplyJob: Job? = null
     private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var selectedAudioTrack: AudioTrackInfo? = null
     private var cachedProbeResult: MediaProbeResult? = null
@@ -528,7 +531,11 @@ class VideoDetailActivity : AppCompatActivity() {
         subtitleSyncOffsetMs += deltaMs
         updateSubtitleSyncUi()
 
-        activityScope.launch {
+        // Debounce: cancel any pending apply and schedule a new one so rapid
+        // button presses only trigger a single Cast reload after a short pause.
+        subtitleApplyJob?.cancel()
+        subtitleApplyJob = activityScope.launch {
+            delay(800)
             val effectiveFile = if (subtitleSyncOffsetMs == 0L) {
                 baseVtt
             } else {
@@ -538,39 +545,11 @@ class VideoDetailActivity : AppCompatActivity() {
                 } ?: return@launch
             }
 
-            // If Cast already has an active subtitle track, just update the file
-            // and toggle the track to force a re-fetch — no video reload needed.
-            val client = castSession?.remoteMediaClient
-            val hasActiveSubtitle = client?.hasMediaSession() == true &&
-                    client.mediaStatus?.activeTrackIds?.contains(1L) == true
-            if (hasActiveSubtitle) {
-                refreshCastSubtitle(effectiveFile)
-            } else {
-                applyLiveSubtitleChange(effectiveFile)
-            }
-        }
-    }
-
-    /**
-     * Updates the subtitle content on the Cast receiver without reloading video.
-     * Re-registers the file with the server (same stable URL) then toggles
-     * the text track off and back on so the receiver re-fetches the VTT.
-     */
-    private fun refreshCastSubtitle(subtitleFile: File) {
-        val client = castSession?.remoteMediaClient ?: return
-        val service = mediaServerService ?: return
-
-        service.registerSubtitle(subtitleFile)
-        AppLogger.info(TAG, "Refreshing cast subtitle (no reload): ${subtitleFile.name}")
-
-        client.setActiveMediaTracks(longArrayOf()).setResultCallback {
-            client.setActiveMediaTracks(longArrayOf(1)).setResultCallback { result ->
-                if (result.status.isSuccess) {
-                    AppLogger.info(TAG, "Subtitle offset refreshed successfully")
-                } else {
-                    AppLogger.warn(TAG, "Subtitle refresh failed: ${result.status.statusMessage}")
-                }
-            }
+            // The Cast Default Media Receiver keeps subtitle data in memory
+            // after load(). Toggling setActiveMediaTracks off/on does NOT cause
+            // it to re-fetch the VTT. The only reliable way to update subtitle
+            // content is a full media reload at the current position.
+            applyLiveSubtitleChange(effectiveFile)
         }
     }
 
