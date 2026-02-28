@@ -17,6 +17,7 @@ class SettingsActivity : AppCompatActivity() {
         const val PREFS_NAME = "storagecast_settings"
         const val KEY_FILTER_SHORT_VIDEOS = "filter_short_videos"
         const val KEY_MIN_DURATION_MINUTES = "min_duration_minutes"
+        const val KEY_BATTERY_DIALOG_DISMISSED = "battery_dialog_dismissed"
         const val DEFAULT_MIN_DURATION_MINUTES = 18
 
         private const val OPENSUBTITLES_PREFS = "opensubtitles"

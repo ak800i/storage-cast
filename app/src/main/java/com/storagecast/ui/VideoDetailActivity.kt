@@ -85,6 +85,7 @@ class VideoDetailActivity : AppCompatActivity() {
         private const val NORMAL_PLAYBACK_RATE = 1.0
         private const val NO_LOADING_ITEM = 0
         private const val SUBTITLE_APPLY_DEBOUNCE_MS = 800L
+        private const val DISABLED_ALPHA = 0.4f
     }
 
     private lateinit var binding: ActivityVideoDetailBinding
@@ -1793,7 +1794,7 @@ class VideoDetailActivity : AppCompatActivity() {
     }
 
     private fun updateTransportControls(connected: Boolean) {
-        val alpha = if (connected) 1.0f else 0.4f
+        val alpha = if (connected) 1.0f else DISABLED_ALPHA
         binding.playButton.isEnabled = connected
         binding.playButton.alpha = alpha
         binding.pauseButton.isEnabled = connected

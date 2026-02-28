@@ -149,7 +149,7 @@
                 android:id="@+id/saveCredentialsButton"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="@string/save"
+                android:text="@string/settings_save_credentials"
                 android:layout_gravity="end"
                 style="@style/Widget.MaterialComponents.Button.OutlinedButton" />
 
