@@ -41,6 +41,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var viewModel: MainViewModel
     private lateinit var browseAdapter: BrowseAdapter
     private var pendingVideoIntent: Intent? = null
+    private var awaitingBatteryResult = false
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -82,6 +83,10 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         viewModel.refreshFilter()
+        if (awaitingBatteryResult) {
+            awaitingBatteryResult = false
+            checkBatteryOptimization()
+        }
     }
 
     private fun handleIncomingIntent(intent: Intent) {
@@ -278,16 +283,17 @@ class MainActivity : AppCompatActivity() {
                         Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
                         Uri.parse("package:$packageName")
                     )
+                    awaitingBatteryResult = true
                     startActivity(intent)
                 } catch (e: Exception) {
                     AppLogger.warn(TAG, "Direct battery optimization request not supported: ${e.message}")
+                    awaitingBatteryResult = true
                     openBatteryOptimizationSettings()
                 }
-                processPendingIntent()
             }
             .setNeutralButton(R.string.battery_optimization_settings) { _, _ ->
+                awaitingBatteryResult = true
                 openBatteryOptimizationSettings()
-                processPendingIntent()
             }
             .setNegativeButton(R.string.battery_optimization_later) { _, _ ->
                 processPendingIntent()
