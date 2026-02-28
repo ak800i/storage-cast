@@ -102,35 +102,54 @@
                 android:textStyle="bold"
                 android:layout_marginBottom="8dp" />
 
-            <EditText
-                android:id="@+id/apiKeyInput"
+            <com.google.android.material.textfield.TextInputLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:layout_marginBottom="8dp"
                 android:hint="@string/opensubtitles_api_key_hint"
-                android:inputType="text"
-                android:layout_marginBottom="8dp" />
+                style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox">
 
-            <EditText
-                android:id="@+id/usernameInput"
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/apiKeyInput"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:inputType="text" />
+            </com.google.android.material.textfield.TextInputLayout>
+
+            <com.google.android.material.textfield.TextInputLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:layout_marginBottom="8dp"
                 android:hint="@string/opensubtitles_username_hint"
-                android:inputType="text"
-                android:layout_marginBottom="8dp" />
+                style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox">
 
-            <EditText
-                android:id="@+id/passwordInput"
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/usernameInput"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:inputType="text" />
+            </com.google.android.material.textfield.TextInputLayout>
+
+            <com.google.android.material.textfield.TextInputLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:layout_marginBottom="16dp"
                 android:hint="@string/opensubtitles_password_hint"
-                android:inputType="textPassword"
-                android:layout_marginBottom="16dp" />
+                style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
+                app:endIconMode="password_toggle">
+
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/passwordInput"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:inputType="textPassword" />
+            </com.google.android.material.textfield.TextInputLayout>
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/saveCredentialsButton"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="@android:string/ok"
+                android:text="@string/settings_save_credentials"
                 android:layout_gravity="end"
                 style="@style/Widget.MaterialComponents.Button.OutlinedButton" />
 

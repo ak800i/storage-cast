@@ -109,4 +109,14 @@
     <string name="settings_min_duration_label">Minimum duration (minutes)</string>
     <string name="settings_section_video_filter">Video filter</string>
     <string name="settings_section_opensubtitles">OpenSubtitles</string>
+    <string name="settings_save_credentials">Save</string>
+
+    <string name="folder_icon_desc">Folder</string>
+    <string name="subtitles_button_desc">Subtitles</string>
+    <string name="subtitle_dialog_title">Select subtitle track</string>
+
+    <plurals name="folder_video_count">
+        <item quantity="one">%d video</item>
+        <item quantity="other">%d videos</item>
+    </plurals>
 </resources>

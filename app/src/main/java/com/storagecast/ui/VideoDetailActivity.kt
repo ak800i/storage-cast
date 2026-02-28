@@ -416,6 +416,8 @@ class VideoDetailActivity : AppCompatActivity() {
     }
 
     private fun loadThumbnail(video: VideoItem) {
+        binding.videoThumbnail.setImageResource(R.drawable.ic_video_placeholder)
+        binding.videoThumbnail.scaleType = android.widget.ImageView.ScaleType.CENTER
         try {
             val thumbnail: Bitmap? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 contentResolver.loadThumbnail(video.uri, Size(640, 360), null)
@@ -428,9 +430,10 @@ class VideoDetailActivity : AppCompatActivity() {
             }
             if (thumbnail != null) {
                 binding.videoThumbnail.setImageBitmap(thumbnail)
+                binding.videoThumbnail.scaleType = android.widget.ImageView.ScaleType.CENTER_CROP
             }
         } catch (e: Exception) {
-            // Thumbnail not available
+            // Thumbnail not available, placeholder already set
         }
     }
 
