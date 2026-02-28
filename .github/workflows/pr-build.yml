@@ -1,12 +1,14 @@
-name: PR Build
+name: Build
 
 on:
+  push:
+    branches: [ main ]
   pull_request:
     branches: [ main ]
 
 jobs:
   build-pr-apk:
-    name: Build PR Test APK
+    name: Build Debug APK
     runs-on: ubuntu-latest
     permissions:
       contents: read
