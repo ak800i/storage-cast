@@ -21,6 +21,8 @@ import android.view.MenuItem
 import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.EditText
+import com.google.android.material.textfield.TextInputEditText
+import com.google.android.material.textfield.TextInputLayout
 import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.Toast
@@ -1085,12 +1087,19 @@ class VideoDetailActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(48, 32, 48, 0)
         }
-        val searchInput = EditText(this).apply {
-            hint = getString(R.string.gestdown_show_search_hint)
+        val searchInput = TextInputEditText(this).apply {
             setText(guessedName)
             inputType = android.text.InputType.TYPE_CLASS_TEXT
         }
-        layout.addView(searchInput)
+        val searchInputLayout = TextInputLayout(this, null, com.google.android.material.R.attr.textInputStyle).apply {
+            hint = getString(R.string.gestdown_show_search_hint)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+            addView(searchInput)
+        }
+        layout.addView(searchInputLayout)
 
         AlertDialog.Builder(this)
             .setTitle(R.string.gestdown_show_search_title)
@@ -1154,24 +1163,45 @@ class VideoDetailActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(48, 32, 48, 0)
         }
-        val seasonInput = EditText(this).apply {
-            hint = getString(R.string.gestdown_season_hint)
+        val seasonInput = TextInputEditText(this).apply {
             setText(guessedSeason)
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
         }
-        val episodeInput = EditText(this).apply {
-            hint = getString(R.string.gestdown_episode_hint)
+        val seasonInputLayout = TextInputLayout(this, null, com.google.android.material.R.attr.textInputStyle).apply {
+            hint = getString(R.string.gestdown_season_hint)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+            addView(seasonInput)
+        }
+        val episodeInput = TextInputEditText(this).apply {
             setText(guessedEpisode)
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
         }
-        val languageInput = EditText(this).apply {
-            hint = getString(R.string.gestdown_language_hint)
+        val episodeInputLayout = TextInputLayout(this, null, com.google.android.material.R.attr.textInputStyle).apply {
+            hint = getString(R.string.gestdown_episode_hint)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+            addView(episodeInput)
+        }
+        val languageInput = TextInputEditText(this).apply {
             setText("English")
             inputType = android.text.InputType.TYPE_CLASS_TEXT
         }
-        layout.addView(seasonInput)
-        layout.addView(episodeInput)
-        layout.addView(languageInput)
+        val languageInputLayout = TextInputLayout(this, null, com.google.android.material.R.attr.textInputStyle).apply {
+            hint = getString(R.string.gestdown_language_hint)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+            addView(languageInput)
+        }
+        layout.addView(seasonInputLayout)
+        layout.addView(episodeInputLayout)
+        layout.addView(languageInputLayout)
 
         AlertDialog.Builder(this)
             .setTitle(R.string.gestdown_episode_title)
