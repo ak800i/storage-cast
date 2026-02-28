@@ -48,11 +48,16 @@ class MainActivity : AppCompatActivity() {
     ) { isGranted ->
         if (isGranted) {
             viewModel.loadVideos()
+            requestNotificationPermission()
         } else {
             Toast.makeText(this, R.string.permission_required, Toast.LENGTH_LONG).show()
         }
         checkBatteryOptimization()
     }
+
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { _ -> /* Foreground service works regardless; notification visibility is a nice-to-have */ }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
@@ -205,11 +210,21 @@ class MainActivity : AppCompatActivity() {
             ContextCompat.checkSelfPermission(this, permission) ==
                 PackageManager.PERMISSION_GRANTED -> {
                 viewModel.loadVideos()
+                requestNotificationPermission()
                 checkBatteryOptimization()
             }
             else -> {
                 requestPermissionLauncher.launch(permission)
             }
+        }
+    }
+
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+                PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 
