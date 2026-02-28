@@ -17,8 +17,21 @@ jobs:
       - name: Setup build environment
         uses: ./.github/actions/setup-build
 
+      - name: Decode keystore
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > app/keystore.jks
+
+      - name: Generate version code
+        id: version
+        run: echo "code=$(date -u +%s)" >> "$GITHUB_OUTPUT"
+
       - name: Build debug APK
-        run: ./gradlew assembleDebug
+        env:
+          KEYSTORE_PATH: ${{ github.event.pull_request.head.repo.full_name == github.repository && format('{0}/app/keystore.jks', github.workspace) || '' }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: ./gradlew assembleDebug -PreleaseVersionCode=${{ steps.version.outputs.code }}
 
       - name: Rename APK
         run: mv app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/StorageCast-Debug.apk
