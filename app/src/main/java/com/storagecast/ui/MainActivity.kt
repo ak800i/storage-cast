@@ -40,6 +40,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private lateinit var viewModel: MainViewModel
     private lateinit var browseAdapter: BrowseAdapter
+    private var pendingVideoIntent: Intent? = null
+    private var awaitingBatteryResult = false
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -49,6 +51,7 @@ class MainActivity : AppCompatActivity() {
         } else {
             Toast.makeText(this, R.string.permission_required, Toast.LENGTH_LONG).show()
         }
+        checkBatteryOptimization()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -63,11 +66,13 @@ class MainActivity : AppCompatActivity() {
         setupRecyclerView()
         observeViewModel()
         setupCast()
-        checkPermissionsAndLoad()
         setupBackNavigation()
-        checkBatteryOptimization()
 
-        handleIncomingIntent(intent)
+        if (intent?.action == Intent.ACTION_VIEW) {
+            pendingVideoIntent = intent
+        }
+
+        checkPermissionsAndLoad()
     }
 
     override fun onNewIntent(intent: Intent?) {
@@ -78,6 +83,10 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         viewModel.refreshFilter()
+        if (awaitingBatteryResult) {
+            awaitingBatteryResult = false
+            checkBatteryOptimization()
+        }
     }
 
     private fun handleIncomingIntent(intent: Intent) {
@@ -196,6 +205,7 @@ class MainActivity : AppCompatActivity() {
             ContextCompat.checkSelfPermission(this, permission) ==
                 PackageManager.PERMISSION_GRANTED -> {
                 viewModel.loadVideos()
+                checkBatteryOptimization()
             }
             else -> {
                 requestPermissionLauncher.launch(permission)
@@ -253,10 +263,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun checkBatteryOptimization() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            processPendingIntent()
+            return
+        }
 
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        if (pm.isIgnoringBatteryOptimizations(packageName)) return
+        if (pm.isIgnoringBatteryOptimizations(packageName)) {
+            processPendingIntent()
+            return
+        }
 
         AlertDialog.Builder(this)
             .setTitle(R.string.battery_optimization_title)
@@ -267,17 +283,31 @@ class MainActivity : AppCompatActivity() {
                         Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
                         Uri.parse("package:$packageName")
                     )
+                    awaitingBatteryResult = true
                     startActivity(intent)
                 } catch (e: Exception) {
                     AppLogger.warn(TAG, "Direct battery optimization request not supported: ${e.message}")
+                    awaitingBatteryResult = true
                     openBatteryOptimizationSettings()
                 }
             }
             .setNeutralButton(R.string.battery_optimization_settings) { _, _ ->
+                awaitingBatteryResult = true
                 openBatteryOptimizationSettings()
             }
-            .setNegativeButton(R.string.battery_optimization_later, null)
+            .setNegativeButton(R.string.battery_optimization_later) { _, _ ->
+                processPendingIntent()
+            }
+            .setOnCancelListener {
+                processPendingIntent()
+            }
             .show()
+    }
+
+    private fun processPendingIntent() {
+        val intent = pendingVideoIntent ?: return
+        pendingVideoIntent = null
+        handleIncomingIntent(intent)
     }
 
     private fun openBatteryOptimizationSettings() {
