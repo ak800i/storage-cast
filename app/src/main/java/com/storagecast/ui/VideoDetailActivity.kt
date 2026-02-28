@@ -2185,6 +2185,8 @@ class VideoDetailActivity : AppCompatActivity() {
             currentSession?.remoteMediaClient?.registerCallback(remoteMediaClientCallback)
             currentSession?.addCastListener(castListener)
             updateCastStatus()
+            updateSeekBarProgress()
+            currentSession?.remoteMediaClient?.playerState?.let { updateProgressTracking(it) }
             AppLogger.info(TAG, "onResume: castSession=${if (currentSession != null) "connected to ${currentSession.castDevice?.friendlyName}" else "null"}")
         } catch (e: Exception) {
             AppLogger.warn(TAG, "Cast not available in onResume: ${e.message}")
