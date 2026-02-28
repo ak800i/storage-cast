@@ -538,11 +538,64 @@ class VideoDetailActivity : AppCompatActivity() {
                 } ?: return@launch
             }
 
-            // The Cast Default Media Receiver keeps subtitle data in memory
-            // after initial load; toggling setActiveMediaTracks off/on does
-            // not cause it to re-fetch the VTT from the server.  A full
-            // media reload is the only reliable way to apply offset changes.
-            applyLiveSubtitleChange(effectiveFile)
+            val client = castSession?.remoteMediaClient
+            if (client?.hasMediaSession() == true) {
+                refreshCastSubtitleOffset(client, effectiveFile)
+            }
+        }
+    }
+
+    /**
+     * Reloads the Cast media with an updated subtitle file for offset changes.
+     * Uses a unique subtitle URL each time so the receiver never serves stale
+     * cached content. A load() is required because the Cast Default Media
+     * Receiver locks track URLs at load time — setActiveMediaTracks only
+     * toggles existing track IDs without re-fetching.
+     */
+    private fun refreshCastSubtitleOffset(client: RemoteMediaClient, subtitleFile: File) {
+        val service = mediaServerService ?: return
+        val serverIp = getDeviceIpAddress()
+        val serverPort = service.getServerPort()
+        val subtitlePath = service.registerSubtitle(subtitleFile)
+        val subtitleUrl = "http://$serverIp:$serverPort$subtitlePath"
+
+        val currentMediaInfo = client.mediaInfo ?: return
+        val currentPosition = client.approximateStreamPosition
+
+        val newSubtitleTrack = MediaTrack.Builder(1, MediaTrack.TYPE_TEXT)
+            .setName("Subtitles")
+            .setSubtype(MediaTrack.SUBTYPE_SUBTITLES)
+            .setContentId(subtitleUrl)
+            .setContentType("text/vtt")
+            .setLanguage("en")
+            .build()
+
+        val metadata = currentMediaInfo.metadata ?: MediaMetadata(MediaMetadata.MEDIA_TYPE_MOVIE)
+
+        val newMediaInfo = MediaInfo.Builder(currentMediaInfo.contentId)
+            .setStreamType(currentMediaInfo.streamType)
+            .setContentType(currentMediaInfo.contentType)
+            .setMetadata(metadata)
+            .setMediaTracks(listOf(newSubtitleTrack))
+            .build()
+
+        val loadRequest = MediaLoadRequestData.Builder()
+            .setMediaInfo(newMediaInfo)
+            .setAutoplay(true)
+            .setCurrentTime(currentPosition)
+            .setActiveTrackIds(longArrayOf(1))
+            .build()
+
+        AppLogger.info(TAG, "Refreshing subtitle offset at position ${formatDuration(currentPosition)}, url=$subtitleUrl")
+        client.setActiveMediaTracks(longArrayOf()).setResultCallback {
+            client.load(loadRequest).setResultCallback { result ->
+                if (result.status.isSuccess) {
+                    AppLogger.info(TAG, "Subtitle offset refresh: load SUCCESS")
+                    client.setTextTrackStyle(createSubtitleStyle())
+                } else {
+                    AppLogger.error(TAG, "Subtitle offset refresh: load FAILED - ${result.status.statusMessage}")
+                }
+            }
         }
     }
 

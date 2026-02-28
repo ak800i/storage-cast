@@ -32,12 +32,12 @@ class MediaServerService : Service() {
     companion object {
         private const val NOTIFICATION_ID = 1
         private const val TAG = "MediaServerService"
-        /** Stable ID so the subtitle URL never changes between offset adjustments. */
-        private const val ACTIVE_SUBTITLE_ID = "active_subtitle"
 
         @Volatile
         private var logHandlerInstalled = false
     }
+
+    private var subtitleVersion = java.util.concurrent.atomic.AtomicLong(0)
 
     private val binder = LocalBinder()
     private var server: MediaServer? = null
@@ -125,7 +125,7 @@ class MediaServerService : Service() {
     }
 
     fun registerSubtitle(subtitleFile: File): String {
-        val id = ACTIVE_SUBTITLE_ID
+        val id = "subtitle_${subtitleVersion.incrementAndGet()}"
         server?.registerFile(id, subtitleFile, "text/vtt", null)
         AppLogger.info("MediaServer", "Register subtitle: ${subtitleFile.name}, id=$id, exists=${subtitleFile.exists()}")
         return "/media/$id"
@@ -294,10 +294,9 @@ class MediaServerService : Service() {
         }
 
         /**
-         * Prevents the Cast receiver from caching subtitle responses.
-         * Without this, toggling setActiveMediaTracks off/on to refresh
-         * subtitles after an offset change returns stale cached content
-         * because the subtitle URL stays the same.
+         * Prevents any intermediate layer from caching subtitle responses.
+         * Combined with versioned subtitle URLs, this ensures the Cast
+         * receiver always fetches fresh VTT content.
          */
         private fun addNoCacheHeadersIfSubtitle(response: Response, mimeType: String) {
             if (mimeType == "text/vtt") {
