@@ -84,6 +84,7 @@ class VideoDetailActivity : AppCompatActivity() {
         private const val OPENSUBTITLES_PREFS = "opensubtitles"
         private const val NORMAL_PLAYBACK_RATE = 1.0
         private const val NO_LOADING_ITEM = 0
+        private const val SUBTITLE_APPLY_DEBOUNCE_MS = 800L
     }
 
     private lateinit var binding: ActivityVideoDetailBinding
@@ -535,7 +536,7 @@ class VideoDetailActivity : AppCompatActivity() {
         // button presses only trigger a single Cast reload after a short pause.
         subtitleApplyJob?.cancel()
         subtitleApplyJob = activityScope.launch {
-            delay(800)
+            delay(SUBTITLE_APPLY_DEBOUNCE_MS)
             val effectiveFile = if (subtitleSyncOffsetMs == 0L) {
                 baseVtt
             } else {
