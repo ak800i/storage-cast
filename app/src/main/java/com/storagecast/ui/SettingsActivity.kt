@@ -18,6 +18,8 @@ class SettingsActivity : AppCompatActivity() {
         const val KEY_FILTER_SHORT_VIDEOS = "filter_short_videos"
         const val KEY_MIN_DURATION_MINUTES = "min_duration_minutes"
         const val DEFAULT_MIN_DURATION_MINUTES = 18
+        const val KEY_REALTIME_TRANSCODE = "realtime_transcode"
+        const val DEFAULT_REALTIME_TRANSCODE = false
 
         private const val OPENSUBTITLES_PREFS = "opensubtitles"
 
@@ -26,6 +28,17 @@ class SettingsActivity : AppCompatActivity() {
             if (!prefs.getBoolean(KEY_FILTER_SHORT_VIDEOS, true)) return 0L
             val minutes = prefs.getInt(KEY_MIN_DURATION_MINUTES, DEFAULT_MIN_DURATION_MINUTES)
             return minutes * 60L * 1000L
+        }
+
+        fun getRealtimeTranscode(context: Context): Boolean {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getBoolean(KEY_REALTIME_TRANSCODE, DEFAULT_REALTIME_TRANSCODE)
+        }
+
+        fun setRealtimeTranscode(context: Context, enabled: Boolean) {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+                .putBoolean(KEY_REALTIME_TRANSCODE, enabled)
+                .apply()
         }
     }
 
