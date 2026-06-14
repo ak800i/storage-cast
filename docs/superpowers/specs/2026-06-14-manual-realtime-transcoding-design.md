@@ -6,11 +6,15 @@
 ## Summary
 
 Add a user-controlled toggle that forces full realtime transcoding (H.264 video +
-AAC audio, served as a live MKV stream) for the video the user is about to cast.
+AAC audio, served as a live MKV stream) for the video the user casts. The toggle is
+a single global, sticky setting surfaced as a control on the video detail screen —
+it is not stored per video, so its state carries over to whatever video the user
+opens next.
+
 When the toggle is **off** (the default), playback behaves exactly as it does today:
 the app probes the media, runs a compatibility check, and either direct-streams,
 remuxes, or shows the codec-incompatibility dialog. When the toggle is **on**, the
-app skips that decision and always transcodes.
+app skips that decision and, for any successfully probed file, transcodes.
 
 The transcoding engine, local streaming server, and `STREAM_TYPE_LIVE` Cast load
 path already exist and are already exercised by `startTranscoding()` (today only
@@ -20,7 +24,9 @@ choice.
 
 ## Goals
 
-- Provide a per-video, on-screen control to force realtime transcoding.
+- Provide an on-screen control (on the video detail screen) to force realtime
+  transcoding. The control reflects and edits a single global, sticky flag — not a
+  per-video state.
 - Keep the default playback path unchanged when the toggle is off.
 - Persist the toggle state across app restarts.
 - Reuse the existing transcode/stream/cast plumbing with no new wire format or
@@ -48,6 +54,12 @@ choice.
     remux / dialog).
   - Toggle **on** → probe → full transcode → live MKV cast. The user's selected
     audio track is honored (already passed through `startTranscoding`).
+
+Note: the toggle is evaluated at every entry into `checkCompatibilityAndCast`, not
+only the Play button. In particular, changing the audio track mid-cast re-enters
+`checkCompatibilityAndCast` (via `applyLiveAudioTrackChange`); with the toggle on,
+that re-cast also transcodes, which keeps the stream consistent and honors the new
+audio track.
 
 ## Architecture & Components
 
@@ -132,7 +144,8 @@ unit coverage is not practical. Verification is:
 2. Manual on-device check:
    - Toggle **off**: a compatible file direct-streams; an incompatible file shows
      the codec dialog (unchanged behavior).
-   - Toggle **on**: any file casts via the transcoded live MKV stream.
+   - Toggle **on**: any successfully probed file casts via the transcoded live MKV
+     stream.
    - Toggle state survives an app restart (persisted in SharedPreferences).
    - Menu checkmark reflects the persisted state when reopened.
 
