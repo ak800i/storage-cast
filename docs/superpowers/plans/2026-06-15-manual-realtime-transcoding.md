@@ -128,7 +128,7 @@ git commit -m "feat: add realtime transcode menu and toast strings"
 
 - [ ] **Step 1: Add a checkable overflow item**
 
-Add the new item before the existing `action_settings` item so the resulting menu reads:
+Add the new item directly after the `media_route_menu_item` (before `action_save_subtitle`) so the resulting menu reads:
 
 ```xml
 <menu xmlns:android="http://schemas.android.com/apk/res/android"
