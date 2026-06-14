@@ -53,13 +53,14 @@ choice.
   - Toggle **off** → current behavior (probe → compatibility check → direct /
     remux / dialog).
   - Toggle **on** → probe → full transcode → live MKV cast. The user's selected
-    audio track is honored (already passed through `startTranscoding`).
+    audio track is passed through to `startTranscoding` unchanged (see Known
+    Limitations for the one track type this does not cover).
 
 Note: the toggle is evaluated at every entry into `checkCompatibilityAndCast`, not
 only the Play button. In particular, changing the audio track mid-cast re-enters
 `checkCompatibilityAndCast` (via `applyLiveAudioTrackChange`); with the toggle on,
-that re-cast also transcodes, which keeps the stream consistent and honors the new
-audio track.
+that re-cast also transcodes, which honors the new audio track (see Known
+Limitations for how playback position behaves on that re-cast).
 
 ## Architecture & Components
 
@@ -134,6 +135,29 @@ Play → checkCompatibilityAndCast → probe
 - Transcode runtime failures already surface through the existing
   `TranscodeStreamer.ProgressListener.onError` callback, which shows a
   `transcode_failed` toast. No new error handling is required.
+
+## Known Limitations
+
+Both items below are pre-existing behaviors of the transcode and live-stream path
+this feature reuses (already reachable today via the codec-incompatibility dialog's
+"Transcode" button). The toggle simply makes that path reachable for more files. We
+are intentionally not changing the path itself, to keep this feature a thin,
+understandable addition.
+
+- **EBML-fallback-only audio tracks aren't selectable for transcode.** When an MKV's
+  audio tracks are discovered only via `MediaProber`'s EBML fallback (because
+  `MediaExtractor` reported none), the track's `trackIndex` follows the
+  `MkvTrackFilter` convention, not a `MediaExtractor` track index. `TranscodeStreamer`
+  selects audio via `MediaExtractor.selectTrack(...)`, so for such a selected track
+  it falls back to the primary audio rather than honoring the selection. This is the
+  one case the "selected audio track is passed through" statement does not cover.
+- **Mid-cast audio switch restarts from position 0.** The live transcode path
+  (`castStreamingSource`, `STREAM_TYPE_LIVE`) does not call
+  `setCurrentTime(pendingSeekPositionMs)`, unlike the direct `castVideo` path. So
+  when the toggle is on and the user changes the audio track mid-playback, the
+  re-cast transcode restarts from the beginning. For files that previously
+  direct-streamed, this is a behavior change introduced by enabling the toggle, but
+  it requires no code change here.
 
 ## Testing / Verification
 
