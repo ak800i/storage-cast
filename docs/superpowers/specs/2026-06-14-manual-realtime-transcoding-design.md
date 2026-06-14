@@ -54,9 +54,9 @@ choice.
 - Pressing **Play**:
   - Toggle **off** → current behavior (probe → compatibility check → direct /
     remux / dialog).
-  - Toggle **on** → probe → full transcode → live MKV cast. The user's selected
-    audio track is passed through to `startTranscoding` unchanged (see Known
-    Limitations for the file type this path cannot transcode).
+  - Toggle **on** → probe → full transcode → live MKV cast. `startTranscoding`
+    reads the user's selected audio track (the `selectedAudioTrack` field) unchanged
+    (see Known Limitations for the file type this path cannot transcode).
 
 Note: the toggle is evaluated at every entry into `checkCompatibilityAndCast`, not
 only the Play button. In particular, changing the audio track mid-cast re-enters
