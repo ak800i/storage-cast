@@ -14,7 +14,9 @@ opens next.
 When the toggle is **off** (the default), playback behaves exactly as it does today:
 the app probes the media, runs a compatibility check, and either direct-streams,
 remuxes, or shows the codec-incompatibility dialog. When the toggle is **on**, the
-app skips that decision and, for any successfully probed file, transcodes.
+app skips that decision and transcodes any successfully probed file (the one
+exception, MKVs whose audio is recoverable only via the EBML fallback, is covered
+under Known Limitations).
 
 The transcoding engine, local streaming server, and `STREAM_TYPE_LIVE` Cast load
 path already exist and are already exercised by `startTranscoding()` (today only
@@ -54,7 +56,7 @@ choice.
     remux / dialog).
   - Toggle **on** → probe → full transcode → live MKV cast. The user's selected
     audio track is passed through to `startTranscoding` unchanged (see Known
-    Limitations for the one track type this does not cover).
+    Limitations for the file type this path cannot transcode).
 
 Note: the toggle is evaluated at every entry into `checkCompatibilityAndCast`, not
 only the Play button. In particular, changing the audio track mid-cast re-enters
@@ -144,20 +146,27 @@ this feature reuses (already reachable today via the codec-incompatibility dialo
 are intentionally not changing the path itself, to keep this feature a thin,
 understandable addition.
 
-- **EBML-fallback-only audio tracks aren't selectable for transcode.** When an MKV's
-  audio tracks are discovered only via `MediaProber`'s EBML fallback (because
-  `MediaExtractor` reported none), the track's `trackIndex` follows the
-  `MkvTrackFilter` convention, not a `MediaExtractor` track index. `TranscodeStreamer`
-  selects audio via `MediaExtractor.selectTrack(...)`, so for such a selected track
-  it falls back to the primary audio rather than honoring the selection. This is the
-  one case the "selected audio track is passed through" statement does not cover.
-- **Mid-cast audio switch restarts from position 0.** The live transcode path
+- **EBML-fallback-only audio MKVs cannot be transcoded by this path.** When an MKV's
+  audio tracks are recoverable only via `MediaProber`'s EBML fallback (which runs
+  precisely because `MediaExtractor` reported no audio tracks, e.g. AC-3 on some
+  Xiaomi devices), the track carries an MKV `trackNumber - 1` index, not a
+  `MediaExtractor` track index. `TranscodeStreamer` opens a fresh `MediaExtractor`
+  and calls `selectTrack(...)` with that index, which is invalid for these files, so
+  the transcode fails. This happens regardless of whether the user picked a specific
+  audio track, because the default primary audio for such files is itself an
+  EBML-fallback track. The failure surfaces through the existing
+  `transcode_failed` toast (no new handling needed), and nothing plays. These files
+  probe successfully, so the "any successfully probed file" wording elsewhere
+  excludes this case. We are not adding EBML-aware transcoding here — it is out of
+  scope for a thin toggle over the existing path.
+- **Toggle-on live casts always start from position 0.** The live transcode path
   (`castStreamingSource`, `STREAM_TYPE_LIVE`) does not call
-  `setCurrentTime(pendingSeekPositionMs)`, unlike the direct `castVideo` path. So
-  when the toggle is on and the user changes the audio track mid-playback, the
-  re-cast transcode restarts from the beginning. For files that previously
-  direct-streamed, this is a behavior change introduced by enabling the toggle, but
-  it requires no code change here.
+  `setCurrentTime(pendingSeekPositionMs)`, unlike the direct `castVideo` path, and
+  the transcoder always reads the input from the start. So with the toggle on, both
+  a pre-cast seek position set before pressing Play and a mid-cast audio-track switch
+  (which re-enters via `applyLiveAudioTrackChange`) begin playback from the
+  beginning. For files that previously direct-streamed, this is a behavior change
+  introduced by enabling the toggle, but it requires no code change here.
 
 ## Testing / Verification
 
@@ -168,8 +177,9 @@ unit coverage is not practical. Verification is:
 2. Manual on-device check:
    - Toggle **off**: a compatible file direct-streams; an incompatible file shows
      the codec dialog (unchanged behavior).
-   - Toggle **on**: any successfully probed file casts via the transcoded live MKV
-     stream.
+   - Toggle **on**: a probed file (other than the EBML-fallback-only audio case in
+     Known Limitations) casts via the transcoded live MKV stream, starting from
+     position 0.
    - Toggle state survives an app restart (persisted in SharedPreferences).
    - Menu checkmark reflects the persisted state when reopened.
 
