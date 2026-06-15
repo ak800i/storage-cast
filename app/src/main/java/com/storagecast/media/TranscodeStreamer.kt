@@ -331,9 +331,12 @@ class TranscodeStreamer {
         var videoEncoderDone = videoEncoder == null
         var audioInputDone = audioExtractor == null
         var audioDecoderDone = audioDecoder == null
-        var audioEncoderEosSent = audioEncoder == null
         var audioEncoderDone = audioEncoder == null
         var lastReportedProgress = -1
+
+        val audioFeeder = if (audioEncoder != null) {
+            AudioEncoderFeeder(audioEncoder, OUTPUT_AUDIO_SAMPLE_RATE, OUTPUT_AUDIO_CHANNEL_COUNT)
+        } else null
 
         while (!isCancelled && (!videoEncoderDone || !audioEncoderDone)) {
             // ── Feed video decoder ──
@@ -432,8 +435,8 @@ class TranscodeStreamer {
                 }
             }
 
-            // ── Decode audio → feed encoder ──
-            if (!audioDecoderDone && audioDecoder != null && audioEncoder != null) {
+            // ── Decode audio → PCM feeder ──
+            if (!audioDecoderDone && audioDecoder != null && audioFeeder != null) {
                 val status = audioDecoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
                 if (status == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                     val ch = getIntSafe(audioDecoder.outputFormat, MediaFormat.KEY_CHANNEL_COUNT, -1)
@@ -443,34 +446,19 @@ class TranscodeStreamer {
                     if (bufferInfo.size > 0) {
                         val decoded = audioDecoder.getOutputBuffer(status)
                         if (decoded != null) {
-                            val encIdx = audioEncoder.dequeueInputBuffer(TIMEOUT_US)
-                            if (encIdx >= 0) {
-                                val encBuf = audioEncoder.getInputBuffer(encIdx)
-                                if (encBuf != null) {
-                                    encBuf.clear()
-                                    val limit = minOf(decoded.remaining(), encBuf.remaining())
-                                    val temp = ByteArray(limit)
-                                    decoded.get(temp, 0, limit)
-                                    encBuf.put(temp, 0, limit)
-                                    audioEncoder.queueInputBuffer(
-                                        encIdx, 0, limit, bufferInfo.presentationTimeUs,
-                                        if (isEos) MediaCodec.BUFFER_FLAG_END_OF_STREAM else 0
-                                    )
-                                    if (isEos) audioEncoderEosSent = true
-                                }
-                            }
-                        }
-                    } else if (isEos) {
-                        val encIdx = audioEncoder.dequeueInputBuffer(TIMEOUT_US)
-                        if (encIdx >= 0) {
-                            audioEncoder.queueInputBuffer(encIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                            audioEncoderEosSent = true
+                            val data = ByteArray(bufferInfo.size)
+                            decoded.position(bufferInfo.offset)
+                            decoded.get(data, 0, bufferInfo.size)
+                            audioFeeder.enqueuePcm(data, bufferInfo.presentationTimeUs)
                         }
                     }
                     audioDecoder.releaseOutputBuffer(status, false)
                     if (isEos) audioDecoderDone = true
                 }
             }
+
+            // Push all buffered PCM into the encoder (queues EOS once fully drained).
+            audioFeeder?.pump(audioDecoderDone)
 
             // ── Drain audio encoder → writer ──
             if (audioEncoder != null && !audioEncoderDone) {
@@ -498,13 +486,6 @@ class TranscodeStreamer {
                     audioEncoder.releaseOutputBuffer(encStatus, false)
                     if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
                         audioEncoderDone = true
-                    }
-                }
-                if (audioDecoderDone && !audioEncoderEosSent && encStatus == MediaCodec.INFO_TRY_AGAIN_LATER) {
-                    val idx = audioEncoder.dequeueInputBuffer(TIMEOUT_US)
-                    if (idx >= 0) {
-                        audioEncoder.queueInputBuffer(idx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                        audioEncoderEosSent = true
                     }
                 }
             }
@@ -602,9 +583,10 @@ class TranscodeStreamer {
         var videoDone = !hasVideo
         var audioInputDone = false
         var audioDecoderDone = false
-        var audioEncoderEosSent = false
         var audioEncoderDone = false
         var lastReportedProgress = -1
+
+        val audioFeeder = AudioEncoderFeeder(audioEncoder, OUTPUT_AUDIO_SAMPLE_RATE, OUTPUT_AUDIO_CHANNEL_COUNT)
 
         while (!isCancelled && (!videoDone || !audioEncoderDone)) {
             // ── Video passthrough ──
@@ -649,42 +631,30 @@ class TranscodeStreamer {
                 }
             }
 
-            // ── Decode audio → feed encoder ──
+            // ── Decode audio → PCM feeder ──
             if (!audioDecoderDone) {
                 val status = audioDecoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
-                if (status >= 0) {
+                if (status == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    val ch = getIntSafe(audioDecoder.outputFormat, MediaFormat.KEY_CHANNEL_COUNT, -1)
+                    AppLogger.info(TAG, "Audio decoder output: ${ch}ch (downmix target $OUTPUT_AUDIO_CHANNEL_COUNT)")
+                } else if (status >= 0) {
                     val isEos = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
                     if (bufferInfo.size > 0) {
                         val decoded = audioDecoder.getOutputBuffer(status)
                         if (decoded != null) {
-                            val encIdx = audioEncoder.dequeueInputBuffer(TIMEOUT_US)
-                            if (encIdx >= 0) {
-                                val encBuf = audioEncoder.getInputBuffer(encIdx)
-                                if (encBuf != null) {
-                                    encBuf.clear()
-                                    val limit = minOf(decoded.remaining(), encBuf.remaining())
-                                    val temp = ByteArray(limit)
-                                    decoded.get(temp, 0, limit)
-                                    encBuf.put(temp, 0, limit)
-                                    audioEncoder.queueInputBuffer(
-                                        encIdx, 0, limit, bufferInfo.presentationTimeUs,
-                                        if (isEos) MediaCodec.BUFFER_FLAG_END_OF_STREAM else 0
-                                    )
-                                    if (isEos) audioEncoderEosSent = true
-                                }
-                            }
-                        }
-                    } else if (isEos) {
-                        val encIdx = audioEncoder.dequeueInputBuffer(TIMEOUT_US)
-                        if (encIdx >= 0) {
-                            audioEncoder.queueInputBuffer(encIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                            audioEncoderEosSent = true
+                            val data = ByteArray(bufferInfo.size)
+                            decoded.position(bufferInfo.offset)
+                            decoded.get(data, 0, bufferInfo.size)
+                            audioFeeder.enqueuePcm(data, bufferInfo.presentationTimeUs)
                         }
                     }
                     audioDecoder.releaseOutputBuffer(status, false)
                     if (isEos) audioDecoderDone = true
                 }
             }
+
+            // Push all buffered PCM into the encoder (queues EOS once fully drained).
+            audioFeeder.pump(audioDecoderDone)
 
             // ── Drain audio encoder → writer ──
             if (!audioEncoderDone) {
@@ -714,13 +684,6 @@ class TranscodeStreamer {
                         audioEncoderDone = true
                     }
                 }
-                if (audioDecoderDone && !audioEncoderEosSent && encStatus == MediaCodec.INFO_TRY_AGAIN_LATER) {
-                    val idx = audioEncoder.dequeueInputBuffer(TIMEOUT_US)
-                    if (idx >= 0) {
-                        audioEncoder.queueInputBuffer(idx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                        audioEncoderEosSent = true
-                    }
-                }
             }
         }
     }
@@ -728,6 +691,88 @@ class TranscodeStreamer {
     // ──────────────────────────────────────────────────────────────────────────
     //  Codec / encoder helpers
     // ──────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Buffers decoded PCM and feeds it into the AAC encoder without ever dropping
+     * data. A decoded audio buffer can be larger than a single encoder input buffer,
+     * so the PCM is queued and drained across as many encoder input buffers as needed.
+     * Encoder input timestamps are derived from a running sample-frame counter so the
+     * audio timeline is perfectly gapless and evenly spaced (irregular per-buffer
+     * timestamps from the decoder were causing choppy playback).
+     */
+    private inner class AudioEncoderFeeder(
+        private val encoder: MediaCodec,
+        private val sampleRate: Int,
+        private val channels: Int
+    ) {
+        private val pcmQueue = ArrayDeque<ByteArray>()
+        private var headOffset = 0
+        private val bytesPerFrame = channels * 2 // 16-bit PCM
+        private var basePtsUs = -1L
+        private var framesSent = 0L
+        private var eosQueued = false
+
+        val isEosQueued: Boolean get() = eosQueued
+
+        fun enqueuePcm(data: ByteArray, ptsUs: Long) {
+            if (basePtsUs < 0) basePtsUs = ptsUs
+            if (data.isNotEmpty()) pcmQueue.addLast(data)
+        }
+
+        private fun ptsForNextChunk(): Long {
+            val base = if (basePtsUs < 0) 0L else basePtsUs
+            return base + framesSent * 1_000_000L / sampleRate
+        }
+
+        /** Drains the PCM queue into the encoder; queues EOS once drained if [decoderDone]. */
+        fun pump(decoderDone: Boolean) {
+            while (true) {
+                if (pcmQueue.isEmpty()) {
+                    if (decoderDone && !eosQueued) {
+                        val idx = encoder.dequeueInputBuffer(TIMEOUT_US)
+                        if (idx >= 0) {
+                            encoder.queueInputBuffer(
+                                idx, 0, 0, ptsForNextChunk(), MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                            )
+                            eosQueued = true
+                        }
+                    }
+                    return
+                }
+                val idx = encoder.dequeueInputBuffer(TIMEOUT_US)
+                if (idx < 0) return
+                val encBuf = encoder.getInputBuffer(idx)
+                if (encBuf == null) {
+                    encoder.queueInputBuffer(idx, 0, 0, ptsForNextChunk(), 0)
+                    return
+                }
+                encBuf.clear()
+                val cap = encBuf.remaining()
+                val usableCap = cap - (cap % bytesPerFrame)
+                val pts = ptsForNextChunk()
+                var written = 0
+                while (written < usableCap && pcmQueue.isNotEmpty()) {
+                    val head = pcmQueue.first()
+                    val avail = head.size - headOffset
+                    val toCopy = minOf(avail, usableCap - written)
+                    encBuf.put(head, headOffset, toCopy)
+                    headOffset += toCopy
+                    written += toCopy
+                    if (headOffset >= head.size) {
+                        pcmQueue.removeFirst()
+                        headOffset = 0
+                    }
+                }
+                if (written > 0) {
+                    encoder.queueInputBuffer(idx, 0, written, pts, 0)
+                    framesSent += (written / bytesPerFrame).toLong()
+                } else {
+                    encoder.queueInputBuffer(idx, 0, 0, pts, 0)
+                    return
+                }
+            }
+        }
+    }
 
     private fun createVideoEncoder(): MediaCodec {
         return try {
