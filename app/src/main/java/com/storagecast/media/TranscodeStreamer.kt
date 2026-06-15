@@ -324,9 +324,9 @@ class TranscodeStreamer {
 
         try {
             while (!isCancelled && (!videoEncoderDone || !(audioPipeline?.isDone ?: true))) {
-            // ── Feed video decoder ──
+            // ── Feed video decoder (non-blocking) ──
             if (!videoInputDone && videoExtractor != null && videoDecoder != null) {
-                val idx = videoDecoder.dequeueInputBuffer(TIMEOUT_US)
+                val idx = videoDecoder.dequeueInputBuffer(0)
                 if (idx >= 0) {
                     val buf = videoDecoder.getInputBuffer(idx)
                     if (buf != null) {
@@ -350,9 +350,9 @@ class TranscodeStreamer {
                 }
             }
 
-            // ── Decode video → render onto encoder input surface ──
+            // ── Decode video → render onto encoder input surface (non-blocking) ──
             if (!videoDecoderDone && videoDecoder != null && videoEncoder != null) {
-                val status = videoDecoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
+                val status = videoDecoder.dequeueOutputBuffer(bufferInfo, 0)
                 if (status >= 0) {
                     val isEos = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
                     // render = true pushes the decoded frame to the encoder's input surface.
@@ -403,9 +403,17 @@ class TranscodeStreamer {
             }
 
             // ── Audio decode + AAC encode (lazy encoder via pipeline) ──
+            var audioDidWork = false
             if (audioPipeline != null) {
                 if (audioExtractor != null) audioPipeline.feedInput(audioExtractor)
-                audioPipeline.pump(writer)
+                audioDidWork = audioPipeline.pump(writer)
+            }
+
+            // The video pipeline's blocking encoder-output drain paces the main run.
+            // Once video is finished, only audio remains and its polls are
+            // non-blocking, so yield briefly to avoid busy-spinning the tail.
+            if (videoEncoderDone && audioPipeline != null && !audioPipeline.isDone && !audioDidWork) {
+                try { Thread.sleep(2) } catch (_: InterruptedException) {}
             }
             }
         } finally {
@@ -497,6 +505,7 @@ class TranscodeStreamer {
 
         try {
             while (!isCancelled && (!videoDone || !audioPipeline.isDone)) {
+                var didWork = false
                 // ── Video passthrough ──
                 if (!videoDone) {
                     sampleBuffer.clear()
@@ -504,6 +513,7 @@ class TranscodeStreamer {
                     if (sampleSize < 0) {
                         videoDone = true
                     } else {
+                        didWork = true
                         val ptsUs = videoExtractor.sampleTime
                         val isKey = (videoExtractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC) != 0
                         val data = ByteArray(sampleSize)
@@ -523,7 +533,13 @@ class TranscodeStreamer {
 
                 // ── Audio decode + AAC encode (lazy encoder via pipeline) ──
                 audioPipeline.feedInput(audioExtractor)
-                audioPipeline.pump(writer)
+                if (audioPipeline.pump(writer)) didWork = true
+
+                // All polls here are non-blocking; yield when nothing progressed so
+                // the loop doesn't busy-spin (e.g. while waiting on the audio tail).
+                if (!didWork) {
+                    try { Thread.sleep(2) } catch (_: InterruptedException) {}
+                }
             }
         } finally {
             audioPipeline.release()
@@ -569,7 +585,7 @@ class TranscodeStreamer {
             while (true) {
                 if (pcmQueue.isEmpty()) {
                     if (decoderDone && !eosQueued) {
-                        val idx = encoder.dequeueInputBuffer(TIMEOUT_US)
+                        val idx = encoder.dequeueInputBuffer(0)
                         if (idx >= 0) {
                             encoder.queueInputBuffer(
                                 idx, 0, 0, ptsForNextChunk(), MediaCodec.BUFFER_FLAG_END_OF_STREAM
@@ -579,7 +595,7 @@ class TranscodeStreamer {
                     }
                     return
                 }
-                val idx = encoder.dequeueInputBuffer(TIMEOUT_US)
+                val idx = encoder.dequeueInputBuffer(0)
                 if (idx < 0) return
                 val encBuf = encoder.getInputBuffer(idx)
                 if (encBuf == null) {
@@ -659,7 +675,7 @@ class TranscodeStreamer {
         /** Feeds one compressed sample from [extractor] into the audio decoder. */
         fun feedInput(extractor: MediaExtractor) {
             if (inputDone) return
-            val idx = decoder.dequeueInputBuffer(TIMEOUT_US)
+            val idx = decoder.dequeueInputBuffer(0)
             if (idx >= 0) {
                 val buf = decoder.getInputBuffer(idx)
                 if (buf != null) {
@@ -675,15 +691,23 @@ class TranscodeStreamer {
             }
         }
 
-        /** Drains decoder → PCM feeder → encoder → [writer] for one iteration. */
-        fun pump(writer: Fmp4Writer) {
+        /**
+         * Drains decoder → PCM feeder → encoder → [writer] for one iteration.
+         * Uses non-blocking polls so the (single-threaded) caller's video pipeline is
+         * never stalled waiting on audio. Returns true if any audio work happened, so
+         * the caller can idle-sleep instead of busy-spinning when nothing progressed.
+         */
+        fun pump(writer: Fmp4Writer): Boolean {
+            var didWork = false
             if (!decoderDone) {
-                val status = decoder.dequeueOutputBuffer(info, TIMEOUT_US)
+                val status = decoder.dequeueOutputBuffer(info, 0)
                 if (status == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                     ensureEncoder()
                     val ch = getIntSafe(decoder.outputFormat, MediaFormat.KEY_CHANNEL_COUNT, -1)
                     AppLogger.info(TAG, "Audio decoder output: ${ch}ch (downmix target $OUTPUT_AUDIO_CHANNEL_COUNT)")
+                    didWork = true
                 } else if (status >= 0) {
+                    didWork = true
                     val isEos = (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
                     if (info.size > 0) {
                         ensureEncoder()
@@ -704,10 +728,12 @@ class TranscodeStreamer {
 
             val enc = encoder
             if (enc != null && !encoderDone) {
-                val es = enc.dequeueOutputBuffer(info, TIMEOUT_US)
+                val es = enc.dequeueOutputBuffer(info, 0)
                 if (es == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                     captureAudioConfig(writer, enc.outputFormat)
+                    didWork = true
                 } else if (es >= 0) {
+                    didWork = true
                     val isConfig = info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
                     val encodedBuf = enc.getOutputBuffer(es)
                     if (isConfig) {
@@ -729,6 +755,7 @@ class TranscodeStreamer {
                     if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) encoderDone = true
                 }
             }
+            return didWork
         }
     }
 
