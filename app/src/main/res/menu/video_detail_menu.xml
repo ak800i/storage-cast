@@ -6,6 +6,11 @@
         app:actionProviderClass="androidx.mediarouter.app.MediaRouteActionProvider"
         app:showAsAction="always" />
     <item
+        android:id="@+id/action_realtime_transcode"
+        android:title="@string/realtime_transcode"
+        android:checkable="true"
+        app:showAsAction="never" />
+    <item
         android:id="@+id/action_save_subtitle"
         android:title="@string/save_subtitle"
         app:showAsAction="never" />
