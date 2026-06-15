@@ -240,7 +240,6 @@ class TranscodeStreamer {
         }
 
         var audioDecoder: MediaCodec? = null
-        var audioEncoder: MediaCodec? = null
         var audioExtractor: MediaExtractor? = null
 
         if (audioTrackInfo != null) {
@@ -259,33 +258,25 @@ class TranscodeStreamer {
 
             audioDecoder = MediaCodec.createDecoderByType(audioTrackInfo.mime)
             audioDecoder.configure(audioInputFormat, null, null, 0)
-
-            val audioOutputFormat = MediaFormat.createAudioFormat(
-                OUTPUT_AUDIO_MIME, OUTPUT_AUDIO_SAMPLE_RATE, OUTPUT_AUDIO_CHANNEL_COUNT
-            ).apply {
-                setInteger(MediaFormat.KEY_BIT_RATE, OUTPUT_AUDIO_BITRATE)
-                setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-            }
-
-            audioEncoder = MediaCodec.createEncoderByType(OUTPUT_AUDIO_MIME)
-            audioEncoder.configure(audioOutputFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-
             audioDecoder.start()
-            audioEncoder.start()
 
+            // The AAC encoder is created lazily from the decoder's actual output format
+            // (sample rate + channel count) once decoding starts — see
+            // AudioTranscodePipeline. This avoids hardcoding 48 kHz/stereo, which would
+            // resample-by-mislabel (wrong-speed audio) or mis-frame a mono source.
             AppLogger.info(TAG, "Audio transcode: ${audioTrackInfo.codec} → AAC")
         }
 
         // The init segment is written lazily by the writer once both encoders report
         // their codec config (which a hardware encoder only emits after the first
         // frame). Configs are captured from INFO_OUTPUT_FORMAT_CHANGED in the pump.
-        val writer = Fmp4Writer(out, hasVideo = videoEncoder != null, hasAudio = audioEncoder != null)
+        val writer = Fmp4Writer(out, hasVideo = videoEncoder != null, hasAudio = audioDecoder != null)
 
         try {
             pumpTranscode(
                 writer,
                 videoExtractor, videoDecoder, videoEncoder, outWidth, outHeight,
-                audioExtractor, audioDecoder, audioEncoder,
+                audioExtractor, audioDecoder,
                 durationUs, listener
             )
 
@@ -301,7 +292,6 @@ class TranscodeStreamer {
             try { videoInputSurface?.release() } catch (_: Exception) {}
             videoExtractor?.release()
             safeStopRelease(audioDecoder)
-            safeStopRelease(audioEncoder)
             audioExtractor?.release()
         }
     }
@@ -319,7 +309,6 @@ class TranscodeStreamer {
         outHeight: Int,
         audioExtractor: MediaExtractor?,
         audioDecoder: MediaCodec?,
-        audioEncoder: MediaCodec?,
         durationUs: Long,
         listener: ProgressListener?
     ) {
@@ -329,16 +318,12 @@ class TranscodeStreamer {
         var videoDecoderDone = videoDecoder == null
         var videoEncoderEosSent = videoEncoder == null
         var videoEncoderDone = videoEncoder == null
-        var audioInputDone = audioExtractor == null
-        var audioDecoderDone = audioDecoder == null
-        var audioEncoderDone = audioEncoder == null
         var lastReportedProgress = -1
 
-        val audioFeeder = if (audioEncoder != null) {
-            AudioEncoderFeeder(audioEncoder, OUTPUT_AUDIO_SAMPLE_RATE, OUTPUT_AUDIO_CHANNEL_COUNT)
-        } else null
+        val audioPipeline = audioDecoder?.let { AudioTranscodePipeline(it) }
 
-        while (!isCancelled && (!videoEncoderDone || !audioEncoderDone)) {
+        try {
+            while (!isCancelled && (!videoEncoderDone || !(audioPipeline?.isDone ?: true))) {
             // ── Feed video decoder ──
             if (!videoInputDone && videoExtractor != null && videoDecoder != null) {
                 val idx = videoDecoder.dequeueInputBuffer(TIMEOUT_US)
@@ -417,78 +402,14 @@ class TranscodeStreamer {
                 }
             }
 
-            // ── Feed audio decoder ──
-            if (!audioInputDone && audioExtractor != null && audioDecoder != null) {
-                val idx = audioDecoder.dequeueInputBuffer(TIMEOUT_US)
-                if (idx >= 0) {
-                    val buf = audioDecoder.getInputBuffer(idx)
-                    if (buf != null) {
-                        val size = audioExtractor.readSampleData(buf, 0)
-                        if (size < 0) {
-                            audioDecoder.queueInputBuffer(idx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                            audioInputDone = true
-                        } else {
-                            audioDecoder.queueInputBuffer(idx, 0, size, audioExtractor.sampleTime, 0)
-                            audioExtractor.advance()
-                        }
-                    }
-                }
+            // ── Audio decode + AAC encode (lazy encoder via pipeline) ──
+            if (audioPipeline != null) {
+                if (audioExtractor != null) audioPipeline.feedInput(audioExtractor)
+                audioPipeline.pump(writer)
             }
-
-            // ── Decode audio → PCM feeder ──
-            if (!audioDecoderDone && audioDecoder != null && audioFeeder != null) {
-                val status = audioDecoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
-                if (status == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                    val ch = getIntSafe(audioDecoder.outputFormat, MediaFormat.KEY_CHANNEL_COUNT, -1)
-                    AppLogger.info(TAG, "Audio decoder output: ${ch}ch (downmix target $OUTPUT_AUDIO_CHANNEL_COUNT)")
-                } else if (status >= 0) {
-                    val isEos = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
-                    if (bufferInfo.size > 0) {
-                        val decoded = audioDecoder.getOutputBuffer(status)
-                        if (decoded != null) {
-                            val data = ByteArray(bufferInfo.size)
-                            decoded.position(bufferInfo.offset)
-                            decoded.get(data, 0, bufferInfo.size)
-                            audioFeeder.enqueuePcm(data, bufferInfo.presentationTimeUs)
-                        }
-                    }
-                    audioDecoder.releaseOutputBuffer(status, false)
-                    if (isEos) audioDecoderDone = true
-                }
             }
-
-            // Push all buffered PCM into the encoder (queues EOS once fully drained).
-            audioFeeder?.pump(audioDecoderDone)
-
-            // ── Drain audio encoder → writer ──
-            if (audioEncoder != null && !audioEncoderDone) {
-                val encStatus = audioEncoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
-                if (encStatus == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                    captureAudioConfig(writer, audioEncoder.outputFormat)
-                } else if (encStatus >= 0) {
-                    val isConfig = bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
-                    val encodedBuf = audioEncoder.getOutputBuffer(encStatus)
-                    if (isConfig) {
-                        if (!writer.hasAudioConfig() && encodedBuf != null) {
-                            val cfg = ByteArray(bufferInfo.size)
-                            encodedBuf.position(bufferInfo.offset)
-                            encodedBuf.get(cfg, 0, bufferInfo.size)
-                            writer.setAudioConfig(cfg, OUTPUT_AUDIO_SAMPLE_RATE, OUTPUT_AUDIO_CHANNEL_COUNT)
-                        }
-                        bufferInfo.size = 0
-                    }
-                    if (bufferInfo.size > 0 && encodedBuf != null) {
-                        val data = ByteArray(bufferInfo.size)
-                        encodedBuf.position(bufferInfo.offset)
-                        encodedBuf.get(data, 0, bufferInfo.size)
-                        writer.addAudioSample(data, bufferInfo.presentationTimeUs)
-                    }
-                    audioEncoder.releaseOutputBuffer(encStatus, false)
-                    if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
-                        audioEncoderDone = true
-                    }
-                }
-            }
+        } finally {
+            audioPipeline?.release()
         }
     }
 
@@ -521,17 +442,9 @@ class TranscodeStreamer {
 
         val audioDecoder = MediaCodec.createDecoderByType(selectedAudioTrack.mime)
         audioDecoder.configure(audioInputFormat, null, null, 0)
-
-        val audioOutputFormat = MediaFormat.createAudioFormat(
-            OUTPUT_AUDIO_MIME, OUTPUT_AUDIO_SAMPLE_RATE, OUTPUT_AUDIO_CHANNEL_COUNT
-        ).apply {
-            setInteger(MediaFormat.KEY_BIT_RATE, OUTPUT_AUDIO_BITRATE)
-            setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-        }
-        val audioEncoder = MediaCodec.createEncoderByType(OUTPUT_AUDIO_MIME)
-        audioEncoder.configure(audioOutputFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         audioDecoder.start()
-        audioEncoder.start()
+        // The AAC encoder is created lazily from the decoder's actual output format
+        // (sample rate + channel count) — see AudioTranscodePipeline.
         AppLogger.info(TAG, "Audio transcode: ${selectedAudioTrack.codec} → AAC")
 
         // ── Video passthrough setup ──
@@ -555,13 +468,12 @@ class TranscodeStreamer {
         try {
             // The audio codec config arrives from INFO_OUTPUT_FORMAT_CHANGED during the
             // pump; the writer holds back fragments until the init segment is written.
-            pumpRemux(writer, videoExtractor, hasVideo, audioExtractor, audioDecoder, audioEncoder, durationUs, listener)
+            pumpRemux(writer, videoExtractor, hasVideo, audioExtractor, audioDecoder, durationUs, listener)
             writer.finish()
             out.flush()
             AppLogger.info(TAG, "Remux+audio-transcode fMP4 stream complete")
         } finally {
             safeStopRelease(audioDecoder)
-            safeStopRelease(audioEncoder)
             audioExtractor.release()
             videoExtractor.release()
         }
@@ -573,118 +485,48 @@ class TranscodeStreamer {
         hasVideo: Boolean,
         audioExtractor: MediaExtractor,
         audioDecoder: MediaCodec,
-        audioEncoder: MediaCodec,
         durationUs: Long,
         listener: ProgressListener?
     ) {
         val sampleBuffer = ByteBuffer.allocate(2 * 1024 * 1024)
-        val bufferInfo = MediaCodec.BufferInfo()
 
         var videoDone = !hasVideo
-        var audioInputDone = false
-        var audioDecoderDone = false
-        var audioEncoderDone = false
         var lastReportedProgress = -1
 
-        val audioFeeder = AudioEncoderFeeder(audioEncoder, OUTPUT_AUDIO_SAMPLE_RATE, OUTPUT_AUDIO_CHANNEL_COUNT)
+        val audioPipeline = AudioTranscodePipeline(audioDecoder)
 
-        while (!isCancelled && (!videoDone || !audioEncoderDone)) {
-            // ── Video passthrough ──
-            if (!videoDone) {
-                sampleBuffer.clear()
-                val sampleSize = videoExtractor.readSampleData(sampleBuffer, 0)
-                if (sampleSize < 0) {
-                    videoDone = true
-                } else {
-                    val ptsUs = videoExtractor.sampleTime
-                    val isKey = (videoExtractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC) != 0
-                    val data = ByteArray(sampleSize)
-                    sampleBuffer.position(0)
-                    sampleBuffer.get(data, 0, sampleSize)
-                    writer.addVideoSample(data, ptsUs, isKey)
-                    videoExtractor.advance()
-                    if (durationUs > 0) {
-                        val progress = ((ptsUs * 100) / durationUs).toInt().coerceIn(0, 100)
-                        if (progress != lastReportedProgress) {
-                            lastReportedProgress = progress
-                            listener?.onProgress(progress)
+        try {
+            while (!isCancelled && (!videoDone || !audioPipeline.isDone)) {
+                // ── Video passthrough ──
+                if (!videoDone) {
+                    sampleBuffer.clear()
+                    val sampleSize = videoExtractor.readSampleData(sampleBuffer, 0)
+                    if (sampleSize < 0) {
+                        videoDone = true
+                    } else {
+                        val ptsUs = videoExtractor.sampleTime
+                        val isKey = (videoExtractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC) != 0
+                        val data = ByteArray(sampleSize)
+                        sampleBuffer.position(0)
+                        sampleBuffer.get(data, 0, sampleSize)
+                        writer.addVideoSample(data, ptsUs, isKey)
+                        videoExtractor.advance()
+                        if (durationUs > 0) {
+                            val progress = ((ptsUs * 100) / durationUs).toInt().coerceIn(0, 100)
+                            if (progress != lastReportedProgress) {
+                                lastReportedProgress = progress
+                                listener?.onProgress(progress)
+                            }
                         }
                     }
                 }
-            }
 
-            // ── Feed audio decoder ──
-            if (!audioInputDone) {
-                val idx = audioDecoder.dequeueInputBuffer(TIMEOUT_US)
-                if (idx >= 0) {
-                    val buf = audioDecoder.getInputBuffer(idx)
-                    if (buf != null) {
-                        val size = audioExtractor.readSampleData(buf, 0)
-                        if (size < 0) {
-                            audioDecoder.queueInputBuffer(idx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                            audioInputDone = true
-                        } else {
-                            audioDecoder.queueInputBuffer(idx, 0, size, audioExtractor.sampleTime, 0)
-                            audioExtractor.advance()
-                        }
-                    }
-                }
+                // ── Audio decode + AAC encode (lazy encoder via pipeline) ──
+                audioPipeline.feedInput(audioExtractor)
+                audioPipeline.pump(writer)
             }
-
-            // ── Decode audio → PCM feeder ──
-            if (!audioDecoderDone) {
-                val status = audioDecoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
-                if (status == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                    val ch = getIntSafe(audioDecoder.outputFormat, MediaFormat.KEY_CHANNEL_COUNT, -1)
-                    AppLogger.info(TAG, "Audio decoder output: ${ch}ch (downmix target $OUTPUT_AUDIO_CHANNEL_COUNT)")
-                } else if (status >= 0) {
-                    val isEos = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
-                    if (bufferInfo.size > 0) {
-                        val decoded = audioDecoder.getOutputBuffer(status)
-                        if (decoded != null) {
-                            val data = ByteArray(bufferInfo.size)
-                            decoded.position(bufferInfo.offset)
-                            decoded.get(data, 0, bufferInfo.size)
-                            audioFeeder.enqueuePcm(data, bufferInfo.presentationTimeUs)
-                        }
-                    }
-                    audioDecoder.releaseOutputBuffer(status, false)
-                    if (isEos) audioDecoderDone = true
-                }
-            }
-
-            // Push all buffered PCM into the encoder (queues EOS once fully drained).
-            audioFeeder.pump(audioDecoderDone)
-
-            // ── Drain audio encoder → writer ──
-            if (!audioEncoderDone) {
-                val encStatus = audioEncoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
-                if (encStatus == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                    captureAudioConfig(writer, audioEncoder.outputFormat)
-                } else if (encStatus >= 0) {
-                    val isConfig = bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
-                    val encodedBuf = audioEncoder.getOutputBuffer(encStatus)
-                    if (isConfig) {
-                        if (!writer.hasAudioConfig() && encodedBuf != null) {
-                            val cfg = ByteArray(bufferInfo.size)
-                            encodedBuf.position(bufferInfo.offset)
-                            encodedBuf.get(cfg, 0, bufferInfo.size)
-                            writer.setAudioConfig(cfg, OUTPUT_AUDIO_SAMPLE_RATE, OUTPUT_AUDIO_CHANNEL_COUNT)
-                        }
-                        bufferInfo.size = 0
-                    }
-                    if (bufferInfo.size > 0 && encodedBuf != null) {
-                        val data = ByteArray(bufferInfo.size)
-                        encodedBuf.position(bufferInfo.offset)
-                        encodedBuf.get(data, 0, bufferInfo.size)
-                        writer.addAudioSample(data, bufferInfo.presentationTimeUs)
-                    }
-                    audioEncoder.releaseOutputBuffer(encStatus, false)
-                    if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
-                        audioEncoderDone = true
-                    }
-                }
-            }
+        } finally {
+            audioPipeline.release()
         }
     }
 
@@ -711,8 +553,6 @@ class TranscodeStreamer {
         private var basePtsUs = -1L
         private var framesSent = 0L
         private var eosQueued = false
-
-        val isEosQueued: Boolean get() = eosQueued
 
         fun enqueuePcm(data: ByteArray, ptsUs: Long) {
             if (basePtsUs < 0) basePtsUs = ptsUs
@@ -769,6 +609,124 @@ class TranscodeStreamer {
                 } else {
                     encoder.queueInputBuffer(idx, 0, 0, pts, 0)
                     return
+                }
+            }
+        }
+    }
+
+    /**
+     * Owns the audio decode → AAC encode side. The encoder is created **lazily** from
+     * the decoder's actual output format (sample rate + channel count) the first time
+     * the decoder produces output, rather than from hardcoded constants. This keeps the
+     * AAC output at the source sample rate (no accidental resampling/wrong-speed audio)
+     * and matches the post-downmix channel count exactly (mono sources, or decoders
+     * that don't honour the stereo-downmix request, no longer mis-frame the samples).
+     */
+    private inner class AudioTranscodePipeline(private val decoder: MediaCodec) {
+        private val info = MediaCodec.BufferInfo()
+        private var encoder: MediaCodec? = null
+        private var feeder: AudioEncoderFeeder? = null
+        private var sampleRate = OUTPUT_AUDIO_SAMPLE_RATE
+        private var channels = OUTPUT_AUDIO_CHANNEL_COUNT
+        private var inputDone = false
+        private var decoderDone = false
+        private var encoderDone = false
+
+        val isDone: Boolean get() = encoderDone
+
+        fun release() {
+            try { encoder?.stop() } catch (_: Exception) {}
+            try { encoder?.release() } catch (_: Exception) {}
+        }
+
+        private fun ensureEncoder() {
+            if (encoder != null) return
+            val outFmt = decoder.outputFormat
+            sampleRate = getIntSafe(outFmt, MediaFormat.KEY_SAMPLE_RATE, OUTPUT_AUDIO_SAMPLE_RATE)
+            channels = getIntSafe(outFmt, MediaFormat.KEY_CHANNEL_COUNT, OUTPUT_AUDIO_CHANNEL_COUNT)
+            val fmt = MediaFormat.createAudioFormat(OUTPUT_AUDIO_MIME, sampleRate, channels).apply {
+                setInteger(MediaFormat.KEY_BIT_RATE, OUTPUT_AUDIO_BITRATE)
+                setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+            }
+            val enc = MediaCodec.createEncoderByType(OUTPUT_AUDIO_MIME)
+            enc.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            enc.start()
+            encoder = enc
+            feeder = AudioEncoderFeeder(enc, sampleRate, channels)
+            AppLogger.info(TAG, "Audio encoder ready: AAC ${sampleRate}Hz ${channels}ch")
+        }
+
+        /** Feeds one compressed sample from [extractor] into the audio decoder. */
+        fun feedInput(extractor: MediaExtractor) {
+            if (inputDone) return
+            val idx = decoder.dequeueInputBuffer(TIMEOUT_US)
+            if (idx >= 0) {
+                val buf = decoder.getInputBuffer(idx)
+                if (buf != null) {
+                    val size = extractor.readSampleData(buf, 0)
+                    if (size < 0) {
+                        decoder.queueInputBuffer(idx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                        inputDone = true
+                    } else {
+                        decoder.queueInputBuffer(idx, 0, size, extractor.sampleTime, 0)
+                        extractor.advance()
+                    }
+                }
+            }
+        }
+
+        /** Drains decoder → PCM feeder → encoder → [writer] for one iteration. */
+        fun pump(writer: Fmp4Writer) {
+            if (!decoderDone) {
+                val status = decoder.dequeueOutputBuffer(info, TIMEOUT_US)
+                if (status == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    ensureEncoder()
+                    val ch = getIntSafe(decoder.outputFormat, MediaFormat.KEY_CHANNEL_COUNT, -1)
+                    AppLogger.info(TAG, "Audio decoder output: ${ch}ch (downmix target $OUTPUT_AUDIO_CHANNEL_COUNT)")
+                } else if (status >= 0) {
+                    val isEos = (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
+                    if (info.size > 0) {
+                        ensureEncoder()
+                        val decoded = decoder.getOutputBuffer(status)
+                        if (decoded != null) {
+                            val data = ByteArray(info.size)
+                            decoded.position(info.offset)
+                            decoded.get(data, 0, info.size)
+                            feeder?.enqueuePcm(data, info.presentationTimeUs)
+                        }
+                    }
+                    decoder.releaseOutputBuffer(status, false)
+                    if (isEos) decoderDone = true
+                }
+            }
+
+            feeder?.pump(decoderDone)
+
+            val enc = encoder
+            if (enc != null && !encoderDone) {
+                val es = enc.dequeueOutputBuffer(info, TIMEOUT_US)
+                if (es == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    captureAudioConfig(writer, enc.outputFormat)
+                } else if (es >= 0) {
+                    val isConfig = info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
+                    val encodedBuf = enc.getOutputBuffer(es)
+                    if (isConfig) {
+                        if (!writer.hasAudioConfig() && encodedBuf != null) {
+                            val cfg = ByteArray(info.size)
+                            encodedBuf.position(info.offset)
+                            encodedBuf.get(cfg, 0, info.size)
+                            writer.setAudioConfig(cfg, sampleRate, channels)
+                        }
+                        info.size = 0
+                    }
+                    if (info.size > 0 && encodedBuf != null) {
+                        val data = ByteArray(info.size)
+                        encodedBuf.position(info.offset)
+                        encodedBuf.get(data, 0, info.size)
+                        writer.addAudioSample(data, info.presentationTimeUs)
+                    }
+                    enc.releaseOutputBuffer(es, false)
+                    if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) encoderDone = true
                 }
             }
         }
