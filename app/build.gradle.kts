@@ -50,6 +50,14 @@ android {
     buildFeatures {
         viewBinding = true
     }
+    lint {
+        // Don't gate release builds on lint. lint-vital pulls the lint-gradle
+        // toolchain (groovy/kotlin-reflect/httpclient) from Maven Central at build
+        // time; a transient 403 there was failing assembleRelease in CI. The APK
+        // itself doesn't need this check.
+        checkReleaseBuilds = false
+        abortOnError = false
+    }
 }
 
 kotlin {
