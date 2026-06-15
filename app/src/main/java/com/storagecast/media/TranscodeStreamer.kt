@@ -249,6 +249,14 @@ class TranscodeStreamer {
             audioExtractor.selectTrack(audioTrackInfo.trackIndex)
             val audioInputFormat = audioExtractor.getTrackFormat(audioTrackInfo.trackIndex)
 
+            // The source may be multichannel (e.g. 5.1 E-AC-3). Ask the decoder to
+            // downmix to stereo so its PCM output matches the 2-channel AAC encoder.
+            // Feeding 6-channel PCM into a 2-channel encoder mis-frames the samples
+            // and produces badly choppy audio.
+            audioInputFormat.setInteger(
+                MediaFormat.KEY_MAX_OUTPUT_CHANNEL_COUNT, OUTPUT_AUDIO_CHANNEL_COUNT
+            )
+
             audioDecoder = MediaCodec.createDecoderByType(audioTrackInfo.mime)
             audioDecoder.configure(audioInputFormat, null, null, 0)
 
@@ -427,7 +435,10 @@ class TranscodeStreamer {
             // ── Decode audio → feed encoder ──
             if (!audioDecoderDone && audioDecoder != null && audioEncoder != null) {
                 val status = audioDecoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
-                if (status >= 0) {
+                if (status == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    val ch = getIntSafe(audioDecoder.outputFormat, MediaFormat.KEY_CHANNEL_COUNT, -1)
+                    AppLogger.info(TAG, "Audio decoder output: ${ch}ch (downmix target $OUTPUT_AUDIO_CHANNEL_COUNT)")
+                } else if (status >= 0) {
                     val isEos = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
                     if (bufferInfo.size > 0) {
                         val decoded = audioDecoder.getOutputBuffer(status)
@@ -520,6 +531,12 @@ class TranscodeStreamer {
         audioExtractor.setDataSource(inputPath)
         audioExtractor.selectTrack(selectedAudioTrack.trackIndex)
         val audioInputFormat = audioExtractor.getTrackFormat(selectedAudioTrack.trackIndex)
+
+        // Downmix multichannel source audio to stereo so the decoder's PCM output
+        // matches the 2-channel AAC encoder (prevents choppy/garbled audio).
+        audioInputFormat.setInteger(
+            MediaFormat.KEY_MAX_OUTPUT_CHANNEL_COUNT, OUTPUT_AUDIO_CHANNEL_COUNT
+        )
 
         val audioDecoder = MediaCodec.createDecoderByType(selectedAudioTrack.mime)
         audioDecoder.configure(audioInputFormat, null, null, 0)
