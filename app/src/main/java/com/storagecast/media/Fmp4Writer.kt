@@ -27,7 +27,20 @@ class Fmp4Writer(
 ) {
 
     data class VideoConfig(val avcC: ByteArray, val width: Int, val height: Int)
-    data class AudioConfig(val asc: ByteArray, val sampleRate: Int, val channels: Int)
+
+    /** Audio codecs that can be muxed into this fMP4 (transcoded AAC or passthrough). */
+    enum class AudioCodec { AAC, AC3, EAC3 }
+
+    /**
+     * @param codecData For [AudioCodec.AAC] the raw AudioSpecificConfig (ASC); for
+     * [AudioCodec.AC3]/[AudioCodec.EAC3] the contents of the `dac3`/`dec3` box.
+     */
+    data class AudioConfig(
+        val codec: AudioCodec,
+        val codecData: ByteArray,
+        val sampleRate: Int,
+        val channels: Int
+    )
 
     private var videoConfig: VideoConfig? = null
     private var audioConfig: AudioConfig? = null
@@ -117,8 +130,18 @@ class Fmp4Writer(
     }
 
     fun setAudioConfig(asc: ByteArray, sampleRate: Int, channels: Int) {
+        setAudioConfig(AudioCodec.AAC, asc, sampleRate, channels)
+    }
+
+    /**
+     * Supplies the audio codec config. [codec] selects the sample entry written into
+     * the init segment (`mp4a`/`ac-3`/`ec-3`); [codecData] is the matching codec box
+     * payload (AAC ASC, or `dac3`/`dec3` contents). The init segment is written once
+     * every present track has its config.
+     */
+    fun setAudioConfig(codec: AudioCodec, codecData: ByteArray, sampleRate: Int, channels: Int) {
         if (audioConfig != null) return
-        audioConfig = AudioConfig(asc, sampleRate, channels)
+        audioConfig = AudioConfig(codec, codecData, sampleRate, channels)
         maybeWriteInit()
     }
 
@@ -391,7 +414,12 @@ class Fmp4Writer(
             b.u16(0)                        // reserved
         }
         val dinf = buildDinf()
-        val stbl = buildStbl(buildMp4a(cfg))
+        val sampleEntry = when (cfg.codec) {
+            AudioCodec.AAC -> buildMp4a(cfg)
+            AudioCodec.AC3 -> buildAudioSampleEntry("ac-3", cfg, box("dac3", cfg.codecData))
+            AudioCodec.EAC3 -> buildAudioSampleEntry("ec-3", cfg, box("dec3", cfg.codecData))
+        }
+        val stbl = buildStbl(sampleEntry)
         return box("minf", smhd + dinf + stbl)
     }
 
@@ -436,7 +464,14 @@ class Fmp4Writer(
         return box("avc1", body.toByteArray())
     }
 
-    private fun buildMp4a(cfg: AudioConfig): ByteArray {
+    private fun buildMp4a(cfg: AudioConfig): ByteArray =
+        buildAudioSampleEntry("mp4a", cfg, buildEsds(cfg.codecData))
+
+    /**
+     * Builds an ISO audio sample entry ([boxType] = mp4a/ac-3/ec-3) with the standard
+     * AudioSampleEntry header followed by the codec-specific child box.
+     */
+    private fun buildAudioSampleEntry(boxType: String, cfg: AudioConfig, codecBox: ByteArray): ByteArray {
         val body = ByteArrayOutputStream()
         repeat(6) { body.u8(0) }            // reserved
         body.u16(1)                         // data_reference_index
@@ -446,8 +481,8 @@ class Fmp4Writer(
         body.u16(0)                         // pre_defined
         body.u16(0)                         // reserved
         body.u32(cfg.sampleRate.toLong() shl 16) // samplerate 16.16
-        body.write(buildEsds(cfg.asc))
-        return box("mp4a", body.toByteArray())
+        body.write(codecBox)
+        return box(boxType, body.toByteArray())
     }
 
     private fun buildEsds(asc: ByteArray): ByteArray {

@@ -58,6 +58,9 @@
     <string name="realtime_transcode">Realtime transcoding</string>
     <string name="realtime_transcode_on">Realtime transcoding on</string>
     <string name="realtime_transcode_off">Realtime transcoding off</string>
+    <string name="copy_audio">Copy audio (video-only transcode)</string>
+    <string name="copy_audio_on">Audio copy on (video-only transcode)</string>
+    <string name="copy_audio_off">Audio copy off (audio will be transcoded)</string>
     <string name="select_audio_track">Audio</string>
     <string name="audio_track_title">Audio track</string>
     <string name="audio_track_default">Default (first track)</string>

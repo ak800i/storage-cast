@@ -1544,13 +1544,14 @@ class VideoDetailActivity : AppCompatActivity() {
         val streamer = TranscodeStreamer()
         transcodeStreamer = streamer
 
-        AppLogger.info(TAG, "Starting streaming transcode to fragmented MP4")
+        val copyAudio = SettingsActivity.getCopyAudio(this)
+        AppLogger.info(TAG, "Starting streaming transcode to fragmented MP4 (copyAudio=$copyAudio)")
 
         val inputPath = video.path
         val audioTrack = selectedAudioTrack
 
         castStreamingSource(video, "video/mp4") {
-            streamer.createTranscodeStream(inputPath, probeResult, audioTrack,
+            streamer.createTranscodeStream(inputPath, probeResult, audioTrack, copyAudio,
                 object : TranscodeStreamer.ProgressListener {
                     override fun onProgress(percent: Int) {
                         AppLogger.info(TAG, "Transcode progress: $percent%")
@@ -1965,6 +1966,8 @@ class VideoDetailActivity : AppCompatActivity() {
         menu.findItem(R.id.action_save_subtitle)?.isVisible = downloadedSubtitleFile != null
         menu.findItem(R.id.action_realtime_transcode)?.isChecked =
             SettingsActivity.getRealtimeTranscode(this)
+        menu.findItem(R.id.action_copy_audio)?.isChecked =
+            SettingsActivity.getCopyAudio(this)
         return super.onPrepareOptionsMenu(menu)
     }
 
@@ -2001,6 +2004,18 @@ class VideoDetailActivity : AppCompatActivity() {
                     Toast.LENGTH_SHORT
                 ).show()
                 AppLogger.info(TAG, "Realtime transcoding toggled: $enabled")
+                true
+            }
+            R.id.action_copy_audio -> {
+                val enabled = !item.isChecked
+                item.isChecked = enabled
+                SettingsActivity.setCopyAudio(this, enabled)
+                Toast.makeText(
+                    this,
+                    if (enabled) R.string.copy_audio_on else R.string.copy_audio_off,
+                    Toast.LENGTH_SHORT
+                ).show()
+                AppLogger.info(TAG, "Copy audio toggled: $enabled")
                 true
             }
             else -> super.onOptionsItemSelected(item)

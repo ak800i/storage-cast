@@ -72,6 +72,7 @@ class TranscodeStreamer {
         inputPath: String,
         probeResult: MediaProbeResult,
         selectedAudioTrack: AudioTrackInfo? = null,
+        copyAudio: Boolean = false,
         listener: ProgressListener? = null
     ): InputStream {
         isCancelled = false
@@ -80,7 +81,7 @@ class TranscodeStreamer {
 
         Thread {
             try {
-                transcodeToFmp4(inputPath, probeResult, selectedAudioTrack, pipedOut, listener)
+                transcodeToFmp4(inputPath, probeResult, selectedAudioTrack, copyAudio, pipedOut, listener)
             } catch (e: IOException) {
                 // Pipe broken = reader closed (Cast device disconnected) — expected
                 AppLogger.info(TAG, "Transcode stream ended: ${e.message}")
@@ -124,7 +125,7 @@ class TranscodeStreamer {
                     remuxWithAudioTranscodeToFmp4(inputPath, probeResult, selectedAudioTrack, pipedOut, listener)
                 } else {
                     AppLogger.info(TAG, "Video is $videoMime (not H.264), full-transcoding instead of passthrough")
-                    transcodeToFmp4(inputPath, probeResult, selectedAudioTrack, pipedOut, listener)
+                    transcodeToFmp4(inputPath, probeResult, selectedAudioTrack, copyAudio = false, pipedOut, listener)
                 }
             } catch (e: IOException) {
                 AppLogger.info(TAG, "Remux stream ended: ${e.message}")
@@ -150,6 +151,7 @@ class TranscodeStreamer {
         inputPath: String,
         probeResult: MediaProbeResult,
         selectedAudioTrack: AudioTrackInfo?,
+        copyAudio: Boolean,
         output: OutputStream,
         listener: ProgressListener?
     ) {
@@ -241,6 +243,7 @@ class TranscodeStreamer {
 
         var audioDecoder: MediaCodec? = null
         var audioExtractor: MediaExtractor? = null
+        var audioStage: AudioStage? = null
 
         if (audioTrackInfo != null) {
             audioExtractor = MediaExtractor()
@@ -248,35 +251,50 @@ class TranscodeStreamer {
             audioExtractor.selectTrack(audioTrackInfo.trackIndex)
             val audioInputFormat = audioExtractor.getTrackFormat(audioTrackInfo.trackIndex)
 
-            // The source may be multichannel (e.g. 5.1 E-AC-3). Ask the decoder to
-            // downmix to stereo so its PCM output matches the 2-channel AAC encoder.
-            // Feeding 6-channel PCM into a 2-channel encoder mis-frames the samples
-            // and produces badly choppy audio.
-            audioInputFormat.setInteger(
-                MediaFormat.KEY_MAX_OUTPUT_CHANNEL_COUNT, OUTPUT_AUDIO_CHANNEL_COUNT
-            )
+            // ── Audio copy (passthrough) path ──
+            // When the user asked to transcode video only, try to mux the source audio
+            // untouched. This preserves the original track (e.g. 5.1 surround) and skips
+            // audio decode/encode entirely. Falls back to transcoding when the codec
+            // can't be muxed or its config can't be built.
+            if (copyAudio) {
+                audioStage = tryBuildAudioPassthrough(audioExtractor, audioInputFormat, audioTrackInfo)
+            }
 
-            audioDecoder = MediaCodec.createDecoderByType(audioTrackInfo.mime)
-            audioDecoder.configure(audioInputFormat, null, null, 0)
-            audioDecoder.start()
+            if (audioStage == null) {
+                // The source may be multichannel (e.g. 5.1 E-AC-3). Ask the decoder to
+                // downmix to stereo so its PCM output matches the 2-channel AAC encoder.
+                // Feeding 6-channel PCM into a 2-channel encoder mis-frames the samples
+                // and produces badly choppy audio.
+                audioInputFormat.setInteger(
+                    MediaFormat.KEY_MAX_OUTPUT_CHANNEL_COUNT, OUTPUT_AUDIO_CHANNEL_COUNT
+                )
 
-            // The AAC encoder is created lazily from the decoder's actual output format
-            // (sample rate + channel count) once decoding starts — see
-            // AudioTranscodePipeline. This avoids hardcoding 48 kHz/stereo, which would
-            // resample-by-mislabel (wrong-speed audio) or mis-frame a mono source.
-            AppLogger.info(TAG, "Audio transcode: ${audioTrackInfo.codec} → AAC")
+                audioDecoder = MediaCodec.createDecoderByType(audioTrackInfo.mime)
+                audioDecoder.configure(audioInputFormat, null, null, 0)
+                audioDecoder.start()
+
+                // The AAC encoder is created lazily from the decoder's actual output format
+                // (sample rate + channel count) once decoding starts — see
+                // AudioTranscodePipeline. This avoids hardcoding 48 kHz/stereo, which would
+                // resample-by-mislabel (wrong-speed audio) or mis-frame a mono source.
+                audioStage = AudioTranscodePipeline(audioDecoder, audioExtractor)
+                AppLogger.info(TAG, "Audio transcode: ${audioTrackInfo.codec} → AAC")
+            }
         }
 
         // The init segment is written lazily by the writer once both encoders report
         // their codec config (which a hardware encoder only emits after the first
         // frame). Configs are captured from INFO_OUTPUT_FORMAT_CHANGED in the pump.
-        val writer = Fmp4Writer(out, hasVideo = videoEncoder != null, hasAudio = audioDecoder != null)
+        val writer = Fmp4Writer(out, hasVideo = videoEncoder != null, hasAudio = audioStage != null)
+
+        // A passthrough stage already knows its codec config, so apply it now.
+        audioStage?.applyConfigIfKnown(writer)
 
         try {
             pumpTranscode(
                 writer,
                 videoExtractor, videoDecoder, videoEncoder, outWidth, outHeight,
-                audioExtractor, audioDecoder,
+                audioStage,
                 durationUs, listener
             )
 
@@ -291,7 +309,7 @@ class TranscodeStreamer {
             safeStopRelease(videoEncoder)
             try { videoInputSurface?.release() } catch (_: Exception) {}
             videoExtractor?.release()
-            safeStopRelease(audioDecoder)
+            audioStage?.release()
             audioExtractor?.release()
         }
     }
@@ -307,8 +325,7 @@ class TranscodeStreamer {
         videoEncoder: MediaCodec?,
         outWidth: Int,
         outHeight: Int,
-        audioExtractor: MediaExtractor?,
-        audioDecoder: MediaCodec?,
+        audioStage: AudioStage?,
         durationUs: Long,
         listener: ProgressListener?
     ) {
@@ -320,10 +337,8 @@ class TranscodeStreamer {
         var videoEncoderDone = videoEncoder == null
         var lastReportedProgress = -1
 
-        val audioPipeline = audioDecoder?.let { AudioTranscodePipeline(it) }
-
         try {
-            while (!isCancelled && (!videoEncoderDone || !(audioPipeline?.isDone ?: true))) {
+            while (!isCancelled && (!videoEncoderDone || !(audioStage?.isDone ?: true))) {
             // ── Feed video decoder (non-blocking) ──
             if (!videoInputDone && videoExtractor != null && videoDecoder != null) {
                 val idx = videoDecoder.dequeueInputBuffer(0)
@@ -402,22 +417,18 @@ class TranscodeStreamer {
                 }
             }
 
-            // ── Audio decode + AAC encode (lazy encoder via pipeline) ──
-            var audioDidWork = false
-            if (audioPipeline != null) {
-                if (audioExtractor != null) audioPipeline.feedInput(audioExtractor)
-                audioDidWork = audioPipeline.pump(writer)
-            }
+            // ── Audio (passthrough copy, or decode + AAC encode) ──
+            val audioDidWork = audioStage?.step(writer) ?: false
 
             // The video pipeline's blocking encoder-output drain paces the main run.
             // Once video is finished, only audio remains and its polls are
             // non-blocking, so yield briefly to avoid busy-spinning the tail.
-            if (videoEncoderDone && audioPipeline != null && !audioPipeline.isDone && !audioDidWork) {
+            if (videoEncoderDone && audioStage != null && !audioStage.isDone && !audioDidWork) {
                 try { Thread.sleep(2) } catch (_: InterruptedException) {}
             }
             }
         } finally {
-            audioPipeline?.release()
+            // The stage is released by the caller (transcodeToFmp4).
         }
     }
 
@@ -454,6 +465,7 @@ class TranscodeStreamer {
         // The AAC encoder is created lazily from the decoder's actual output format
         // (sample rate + channel count) — see AudioTranscodePipeline.
         AppLogger.info(TAG, "Audio transcode: ${selectedAudioTrack.codec} → AAC")
+        val audioStage = AudioTranscodePipeline(audioDecoder, audioExtractor)
 
         // ── Video passthrough setup ──
         val videoExtractor = MediaExtractor()
@@ -476,12 +488,12 @@ class TranscodeStreamer {
         try {
             // The audio codec config arrives from INFO_OUTPUT_FORMAT_CHANGED during the
             // pump; the writer holds back fragments until the init segment is written.
-            pumpRemux(writer, videoExtractor, hasVideo, audioExtractor, audioDecoder, durationUs, listener)
+            pumpRemux(writer, videoExtractor, hasVideo, audioStage, durationUs, listener)
             writer.finish()
             out.flush()
             AppLogger.info(TAG, "Remux+audio-transcode fMP4 stream complete")
         } finally {
-            safeStopRelease(audioDecoder)
+            audioStage.release()
             audioExtractor.release()
             videoExtractor.release()
         }
@@ -491,8 +503,7 @@ class TranscodeStreamer {
         writer: Fmp4Writer,
         videoExtractor: MediaExtractor,
         hasVideo: Boolean,
-        audioExtractor: MediaExtractor,
-        audioDecoder: MediaCodec,
+        audioStage: AudioStage,
         durationUs: Long,
         listener: ProgressListener?
     ) {
@@ -501,48 +512,41 @@ class TranscodeStreamer {
         var videoDone = !hasVideo
         var lastReportedProgress = -1
 
-        val audioPipeline = AudioTranscodePipeline(audioDecoder)
-
-        try {
-            while (!isCancelled && (!videoDone || !audioPipeline.isDone)) {
-                var didWork = false
-                // ── Video passthrough ──
-                if (!videoDone) {
-                    sampleBuffer.clear()
-                    val sampleSize = videoExtractor.readSampleData(sampleBuffer, 0)
-                    if (sampleSize < 0) {
-                        videoDone = true
-                    } else {
-                        didWork = true
-                        val ptsUs = videoExtractor.sampleTime
-                        val isKey = (videoExtractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC) != 0
-                        val data = ByteArray(sampleSize)
-                        sampleBuffer.position(0)
-                        sampleBuffer.get(data, 0, sampleSize)
-                        writer.addVideoSample(data, ptsUs, isKey)
-                        videoExtractor.advance()
-                        if (durationUs > 0) {
-                            val progress = ((ptsUs * 100) / durationUs).toInt().coerceIn(0, 100)
-                            if (progress != lastReportedProgress) {
-                                lastReportedProgress = progress
-                                listener?.onProgress(progress)
-                            }
+        while (!isCancelled && (!videoDone || !audioStage.isDone)) {
+            var didWork = false
+            // ── Video passthrough ──
+            if (!videoDone) {
+                sampleBuffer.clear()
+                val sampleSize = videoExtractor.readSampleData(sampleBuffer, 0)
+                if (sampleSize < 0) {
+                    videoDone = true
+                } else {
+                    didWork = true
+                    val ptsUs = videoExtractor.sampleTime
+                    val isKey = (videoExtractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC) != 0
+                    val data = ByteArray(sampleSize)
+                    sampleBuffer.position(0)
+                    sampleBuffer.get(data, 0, sampleSize)
+                    writer.addVideoSample(data, ptsUs, isKey)
+                    videoExtractor.advance()
+                    if (durationUs > 0) {
+                        val progress = ((ptsUs * 100) / durationUs).toInt().coerceIn(0, 100)
+                        if (progress != lastReportedProgress) {
+                            lastReportedProgress = progress
+                            listener?.onProgress(progress)
                         }
                     }
                 }
-
-                // ── Audio decode + AAC encode (lazy encoder via pipeline) ──
-                audioPipeline.feedInput(audioExtractor)
-                if (audioPipeline.pump(writer)) didWork = true
-
-                // All polls here are non-blocking; yield when nothing progressed so
-                // the loop doesn't busy-spin (e.g. while waiting on the audio tail).
-                if (!didWork) {
-                    try { Thread.sleep(2) } catch (_: InterruptedException) {}
-                }
             }
-        } finally {
-            audioPipeline.release()
+
+            // ── Audio (passthrough copy, or decode + AAC encode) ──
+            if (audioStage.step(writer)) didWork = true
+
+            // All polls here are non-blocking; yield when nothing progressed so
+            // the loop doesn't busy-spin (e.g. while waiting on the audio tail).
+            if (!didWork) {
+                try { Thread.sleep(2) } catch (_: InterruptedException) {}
+            }
         }
     }
 
@@ -631,6 +635,130 @@ class TranscodeStreamer {
     }
 
     /**
+     * One audio track's contribution to the fMP4 output. Either re-encodes to AAC
+     * ([AudioTranscodePipeline]) or copies the source bitstream untouched
+     * ([AudioPassthroughStage]). All methods use non-blocking codec polls so the
+     * single-threaded pump never stalls the video pipeline.
+     */
+    private interface AudioStage {
+        val isDone: Boolean
+        /** Applies a codec config that is already known up front (passthrough). */
+        fun applyConfigIfKnown(writer: Fmp4Writer) {}
+        /** Advances the audio one iteration; returns true if any work happened. */
+        fun step(writer: Fmp4Writer): Boolean
+        fun release()
+    }
+
+    /**
+     * Copies the source audio elementary stream straight into the fMP4 (no re-encode),
+     * preserving the original codec/track (e.g. 5.1 surround). The codec config is
+     * resolved up front by [tryBuildAudioPassthrough].
+     */
+    private inner class AudioPassthroughStage(
+        private val extractor: MediaExtractor,
+        private val codec: Fmp4Writer.AudioCodec,
+        private val codecData: ByteArray,
+        private val sampleRate: Int,
+        private val channels: Int
+    ) : AudioStage {
+        private val sampleBuffer = ByteBuffer.allocate(512 * 1024)
+        private var done = false
+
+        override val isDone: Boolean get() = done
+
+        override fun applyConfigIfKnown(writer: Fmp4Writer) {
+            writer.setAudioConfig(codec, codecData, sampleRate, channels)
+            AppLogger.info(TAG, "Audio copy (passthrough): $codec ${sampleRate}Hz ${channels}ch")
+        }
+
+        override fun step(writer: Fmp4Writer): Boolean {
+            if (done) return false
+            sampleBuffer.clear()
+            val size = extractor.readSampleData(sampleBuffer, 0)
+            if (size < 0) {
+                done = true
+                return false
+            }
+            val ptsUs = extractor.sampleTime
+            val data = ByteArray(size)
+            sampleBuffer.position(0)
+            sampleBuffer.get(data, 0, size)
+            writer.addAudioSample(data, ptsUs)
+            extractor.advance()
+            return true
+        }
+
+        override fun release() {}
+    }
+
+    /**
+     * Attempts to set up audio passthrough for the selected track. Returns a stage when
+     * the source codec can be muxed directly (AAC, AC-3, E-AC-3) and its config is
+     * available; otherwise returns null so the caller falls back to transcoding.
+     */
+    private fun tryBuildAudioPassthrough(
+        extractor: MediaExtractor,
+        format: MediaFormat,
+        track: AudioTrackInfo
+    ): AudioStage? {
+        val mime = (format.getString(MediaFormat.KEY_MIME) ?: track.mime).lowercase()
+        val sampleRate = getIntSafe(format, MediaFormat.KEY_SAMPLE_RATE, track.sampleRate)
+        val channels = getIntSafe(format, MediaFormat.KEY_CHANNEL_COUNT, track.channelCount)
+        if (sampleRate <= 0 || channels <= 0) return null
+
+        return when {
+            mime.contains("mp4a") || mime.contains("aac") -> {
+                val asc = getCsdBytes(format, 0)
+                if (asc == null || asc.isEmpty()) {
+                    AppLogger.warn(TAG, "Audio copy: AAC has no codec config, will transcode")
+                    null
+                } else {
+                    AudioPassthroughStage(extractor, Fmp4Writer.AudioCodec.AAC, asc, sampleRate, channels)
+                }
+            }
+            mime.contains("eac3") || mime.contains("ec3") || mime.contains("ec-3") -> {
+                val frame = peekFirstSample(extractor) ?: return null
+                val dec3 = DolbyAudioConfig.buildDec3(frame)
+                if (dec3 == null) {
+                    AppLogger.warn(TAG, "Audio copy: could not build dec3 for E-AC-3, will transcode")
+                    null
+                } else {
+                    AudioPassthroughStage(extractor, Fmp4Writer.AudioCodec.EAC3, dec3, sampleRate, channels)
+                }
+            }
+            mime.contains("ac3") || mime.contains("ac-3") -> {
+                val frame = peekFirstSample(extractor) ?: return null
+                val dac3 = DolbyAudioConfig.buildDac3(frame)
+                if (dac3 == null) {
+                    AppLogger.warn(TAG, "Audio copy: could not build dac3 for AC-3, will transcode")
+                    null
+                } else {
+                    AudioPassthroughStage(extractor, Fmp4Writer.AudioCodec.AC3, dac3, sampleRate, channels)
+                }
+            }
+            else -> {
+                AppLogger.info(TAG, "Audio copy: $mime not muxable into MP4, will transcode to AAC")
+                null
+            }
+        }
+    }
+
+    /**
+     * Reads the first sample's bytes without consuming the extractor position (the
+     * stage re-reads it), so a Dolby config can be parsed before streaming starts.
+     */
+    private fun peekFirstSample(extractor: MediaExtractor): ByteArray? {
+        val buf = ByteBuffer.allocate(64 * 1024)
+        val size = extractor.readSampleData(buf, 0)
+        if (size <= 0) return null
+        val data = ByteArray(size)
+        buf.position(0)
+        buf.get(data, 0, size)
+        // Do not advance(): the passthrough stage reads this same first frame.
+        return data
+    }
+
+    /**
      * Owns the audio decode → AAC encode side. The encoder is created **lazily** from
      * the decoder's actual output format (sample rate + channel count) the first time
      * the decoder produces output, rather than from hardcoded constants. This keeps the
@@ -638,7 +766,10 @@ class TranscodeStreamer {
      * and matches the post-downmix channel count exactly (mono sources, or decoders
      * that don't honour the stereo-downmix request, no longer mis-frame the samples).
      */
-    private inner class AudioTranscodePipeline(private val decoder: MediaCodec) {
+    private inner class AudioTranscodePipeline(
+        private val decoder: MediaCodec,
+        private val extractor: MediaExtractor
+    ) : AudioStage {
         private val info = MediaCodec.BufferInfo()
         private var encoder: MediaCodec? = null
         private var feeder: AudioEncoderFeeder? = null
@@ -648,9 +779,16 @@ class TranscodeStreamer {
         private var decoderDone = false
         private var encoderDone = false
 
-        val isDone: Boolean get() = encoderDone
+        override val isDone: Boolean get() = encoderDone
 
-        fun release() {
+        override fun step(writer: Fmp4Writer): Boolean {
+            feedInput()
+            return pump(writer)
+        }
+
+        override fun release() {
+            try { decoder.stop() } catch (_: Exception) {}
+            try { decoder.release() } catch (_: Exception) {}
             try { encoder?.stop() } catch (_: Exception) {}
             try { encoder?.release() } catch (_: Exception) {}
         }
@@ -672,8 +810,8 @@ class TranscodeStreamer {
             AppLogger.info(TAG, "Audio encoder ready: AAC ${sampleRate}Hz ${channels}ch")
         }
 
-        /** Feeds one compressed sample from [extractor] into the audio decoder. */
-        fun feedInput(extractor: MediaExtractor) {
+        /** Feeds one compressed sample from the extractor into the audio decoder. */
+        private fun feedInput() {
             if (inputDone) return
             val idx = decoder.dequeueInputBuffer(0)
             if (idx >= 0) {
@@ -697,7 +835,7 @@ class TranscodeStreamer {
          * never stalled waiting on audio. Returns true if any audio work happened, so
          * the caller can idle-sleep instead of busy-spinning when nothing progressed.
          */
-        fun pump(writer: Fmp4Writer): Boolean {
+        private fun pump(writer: Fmp4Writer): Boolean {
             var didWork = false
             if (!decoderDone) {
                 val status = decoder.dequeueOutputBuffer(info, 0)

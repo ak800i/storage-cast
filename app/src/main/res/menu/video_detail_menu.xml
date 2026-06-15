@@ -11,6 +11,11 @@
         android:checkable="true"
         app:showAsAction="never" />
     <item
+        android:id="@+id/action_copy_audio"
+        android:title="@string/copy_audio"
+        android:checkable="true"
+        app:showAsAction="never" />
+    <item
         android:id="@+id/action_save_subtitle"
         android:title="@string/save_subtitle"
         app:showAsAction="never" />
