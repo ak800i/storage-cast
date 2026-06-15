@@ -2036,6 +2036,8 @@ class VideoDetailActivity : AppCompatActivity() {
 
     override fun onPrepareOptionsMenu(menu: Menu): Boolean {
         menu.findItem(R.id.action_save_subtitle)?.isVisible = downloadedSubtitleFile != null
+        menu.findItem(R.id.action_realtime_transcode)?.isChecked =
+            SettingsActivity.getRealtimeTranscode(this)
         return super.onPrepareOptionsMenu(menu)
     }
 
@@ -2060,6 +2062,18 @@ class VideoDetailActivity : AppCompatActivity() {
                     val suggestedName = if (videoBaseName != null) "$videoBaseName.$subtitleExt" else upstreamName
                     saveSubtitleLauncher.launch(suggestedName)
                 }
+                true
+            }
+            R.id.action_realtime_transcode -> {
+                val enabled = !item.isChecked
+                item.isChecked = enabled
+                SettingsActivity.setRealtimeTranscode(this, enabled)
+                Toast.makeText(
+                    this,
+                    if (enabled) R.string.realtime_transcode_on else R.string.realtime_transcode_off,
+                    Toast.LENGTH_SHORT
+                ).show()
+                AppLogger.info(TAG, "Realtime transcoding toggled: $enabled")
                 true
             }
             else -> super.onOptionsItemSelected(item)
