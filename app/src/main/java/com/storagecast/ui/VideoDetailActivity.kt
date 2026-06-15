@@ -1544,7 +1544,7 @@ class VideoDetailActivity : AppCompatActivity() {
         val streamer = TranscodeStreamer()
         transcodeStreamer = streamer
 
-        AppLogger.info(TAG, "Starting streaming transcode to MKV")
+        AppLogger.info(TAG, "Starting streaming transcode to fragmented MP4")
 
         val inputPath = video.path
         val audioTrack = selectedAudioTrack

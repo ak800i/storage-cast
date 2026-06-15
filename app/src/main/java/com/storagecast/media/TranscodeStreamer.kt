@@ -85,7 +85,7 @@ class TranscodeStreamer {
                 // Pipe broken = reader closed (Cast device disconnected) — expected
                 AppLogger.info(TAG, "Transcode stream ended: ${e.message}")
             } catch (e: Exception) {
-                AppLogger.error(TAG, "Transcode stream error: ${e.message}")
+                AppLogger.error(TAG, "Transcode stream error: ${describeError(e)}")
                 listener?.onError("Transcode failed: ${e.message}")
             } finally {
                 try { pipedOut.close() } catch (_: Exception) {}
@@ -129,7 +129,7 @@ class TranscodeStreamer {
             } catch (e: IOException) {
                 AppLogger.info(TAG, "Remux stream ended: ${e.message}")
             } catch (e: Exception) {
-                AppLogger.error(TAG, "Remux stream error: ${e.message}")
+                AppLogger.error(TAG, "Remux stream error: ${describeError(e)}")
                 listener?.onError("Remux failed: ${e.message}")
             } finally {
                 try { pipedOut.close() } catch (_: Exception) {}
@@ -177,6 +177,18 @@ class TranscodeStreamer {
             videoExtractor.selectTrack(videoTrackInfo.trackIndex)
             val inputFormat = videoExtractor.getTrackFormat(videoTrackInfo.trackIndex)
 
+            // 10-bit / HDR HEVC (e.g. Main10) decoded straight onto an 8-bit AVC
+            // encoder surface makes some hardware encoders error out. Ask the decoder
+            // to tone-map HDR → 8-bit SDR so the surface the encoder receives is 8-bit.
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                try {
+                    inputFormat.setInteger(
+                        MediaFormat.KEY_COLOR_TRANSFER_REQUEST,
+                        MediaFormat.COLOR_TRANSFER_SDR_VIDEO
+                    )
+                } catch (_: Exception) {}
+            }
+
             val inWidth = videoTrackInfo.width
             val inHeight = videoTrackInfo.height
             if (inWidth <= 0 || inHeight <= 0) {
@@ -215,12 +227,14 @@ class TranscodeStreamer {
             videoEncoder = createVideoEncoder()
             videoEncoder.configure(videoOutputFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             videoInputSurface = videoEncoder.createInputSurface()
+            // The encoder MUST be started before the decoder renders any frame onto its
+            // input surface; otherwise the encoder receives buffers while not in the
+            // executing state and the framework errors/releases it.
+            videoEncoder.start()
 
             videoDecoder = MediaCodec.createDecoderByType(videoTrackInfo.mime)
             videoDecoder.configure(inputFormat, videoInputSurface, null, 0)
-
             videoDecoder.start()
-            videoEncoder.start()
 
             AppLogger.info(TAG, "Video transcode (surface): ${videoTrackInfo.codec} ${videoTrackInfo.width}x${videoTrackInfo.height} → H.264 ${outWidth}x${outHeight}")
         }
@@ -758,6 +772,14 @@ class TranscodeStreamer {
         if (codec == null) return
         try { codec.stop() } catch (_: Exception) {}
         try { codec.release() } catch (_: Exception) {}
+    }
+
+    /** Formats an exception with its type and top stack frames for precise diagnosis. */
+    private fun describeError(e: Throwable): String {
+        val top = e.stackTrace.take(4).joinToString(" <- ") {
+            "${it.className.substringAfterLast('.')}.${it.methodName}:${it.lineNumber}"
+        }
+        return "${e.javaClass.simpleName}: ${e.message} @ $top"
     }
 
     /**
