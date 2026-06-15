@@ -22,6 +22,8 @@ class SettingsActivity : AppCompatActivity() {
         const val DEFAULT_REALTIME_TRANSCODE = false
         const val KEY_COPY_AUDIO = "copy_audio"
         const val DEFAULT_COPY_AUDIO = false
+        const val KEY_HLS_SEEKING = "hls_seeking"
+        const val DEFAULT_HLS_SEEKING = false
 
         private const val OPENSUBTITLES_PREFS = "opensubtitles"
 
@@ -51,6 +53,17 @@ class SettingsActivity : AppCompatActivity() {
         fun setCopyAudio(context: Context, enabled: Boolean) {
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
                 .putBoolean(KEY_COPY_AUDIO, enabled)
+                .apply()
+        }
+
+        fun getHlsSeeking(context: Context): Boolean {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getBoolean(KEY_HLS_SEEKING, DEFAULT_HLS_SEEKING)
+        }
+
+        fun setHlsSeeking(context: Context, enabled: Boolean) {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+                .putBoolean(KEY_HLS_SEEKING, enabled)
                 .apply()
         }
     }

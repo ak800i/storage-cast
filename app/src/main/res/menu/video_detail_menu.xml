@@ -16,6 +16,11 @@
         android:checkable="true"
         app:showAsAction="never" />
     <item
+        android:id="@+id/action_hls_seeking"
+        android:title="@string/hls_seeking"
+        android:checkable="true"
+        app:showAsAction="never" />
+    <item
         android:id="@+id/action_save_subtitle"
         android:title="@string/save_subtitle"
         app:showAsAction="never" />

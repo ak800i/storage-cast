@@ -143,6 +143,18 @@ class MediaServerService : Service() {
         return "/media/$id"
     }
 
+    /**
+     * Registers an on-demand HLS VOD session. Returns the path of the media playlist
+     * (`/hls/{id}/playlist.m3u8`); the receiver then fetches `init.mp4` and `segN.m4s`
+     * under the same `/hls/{id}/` prefix, each produced/cached by the session.
+     */
+    fun registerHlsSession(label: String, session: com.storagecast.media.HlsTranscodeSession): String {
+        val id = "hls_${label.hashCode().toUInt()}_${System.currentTimeMillis()}"
+        server?.registerHlsSession(id, session)
+        AppLogger.info("MediaServer", "Register HLS session: label=$label, id=$id")
+        return "/hls/$id/playlist.m3u8"
+    }
+
     fun getServerPort(): Int = server?.listeningPort ?: 8080
 
     private fun promoteToForeground() {
@@ -277,6 +289,7 @@ class MediaServerService : Service() {
     private class MediaServer(port: Int, private val resolver: ContentResolver) : NanoHTTPD(port) {
         private val fileMap = ConcurrentHashMap<String, FileEntry>()
         private val streamMap = ConcurrentHashMap<String, StreamEntry>()
+        private val hlsMap = ConcurrentHashMap<String, com.storagecast.media.HlsTranscodeSession>()
 
         fun registerFile(id: String, file: File, mimeType: String, uri: Uri?) {
             fileMap[id] = FileEntry(file, mimeType, uri)
@@ -284,6 +297,10 @@ class MediaServerService : Service() {
 
         fun registerStreamFactory(id: String, mimeType: String, factory: () -> InputStream) {
             streamMap[id] = StreamEntry(mimeType, factory)
+        }
+
+        fun registerHlsSession(id: String, session: com.storagecast.media.HlsTranscodeSession) {
+            hlsMap[id] = session
         }
 
         private fun addCorsHeaders(response: Response) {
@@ -304,6 +321,10 @@ class MediaServerService : Service() {
                 addCorsHeaders(response)
                 response.addHeader("Access-Control-Max-Age", "86400")
                 return response
+            }
+
+            if (uri.startsWith("/hls/")) {
+                return serveHls(uri, session.headers["range"])
             }
 
             if (uri.startsWith("/media/")) {
@@ -361,6 +382,80 @@ class MediaServerService : Service() {
                     Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "Error: ${e.message}"
                 )
             }
+        }
+
+        /**
+         * Serves an HLS VOD resource: media playlist, init segment, or media segment.
+         * Segments/init are transcoded on demand and cached by the session.
+         * Paths: /hls/{id}/playlist.m3u8, /hls/{id}/init.mp4, /hls/{id}/seg{n}.m4s
+         */
+        private fun serveHls(uri: String, rangeHeader: String?): Response {
+            val rest = uri.removePrefix("/hls/")
+            val slash = rest.indexOf('/')
+            if (slash <= 0) {
+                return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Bad HLS path")
+            }
+            val id = rest.substring(0, slash)
+            val resource = rest.substring(slash + 1)
+            val hls = hlsMap[id]
+            if (hls == null) {
+                AppLogger.warn("MediaServer", "404 HLS session not found: id=$id")
+                return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "No HLS session")
+            }
+            val basePath = "/hls/$id"
+            return try {
+                when {
+                    resource == "playlist.m3u8" -> {
+                        val playlist = hls.playlist(basePath)
+                        val resp = newFixedLengthResponse(
+                            Response.Status.OK, "application/vnd.apple.mpegurl", playlist
+                        )
+                        addCorsHeaders(resp)
+                        resp.addHeader("Cache-Control", "no-store")
+                        AppLogger.info("MediaServer", "Served HLS playlist ($id, ${playlist.length} chars)")
+                        resp
+                    }
+                    resource == "init.mp4" -> serveBytes(hls.initBytes(), "video/mp4", rangeHeader)
+                    resource.startsWith("seg") && resource.endsWith(".m4s") -> {
+                        val index = resource.removePrefix("seg").removeSuffix(".m4s").toIntOrNull()
+                        val bytes = if (index != null) hls.segmentBytes(index) else null
+                        if (bytes == null) {
+                            newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "No segment")
+                        } else {
+                            serveBytes(bytes, "video/mp4", rangeHeader)
+                        }
+                    }
+                    else -> newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Unknown HLS resource")
+                }
+            } catch (e: Exception) {
+                AppLogger.error("MediaServer", "HLS serve error for $uri: ${e.javaClass.simpleName}: ${e.message}")
+                newFixedLengthResponse(Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "Error: ${e.message}")
+            }
+        }
+
+        /** Serves an in-memory byte array, honoring a single Range request if present. */
+        private fun serveBytes(data: ByteArray, mimeType: String, rangeHeader: String?): Response {
+            if (rangeHeader == null) {
+                val resp = newResponse(
+                    Response.Status.OK, mimeType, java.io.ByteArrayInputStream(data), data.size.toLong()
+                )
+                resp.addHeader("Accept-Ranges", "bytes")
+                addCorsHeaders(resp)
+                return resp
+            }
+            val range = rangeHeader.replace("bytes=", "")
+            val parts = range.split("-")
+            val start = parts.getOrNull(0)?.toLongOrNull() ?: 0L
+            val end = parts.getOrNull(1)?.takeIf { it.isNotEmpty() }?.toLongOrNull() ?: (data.size - 1L)
+            val s = start.coerceIn(0, (data.size - 1).toLong())
+            val e = end.coerceIn(s, (data.size - 1).toLong())
+            val len = (e - s + 1)
+            val stream = java.io.ByteArrayInputStream(data, s.toInt(), len.toInt())
+            val resp = newResponse(Response.Status.PARTIAL_CONTENT, mimeType, stream, len)
+            resp.addHeader("Content-Range", "bytes $s-$e/${data.size}")
+            resp.addHeader("Accept-Ranges", "bytes")
+            addCorsHeaders(resp)
+            return resp
         }
 
         private fun openFileStream(entry: FileEntry): InputStream {

@@ -52,6 +52,7 @@ import com.storagecast.media.AudioTrackInfo
 import com.storagecast.media.CastCompatibility
 import com.storagecast.media.MediaProbeResult
 import com.storagecast.media.MediaProber
+import com.storagecast.media.HlsTranscodeSession
 import com.storagecast.media.TranscodeStreamer
 import com.storagecast.media.VideoTranscoder
 import com.storagecast.model.SubtitleTrack
@@ -1601,6 +1602,13 @@ class VideoDetailActivity : AppCompatActivity() {
     }
 
     private fun startTranscoding(video: VideoItem, probeResult: MediaProbeResult, startPositionMs: Long = 0L) {
+        // Experimental: serve the transcode as seekable HLS VOD instead of a live pipe.
+        // Falls back to live for the copy-audio case (HLS path transcodes audio to AAC).
+        if (SettingsActivity.getHlsSeeking(this) && !SettingsActivity.getCopyAudio(this)) {
+            castHls(video, probeResult)
+            return
+        }
+
         // Cancel any in-flight transcode before starting a new one (e.g. on seek).
         transcodeStreamer?.cancel()
 
@@ -1765,6 +1773,109 @@ class VideoDetailActivity : AppCompatActivity() {
                 if (mediaError != null) {
                     logMediaError(mediaError)
                 }
+                runOnUiThread {
+                    Toast.makeText(this, getString(R.string.cast_load_failed, status.statusMessage ?: "Unknown error"), Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+        updateCastStatus(video.title)
+        Toast.makeText(this, R.string.loading_video, Toast.LENGTH_SHORT).show()
+    }
+
+    /**
+     * Experimental: cast the transcode as a seekable HLS VOD presentation. The local
+     * server transcodes fMP4 segments on demand; the playlist's #EXT-X-ENDLIST makes
+     * the receiver treat it as VOD, so seeking is native (no live mode, no crash).
+     */
+    private fun castHls(video: VideoItem, probeResult: MediaProbeResult) {
+        val service = mediaServerService
+        if (service == null) {
+            AppLogger.error(TAG, "castHls: media server service is null")
+            Toast.makeText(this, R.string.server_not_ready, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val session = castSession
+        if (session == null) {
+            AppLogger.error(TAG, "castHls: cast session is null")
+            Toast.makeText(this, R.string.not_connected, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val remoteMediaClient = session.remoteMediaClient
+        if (remoteMediaClient == null) {
+            AppLogger.error(TAG, "castHls: remoteMediaClient is null")
+            Toast.makeText(this, R.string.error_cast, Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // HLS VOD is natively seekable, so this is not a live/transcode-restart session.
+        isLiveStreamSession = false
+        isTranscodeSession = false
+
+        val serverIp = getDeviceIpAddress()
+        val serverPort = service.getServerPort()
+        val hlsSession = HlsTranscodeSession(video.path, probeResult, selectedAudioTrack)
+        val playlistPath = service.registerHlsSession(video.title, hlsSession)
+        val playlistUrl = "http://$serverIp:$serverPort$playlistPath"
+        AppLogger.info(TAG, "castHls: url=$playlistUrl")
+
+        val metadata = MediaMetadata(MediaMetadata.MEDIA_TYPE_MOVIE).apply {
+            putString(MediaMetadata.KEY_TITLE, video.title)
+        }
+
+        val mediaTracks = mutableListOf<MediaTrack>()
+        val effectiveSubtitle = getEffectiveSubtitleFile()
+        if (effectiveSubtitle != null) {
+            val subtitlePath = service.registerSubtitle(effectiveSubtitle)
+            val subtitleUrl = "http://$serverIp:$serverPort$subtitlePath"
+            mediaTracks.add(
+                MediaTrack.Builder(1, MediaTrack.TYPE_TEXT)
+                    .setName("Subtitles")
+                    .setSubtype(MediaTrack.SUBTYPE_SUBTITLES)
+                    .setContentId(subtitleUrl)
+                    .setContentType("text/vtt")
+                    .setLanguage("en")
+                    .build()
+            )
+        }
+
+        val mediaInfo = MediaInfo.Builder(playlistUrl)
+            .setStreamType(MediaInfo.STREAM_TYPE_BUFFERED)
+            .setContentType("application/x-mpegurl")
+            .setHlsSegmentFormat(com.google.android.gms.cast.HlsSegmentFormat.FMP4)
+            .setHlsVideoSegmentFormat(com.google.android.gms.cast.HlsVideoSegmentFormat.FMP4)
+            .setMetadata(metadata)
+            .apply {
+                if (mediaTracks.isNotEmpty()) setMediaTracks(mediaTracks)
+                if (probeResult.durationMs > 0) {
+                    setStreamDuration(probeResult.durationMs * 1000)
+                }
+            }
+            .build()
+
+        val loadRequest = MediaLoadRequestData.Builder()
+            .setMediaInfo(mediaInfo)
+            .setAutoplay(true)
+            .setCurrentTime(pendingSeekPositionMs)
+            .apply {
+                if (mediaTracks.isNotEmpty()) setActiveTrackIds(longArrayOf(1))
+            }
+            .build()
+
+        if (mediaTracks.isNotEmpty()) {
+            remoteMediaClient.setTextTrackStyle(createSubtitleStyle())
+        }
+
+        AppLogger.info(TAG, "castHls: sending load request (HLS VOD, startPosition=${formatDuration(pendingSeekPositionMs)})")
+        remoteMediaClient.load(loadRequest).setResultCallback { result ->
+            val status = result.status
+            if (status.isSuccess) {
+                AppLogger.info(TAG, "castHls: load SUCCESS")
+                if (mediaTracks.isNotEmpty()) {
+                    remoteMediaClient.setTextTrackStyle(createSubtitleStyle())
+                }
+            } else {
+                AppLogger.error(TAG, "castHls: load FAILED - statusCode=${status.statusCode}, statusMessage=${status.statusMessage}")
+                result.mediaError?.let { logMediaError(it) }
                 runOnUiThread {
                     Toast.makeText(this, getString(R.string.cast_load_failed, status.statusMessage ?: "Unknown error"), Toast.LENGTH_LONG).show()
                 }
@@ -2049,6 +2160,8 @@ class VideoDetailActivity : AppCompatActivity() {
             SettingsActivity.getRealtimeTranscode(this)
         menu.findItem(R.id.action_copy_audio)?.isChecked =
             SettingsActivity.getCopyAudio(this)
+        menu.findItem(R.id.action_hls_seeking)?.isChecked =
+            SettingsActivity.getHlsSeeking(this)
         return super.onPrepareOptionsMenu(menu)
     }
 
@@ -2097,6 +2210,18 @@ class VideoDetailActivity : AppCompatActivity() {
                     Toast.LENGTH_SHORT
                 ).show()
                 AppLogger.info(TAG, "Copy audio toggled: $enabled")
+                true
+            }
+            R.id.action_hls_seeking -> {
+                val enabled = !item.isChecked
+                item.isChecked = enabled
+                SettingsActivity.setHlsSeeking(this, enabled)
+                Toast.makeText(
+                    this,
+                    if (enabled) R.string.hls_seeking_on else R.string.hls_seeking_off,
+                    Toast.LENGTH_SHORT
+                ).show()
+                AppLogger.info(TAG, "HLS seeking toggled: $enabled")
                 true
             }
             else -> super.onOptionsItemSelected(item)
