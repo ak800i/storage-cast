@@ -1560,6 +1560,12 @@ class VideoDetailActivity : AppCompatActivity() {
             }
             cachedProbeResult = probeResult
 
+            if (SettingsActivity.getRealtimeTranscode(this@VideoDetailActivity)) {
+                AppLogger.info(TAG, "Realtime transcoding enabled, forcing transcode")
+                startTranscoding(video, probeResult)
+                return@launch
+            }
+
             val result = castCompatibility.checkCompatibility(probeResult)
             if (result.isFullyCompatible) {
                 AppLogger.info(TAG, "All codecs compatible, casting directly")
