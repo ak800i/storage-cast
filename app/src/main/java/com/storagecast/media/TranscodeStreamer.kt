@@ -15,20 +15,29 @@ import java.io.PipedOutputStream
 import java.nio.ByteBuffer
 
 /**
- * Streaming transcoder that outputs MKV (Matroska) format via PipedInputStream.
- * Decodes and re-encodes video (→ H.264) and audio (→ AAC) while writing MKV data
- * to a pipe, allowing Cast streaming to start before the full transcode is complete.
+ * Streaming transcoder that outputs a **fragmented MP4 (fMP4 / CMAF-style)** stream
+ * via a [PipedInputStream]. Video is re-encoded to H.264 (AVC) and audio to AAC-LC,
+ * then muxed into an `init segment (ftyp + moov)` followed by a continuous sequence
+ * of `moof + mdat` media fragments. The stream is served as `video/mp4`.
+ *
+ * Why fragmented MP4 and not MKV: the Google Cast Default Media Receiver only
+ * supports the MP2T, MP3, MP4, OGG, WAV and WebM containers. Matroska/MKV is NOT a
+ * supported container, and WebM only carries VP8/VP9 + Vorbis/Opus (never H.264/AAC),
+ * so an H.264/AAC elementary stream must be wrapped in MP4. A plain MP4 cannot be
+ * produced as a live stream (its `moov` atom requires seeking back over the whole
+ * file), and [android.media.MediaMuxer] cannot write to a non-seekable pipe, so the
+ * fMP4 boxes are written here by hand.
  *
  * For video-passthrough + audio-transcode, use [createRemuxWithAudioTranscodeStream]
- * which copies the video track as-is and only re-encodes the audio.
+ * which copies the H.264 video track as-is and only re-encodes the audio.
  */
 class TranscodeStreamer {
 
     companion object {
         private const val TAG = "TranscodeStreamer"
-        private const val PIPE_BUFFER_SIZE = 2 * 1024 * 1024 // 2 MB
+        private const val PIPE_BUFFER_SIZE = 4 * 1024 * 1024 // 4 MB
 
-        // Transcode settings (matching VideoTranscoder)
+        // Output codec settings
         private const val OUTPUT_VIDEO_MIME = "video/avc"
         private const val OUTPUT_AUDIO_MIME = "audio/mp4a-latm"
         private const val OUTPUT_VIDEO_BITRATE = 8_000_000
@@ -42,58 +51,7 @@ class TranscodeStreamer {
         private const val MAX_HEIGHT = 1080
 
         /** Max attempts to pump encoder before falling back to configured format. */
-        private const val ENCODER_FORMAT_PUMP_ATTEMPTS = 100
-
-        // ──── EBML Element IDs ────
-        private const val EBML_HEADER = 0x1A45DFA3L
-        private const val EBML_VERSION = 0x4286L
-        private const val EBML_READ_VERSION = 0x42F7L
-        private const val EBML_MAX_ID_LENGTH = 0x42F2L
-        private const val EBML_MAX_SIZE_LENGTH = 0x42F3L
-        private const val DOC_TYPE = 0x4282L
-        private const val DOC_TYPE_VERSION = 0x4287L
-        private const val DOC_TYPE_READ_VERSION = 0x4285L
-
-        private const val SEGMENT = 0x18538067L
-        private const val INFO = 0x1549A966L
-        private const val TIMECODE_SCALE = 0x2AD7B1L
-        private const val MUXING_APP = 0x4D80L
-        private const val WRITING_APP = 0x5741L
-
-        private const val TRACKS = 0x1654AE6BL
-        private const val TRACK_ENTRY = 0xAEL
-        private const val TRACK_NUMBER = 0xD7L
-        private const val TRACK_UID = 0x73C5L
-        private const val TRACK_TYPE = 0x83L
-        private const val CODEC_ID = 0x86L
-        private const val CODEC_PRIVATE = 0x63A2L
-
-        private const val VIDEO = 0xE0L
-        private const val PIXEL_WIDTH = 0xB0L
-        private const val PIXEL_HEIGHT = 0xBAL
-
-        private const val AUDIO = 0xE1L
-        private const val SAMPLING_FREQUENCY = 0xB5L
-        private const val CHANNELS = 0x9FL
-
-        private const val CLUSTER = 0x1F43B675L
-        private const val CLUSTER_TIMECODE = 0xE7L
-        private const val SIMPLE_BLOCK = 0xA3L
-
-        // Track types
-        private const val TRACK_TYPE_VIDEO = 1
-        private const val TRACK_TYPE_AUDIO = 2
-
-        // Cluster boundary thresholds
-        private const val MIN_CLUSTER_DURATION_MS = 500L
-        private const val MAX_CLUSTER_DURATION_MS = 5000L
-
-        // MIME to MKV Codec ID mapping
-        private val MIME_TO_CODEC_ID = mapOf(
-            "video/avc" to "V_MPEG4/ISO/AVC",
-            "video/hevc" to "V_MPEGH/ISO/HEVC",
-            "audio/mp4a-latm" to "A_AAC",
-        )
+        private const val ENCODER_FORMAT_PUMP_ATTEMPTS = 200
     }
 
     @Volatile
@@ -110,8 +68,8 @@ class TranscodeStreamer {
 
     /**
      * Creates an InputStream that streams transcoded video (H.264) and audio (AAC)
-     * as a Matroska (MKV) container. Transcoding runs in a background thread;
-     * the returned stream can be served immediately by the HTTP server.
+     * as a fragmented MP4 container. Transcoding runs in a background thread; the
+     * returned stream can be served immediately by the HTTP server.
      */
     fun createTranscodeStream(
         inputPath: String,
@@ -125,7 +83,7 @@ class TranscodeStreamer {
 
         Thread {
             try {
-                transcodeToMkv(inputPath, probeResult, selectedAudioTrack, pipedOut, listener)
+                transcodeToFmp4(inputPath, probeResult, selectedAudioTrack, pipedOut, listener)
             } catch (e: IOException) {
                 // Pipe broken = reader closed (Cast device disconnected) — expected
                 AppLogger.info(TAG, "Transcode stream ended: ${e.message}")
@@ -144,9 +102,11 @@ class TranscodeStreamer {
     }
 
     /**
-     * Creates an InputStream that remuxes video (passthrough, no re-encoding) and
-     * transcodes audio (→ AAC) as a Matroska (MKV) container. Much faster than full
-     * transcode since video is just copied.
+     * Creates an InputStream that copies an H.264 video track (passthrough, no
+     * re-encoding) and re-encodes audio (→ AAC) as a fragmented MP4 container. Much
+     * faster than a full transcode since the video is just copied. If the source
+     * video is not H.264, falls back to a full transcode so the output is still a
+     * Cast-compatible MP4.
      */
     fun createRemuxWithAudioTranscodeStream(
         inputPath: String,
@@ -158,9 +118,17 @@ class TranscodeStreamer {
         val pipedOut = PipedOutputStream()
         val pipedIn = PipedInputStream(pipedOut, PIPE_BUFFER_SIZE)
 
+        val videoMime = probeResult.primaryVideo?.mime
+        val canPassthroughVideo = videoMime == null || videoMime.equals("video/avc", ignoreCase = true)
+
         Thread {
             try {
-                remuxWithAudioTranscodeToMkv(inputPath, probeResult, selectedAudioTrack, pipedOut, listener)
+                if (canPassthroughVideo) {
+                    remuxWithAudioTranscodeToFmp4(inputPath, probeResult, selectedAudioTrack, pipedOut, listener)
+                } else {
+                    AppLogger.info(TAG, "Video is $videoMime (not H.264), full-transcoding instead of passthrough")
+                    transcodeToFmp4(inputPath, probeResult, selectedAudioTrack, pipedOut, listener)
+                }
             } catch (e: IOException) {
                 AppLogger.info(TAG, "Remux stream ended: ${e.message}")
             } catch (e: Exception) {
@@ -177,9 +145,11 @@ class TranscodeStreamer {
         return pipedIn
     }
 
-    // ──── Full Transcode (video + audio) → MKV ────
+    // ──────────────────────────────────────────────────────────────────────────
+    //  Full transcode (video + audio) → fragmented MP4
+    // ──────────────────────────────────────────────────────────────────────────
 
-    private fun transcodeToMkv(
+    private fun transcodeToFmp4(
         inputPath: String,
         probeResult: MediaProbeResult,
         selectedAudioTrack: AudioTrackInfo?,
@@ -197,11 +167,12 @@ class TranscodeStreamer {
 
         val durationUs = if (probeResult.durationMs > 0) probeResult.durationMs * 1000 else 0L
 
-        // ── Set up video decoder + encoder ──
         var videoDecoder: MediaCodec? = null
         var videoEncoder: MediaCodec? = null
         var videoExtractor: MediaExtractor? = null
-        var videoEncoderOutputFormat: MediaFormat? = null
+        var videoEncoderFormat: MediaFormat? = null
+        var outWidth = 0
+        var outHeight = 0
 
         if (videoTrackInfo != null) {
             videoExtractor = MediaExtractor()
@@ -209,18 +180,17 @@ class TranscodeStreamer {
             videoExtractor.selectTrack(videoTrackInfo.trackIndex)
             val inputFormat = videoExtractor.getTrackFormat(videoTrackInfo.trackIndex)
 
-            // Determine output dimensions (cap at 1080p)
             val inWidth = videoTrackInfo.width
             val inHeight = videoTrackInfo.height
             if (inWidth <= 0 || inHeight <= 0) {
                 throw IllegalArgumentException("Invalid video dimensions: ${inWidth}x${inHeight}")
             }
             val scaleFactor = minOf(MAX_WIDTH.toFloat() / inWidth, MAX_HEIGHT.toFloat() / inHeight, 1f)
-            val outWidth = ((inWidth * scaleFactor).toInt() / 2) * 2
-            val outHeight = ((inHeight * scaleFactor).toInt() / 2) * 2
+            outWidth = ((inWidth * scaleFactor).toInt() / 2) * 2
+            outHeight = ((inHeight * scaleFactor).toInt() / 2) * 2
 
-            val outputBitrate = if (videoTrackInfo.bitrate > 0) {
-                minOf(videoTrackInfo.bitrate, OUTPUT_VIDEO_BITRATE)
+            val outputBitrate = if (videoTrackInfo.bitrate in 1 until OUTPUT_VIDEO_BITRATE) {
+                videoTrackInfo.bitrate
             } else OUTPUT_VIDEO_BITRATE
             val outputFrameRate = if (videoTrackInfo.frameRate > 0) {
                 videoTrackInfo.frameRate.toInt().coerceAtMost(OUTPUT_VIDEO_FRAME_RATE)
@@ -234,21 +204,16 @@ class TranscodeStreamer {
                 setInteger(MediaFormat.KEY_FRAME_RATE, outputFrameRate)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, OUTPUT_VIDEO_IFRAME_INTERVAL)
                 setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
+                // Discourage B-frames so PTS == DTS (no composition-time offsets needed in fMP4).
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                    try { setInteger(MediaFormat.KEY_LATENCY, 1) } catch (_: Exception) {}
+                }
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                    try { setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0) } catch (_: Exception) {}
+                }
             }
 
-            videoEncoder = try {
-                val codecName = selectHardwareEncoder(OUTPUT_VIDEO_MIME)
-                if (codecName != null) {
-                    AppLogger.info(TAG, "Using HW video encoder: $codecName")
-                    MediaCodec.createByCodecName(codecName)
-                } else {
-                    AppLogger.info(TAG, "No HW video encoder, using default")
-                    MediaCodec.createEncoderByType(OUTPUT_VIDEO_MIME)
-                }
-            } catch (e: Exception) {
-                AppLogger.warn(TAG, "HW video encoder setup failed, using default: ${e.message}")
-                MediaCodec.createEncoderByType(OUTPUT_VIDEO_MIME)
-            }
+            videoEncoder = createVideoEncoder()
             videoEncoder.configure(videoOutputFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
 
             videoDecoder.start()
@@ -256,16 +221,14 @@ class TranscodeStreamer {
 
             AppLogger.info(TAG, "Video transcode: ${videoTrackInfo.codec} ${videoTrackInfo.width}x${videoTrackInfo.height} → H.264 ${outWidth}x${outHeight}")
 
-            // Pump encoder to get output format (needed for MKV track header)
-            videoEncoderOutputFormat = pumpEncoderForOutputFormat(videoEncoder)
+            videoEncoderFormat = pumpEncoderForOutputFormat(videoEncoder)
             AppLogger.info(TAG, "Video encoder format ready")
         }
 
-        // ── Set up audio decoder + encoder ──
         var audioDecoder: MediaCodec? = null
         var audioEncoder: MediaCodec? = null
         var audioExtractor: MediaExtractor? = null
-        var audioEncoderOutputFormat: MediaFormat? = null
+        var audioEncoderFormat: MediaFormat? = null
 
         if (audioTrackInfo != null) {
             audioExtractor = MediaExtractor()
@@ -290,62 +253,58 @@ class TranscodeStreamer {
             audioEncoder.start()
 
             AppLogger.info(TAG, "Audio transcode: ${audioTrackInfo.codec} → AAC")
-
-            audioEncoderOutputFormat = pumpEncoderForOutputFormat(audioEncoder)
+            audioEncoderFormat = pumpEncoderForOutputFormat(audioEncoder)
             AppLogger.info(TAG, "Audio encoder format ready")
         }
 
+        // Build fMP4 track configs from the encoder output formats.
+        val videoConfig = if (videoEncoderFormat != null) {
+            val avcC = buildAvcConfigRecord(videoEncoderFormat)
+            if (avcC.isEmpty()) throw IOException("Failed to build avcC from encoder output")
+            val w = getIntSafe(videoEncoderFormat, MediaFormat.KEY_WIDTH, outWidth)
+            val h = getIntSafe(videoEncoderFormat, MediaFormat.KEY_HEIGHT, outHeight)
+            Fmp4Writer.VideoConfig(avcC, w, h)
+        } else null
+
+        val audioConfig = if (audioEncoderFormat != null) {
+            val asc = getCsdBytes(audioEncoderFormat, 0)
+                ?: throw IOException("Failed to read AAC codec config from encoder")
+            val sr = getIntSafe(audioEncoderFormat, MediaFormat.KEY_SAMPLE_RATE, OUTPUT_AUDIO_SAMPLE_RATE)
+            val ch = getIntSafe(audioEncoderFormat, MediaFormat.KEY_CHANNEL_COUNT, OUTPUT_AUDIO_CHANNEL_COUNT)
+            Fmp4Writer.AudioConfig(asc, sr, ch)
+        } else null
+
+        val writer = Fmp4Writer(out, videoConfig, audioConfig)
+
         try {
-            // ── Write MKV header ──
-            writeEbmlHeader(out)
-            writeElementId(out, SEGMENT)
-            writeUnknownSize(out)
-            writeSegmentInfo(out)
+            writer.writeInitSegment()
 
-            // ── Write Tracks element ──
-            writeTracksFromEncoderFormats(out, videoEncoderOutputFormat, audioEncoderOutputFormat)
-
-            // ── Interleaved transcode → write MKV clusters ──
-            writeTranscodedClusters(
-                out,
+            pumpTranscode(
+                writer,
                 videoExtractor, videoDecoder, videoEncoder,
                 audioExtractor, audioDecoder, audioEncoder,
                 durationUs, listener
             )
 
+            writer.finish()
             out.flush()
-            AppLogger.info(TAG, "Transcode MKV stream complete")
+            AppLogger.info(TAG, "Transcode fMP4 stream complete")
         } finally {
-            videoDecoder?.stop(); videoDecoder?.release()
-            videoEncoder?.stop(); videoEncoder?.release()
+            safeStopRelease(videoDecoder)
+            safeStopRelease(videoEncoder)
             videoExtractor?.release()
-            audioDecoder?.stop(); audioDecoder?.release()
-            audioEncoder?.stop(); audioEncoder?.release()
+            safeStopRelease(audioDecoder)
+            safeStopRelease(audioEncoder)
             audioExtractor?.release()
         }
     }
 
     /**
-     * Pumps an encoder until it emits INFO_OUTPUT_FORMAT_CHANGED, then returns the format.
-     * Some encoders need at least one input sample before they produce the output format.
+     * Interleaved decode→encode pump for the full-transcode path. Encoded samples are
+     * pushed into [writer] which buffers them into fMP4 fragments.
      */
-    private fun pumpEncoderForOutputFormat(encoder: MediaCodec): MediaFormat {
-        val bufferInfo = MediaCodec.BufferInfo()
-        for (i in 0 until ENCODER_FORMAT_PUMP_ATTEMPTS) {
-            val status = encoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
-            if (status == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                return encoder.outputFormat
-            }
-            if (status >= 0) {
-                encoder.releaseOutputBuffer(status, false)
-            }
-        }
-        // If format not obtained yet, return the configured format
-        return encoder.outputFormat
-    }
-
-    private fun writeTranscodedClusters(
-        out: OutputStream,
+    private fun pumpTranscode(
+        writer: Fmp4Writer,
         videoExtractor: MediaExtractor?,
         videoDecoder: MediaCodec?,
         videoEncoder: MediaCodec?,
@@ -355,46 +314,46 @@ class TranscodeStreamer {
         durationUs: Long,
         listener: ProgressListener?
     ) {
-        val clusterBuffer = ByteArrayOutputStream()
-        var clusterTimecodeMs = -1L
         val bufferInfo = MediaCodec.BufferInfo()
 
         var videoInputDone = videoExtractor == null
         var videoDecoderDone = videoDecoder == null
         var videoEncoderEosSent = videoEncoder == null
+        var videoEncoderDone = videoEncoder == null
         var audioInputDone = audioExtractor == null
         var audioDecoderDone = audioDecoder == null
         var audioEncoderEosSent = audioEncoder == null
+        var audioEncoderDone = audioEncoder == null
         var lastReportedProgress = -1
-        var allDone = false
 
-        while (!isCancelled && !allDone) {
+        while (!isCancelled && (!videoEncoderDone || !audioEncoderDone)) {
             // ── Feed video decoder ──
             if (!videoInputDone && videoExtractor != null && videoDecoder != null) {
                 val idx = videoDecoder.dequeueInputBuffer(TIMEOUT_US)
                 if (idx >= 0) {
-                    val buf = videoDecoder.getInputBuffer(idx) ?: continue
-                    val size = videoExtractor.readSampleData(buf, 0)
-                    if (size < 0) {
-                        videoDecoder.queueInputBuffer(idx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                        videoInputDone = true
-                    } else {
-                        val pts = videoExtractor.sampleTime
-                        videoDecoder.queueInputBuffer(idx, 0, size, pts, 0)
-                        videoExtractor.advance()
-
-                        if (durationUs > 0) {
-                            val progress = ((pts * 100) / durationUs).toInt().coerceIn(0, 100)
-                            if (progress != lastReportedProgress) {
-                                lastReportedProgress = progress
-                                listener?.onProgress(progress)
+                    val buf = videoDecoder.getInputBuffer(idx)
+                    if (buf != null) {
+                        val size = videoExtractor.readSampleData(buf, 0)
+                        if (size < 0) {
+                            videoDecoder.queueInputBuffer(idx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            videoInputDone = true
+                        } else {
+                            val pts = videoExtractor.sampleTime
+                            videoDecoder.queueInputBuffer(idx, 0, size, pts, 0)
+                            videoExtractor.advance()
+                            if (durationUs > 0) {
+                                val progress = ((pts * 100) / durationUs).toInt().coerceIn(0, 100)
+                                if (progress != lastReportedProgress) {
+                                    lastReportedProgress = progress
+                                    listener?.onProgress(progress)
+                                }
                             }
                         }
                     }
                 }
             }
 
-            // ── Decode video → encode ──
+            // ── Decode video → feed encoder ──
             if (!videoDecoderDone && videoDecoder != null && videoEncoder != null) {
                 val status = videoDecoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
                 if (status >= 0) {
@@ -415,8 +374,16 @@ class TranscodeStreamer {
                                         encIdx, 0, limit, bufferInfo.presentationTimeUs,
                                         if (isEos) MediaCodec.BUFFER_FLAG_END_OF_STREAM else 0
                                     )
+                                    if (isEos) videoEncoderEosSent = true
                                 }
                             }
+                        }
+                    } else if (isEos) {
+                        // Decoder reached EOS with an empty buffer — propagate to encoder.
+                        val encIdx = videoEncoder.dequeueInputBuffer(TIMEOUT_US)
+                        if (encIdx >= 0) {
+                            videoEncoder.queueInputBuffer(encIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            videoEncoderEosSent = true
                         }
                     }
                     videoDecoder.releaseOutputBuffer(status, false)
@@ -424,8 +391,8 @@ class TranscodeStreamer {
                 }
             }
 
-            // ── Drain video encoder → write to MKV ──
-            if (videoEncoder != null) {
+            // ── Drain video encoder → writer ──
+            if (videoEncoder != null && !videoEncoderDone) {
                 val encStatus = videoEncoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
                 if (encStatus >= 0) {
                     if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
@@ -434,39 +401,18 @@ class TranscodeStreamer {
                     if (bufferInfo.size > 0) {
                         val encodedBuf = videoEncoder.getOutputBuffer(encStatus)
                         if (encodedBuf != null) {
-                            val sampleTimeMs = bufferInfo.presentationTimeUs / 1000
-                            val isKeyframe = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
-
-                            val clusterAge = if (clusterTimecodeMs >= 0) sampleTimeMs - clusterTimecodeMs else 0
-                            val shouldStartNewCluster = clusterTimecodeMs < 0 ||
-                                (isKeyframe && clusterAge >= MIN_CLUSTER_DURATION_MS) ||
-                                clusterAge > MAX_CLUSTER_DURATION_MS
-
-                            if (shouldStartNewCluster) {
-                                if (clusterBuffer.size() > 0) {
-                                    writeElementId(out, CLUSTER)
-                                    writeElementSize(out, clusterBuffer.size().toLong())
-                                    clusterBuffer.writeTo(out)
-                                    out.flush()
-                                    clusterBuffer.reset()
-                                }
-                                clusterTimecodeMs = sampleTimeMs
-                                writeUintElement(clusterBuffer, CLUSTER_TIMECODE, clusterTimecodeMs)
-                            }
-
-                            val relativeTimeMs = (sampleTimeMs - clusterTimecodeMs).toInt().coerceIn(-32768, 32767)
+                            val isKey = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
                             val data = ByteArray(bufferInfo.size)
                             encodedBuf.position(bufferInfo.offset)
                             encodedBuf.get(data, 0, bufferInfo.size)
-                            writeSimpleBlock(clusterBuffer, 1, relativeTimeMs, isKeyframe, data)
+                            writer.addVideoSample(data, bufferInfo.presentationTimeUs, isKey)
                         }
                     }
                     videoEncoder.releaseOutputBuffer(encStatus, false)
                     if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
-                        // Video encoding done
+                        videoEncoderDone = true
                     }
                 }
-
                 if (videoDecoderDone && !videoEncoderEosSent && encStatus == MediaCodec.INFO_TRY_AGAIN_LATER) {
                     val idx = videoEncoder.dequeueInputBuffer(TIMEOUT_US)
                     if (idx >= 0) {
@@ -480,19 +426,21 @@ class TranscodeStreamer {
             if (!audioInputDone && audioExtractor != null && audioDecoder != null) {
                 val idx = audioDecoder.dequeueInputBuffer(TIMEOUT_US)
                 if (idx >= 0) {
-                    val buf = audioDecoder.getInputBuffer(idx) ?: continue
-                    val size = audioExtractor.readSampleData(buf, 0)
-                    if (size < 0) {
-                        audioDecoder.queueInputBuffer(idx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                        audioInputDone = true
-                    } else {
-                        audioDecoder.queueInputBuffer(idx, 0, size, audioExtractor.sampleTime, 0)
-                        audioExtractor.advance()
+                    val buf = audioDecoder.getInputBuffer(idx)
+                    if (buf != null) {
+                        val size = audioExtractor.readSampleData(buf, 0)
+                        if (size < 0) {
+                            audioDecoder.queueInputBuffer(idx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            audioInputDone = true
+                        } else {
+                            audioDecoder.queueInputBuffer(idx, 0, size, audioExtractor.sampleTime, 0)
+                            audioExtractor.advance()
+                        }
                     }
                 }
             }
 
-            // ── Decode audio → encode ──
+            // ── Decode audio → feed encoder ──
             if (!audioDecoderDone && audioDecoder != null && audioEncoder != null) {
                 val status = audioDecoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
                 if (status >= 0) {
@@ -513,8 +461,15 @@ class TranscodeStreamer {
                                         encIdx, 0, limit, bufferInfo.presentationTimeUs,
                                         if (isEos) MediaCodec.BUFFER_FLAG_END_OF_STREAM else 0
                                     )
+                                    if (isEos) audioEncoderEosSent = true
                                 }
                             }
+                        }
+                    } else if (isEos) {
+                        val encIdx = audioEncoder.dequeueInputBuffer(TIMEOUT_US)
+                        if (encIdx >= 0) {
+                            audioEncoder.queueInputBuffer(encIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            audioEncoderEosSent = true
                         }
                     }
                     audioDecoder.releaseOutputBuffer(status, false)
@@ -522,8 +477,8 @@ class TranscodeStreamer {
                 }
             }
 
-            // ── Drain audio encoder → write to MKV ──
-            if (audioEncoder != null) {
+            // ── Drain audio encoder → writer ──
+            if (audioEncoder != null && !audioEncoderDone) {
                 val encStatus = audioEncoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
                 if (encStatus >= 0) {
                     if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
@@ -532,27 +487,17 @@ class TranscodeStreamer {
                     if (bufferInfo.size > 0) {
                         val encodedBuf = audioEncoder.getOutputBuffer(encStatus)
                         if (encodedBuf != null) {
-                            val sampleTimeMs = bufferInfo.presentationTimeUs / 1000
-
-                            // Audio blocks go into the current cluster
-                            if (clusterTimecodeMs < 0) {
-                                clusterTimecodeMs = sampleTimeMs
-                                writeUintElement(clusterBuffer, CLUSTER_TIMECODE, clusterTimecodeMs)
-                            }
-
-                            val relativeTimeMs = (sampleTimeMs - clusterTimecodeMs).toInt().coerceIn(-32768, 32767)
                             val data = ByteArray(bufferInfo.size)
                             encodedBuf.position(bufferInfo.offset)
                             encodedBuf.get(data, 0, bufferInfo.size)
-                            writeSimpleBlock(clusterBuffer, 2, relativeTimeMs, false, data)
+                            writer.addAudioSample(data, bufferInfo.presentationTimeUs)
                         }
                     }
                     audioEncoder.releaseOutputBuffer(encStatus, false)
                     if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
-                        // Audio encoding done
+                        audioEncoderDone = true
                     }
                 }
-
                 if (audioDecoderDone && !audioEncoderEosSent && encStatus == MediaCodec.INFO_TRY_AGAIN_LATER) {
                     val idx = audioEncoder.dequeueInputBuffer(TIMEOUT_US)
                     if (idx >= 0) {
@@ -561,52 +506,14 @@ class TranscodeStreamer {
                     }
                 }
             }
-
-            // Check if all done
-            val videoDone = videoEncoder == null || (videoEncoderEosSent && videoDecoderDone)
-            val audioDone = audioEncoder == null || (audioEncoderEosSent && audioDecoderDone)
-            if (videoDone && audioDone) {
-                allDone = drainRemainingEncoderOutput(videoEncoder, audioEncoder, bufferInfo)
-            }
-        }
-
-        // Flush final cluster
-        if (clusterBuffer.size() > 0) {
-            writeElementId(out, CLUSTER)
-            writeElementSize(out, clusterBuffer.size().toLong())
-            clusterBuffer.writeTo(out)
-            out.flush()
         }
     }
 
-    /** Drains any remaining encoder output buffers and returns true when fully drained. */
-    private fun drainRemainingEncoderOutput(
-        videoEncoder: MediaCodec?,
-        audioEncoder: MediaCodec?,
-        bufferInfo: MediaCodec.BufferInfo
-    ): Boolean {
-        var videoDrained = videoEncoder == null
-        if (videoEncoder != null) {
-            val s = videoEncoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
-            if (s >= 0) {
-                videoDrained = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
-                videoEncoder.releaseOutputBuffer(s, false)
-            } else {
-                videoDrained = true
-            }
-        }
-        if (!videoDrained) return false
+    // ──────────────────────────────────────────────────────────────────────────
+    //  Video passthrough + audio transcode → fragmented MP4
+    // ──────────────────────────────────────────────────────────────────────────
 
-        if (audioEncoder != null) {
-            val s = audioEncoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
-            if (s >= 0) audioEncoder.releaseOutputBuffer(s, false)
-        }
-        return true
-    }
-
-    // ──── Video Passthrough + Audio Transcode → MKV ────
-
-    private fun remuxWithAudioTranscodeToMkv(
+    private fun remuxWithAudioTranscodeToFmp4(
         inputPath: String,
         probeResult: MediaProbeResult,
         selectedAudioTrack: AudioTrackInfo,
@@ -617,7 +524,7 @@ class TranscodeStreamer {
         val videoTrack = probeResult.primaryVideo
         val durationUs = if (probeResult.durationMs > 0) probeResult.durationMs * 1000 else 0L
 
-        // ── Set up audio transcode pipeline ──
+        // ── Audio transcode pipeline ──
         val audioExtractor = MediaExtractor()
         audioExtractor.setDataSource(inputPath)
         audioExtractor.selectTrack(selectedAudioTrack.trackIndex)
@@ -636,114 +543,85 @@ class TranscodeStreamer {
         audioEncoder.configure(audioOutputFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         audioDecoder.start()
         audioEncoder.start()
-
         AppLogger.info(TAG, "Audio transcode: ${selectedAudioTrack.codec} → AAC")
-        val audioEncoderOutputFormat = pumpEncoderForOutputFormat(audioEncoder)
+        val audioEncoderFormat = pumpEncoderForOutputFormat(audioEncoder)
 
-        // ── Set up video passthrough ──
+        // ── Video passthrough setup ──
         val videoExtractor = MediaExtractor()
         videoExtractor.setDataSource(inputPath)
-        var videoFormat: MediaFormat? = null
-        var videoMime: String? = null
+        var videoConfig: Fmp4Writer.VideoConfig? = null
         if (videoTrack != null) {
             videoExtractor.selectTrack(videoTrack.trackIndex)
-            videoFormat = videoExtractor.getTrackFormat(videoTrack.trackIndex)
-            videoMime = videoFormat.getString(MediaFormat.KEY_MIME) ?: "video/avc"
-            AppLogger.info(TAG, "Video passthrough: ${videoTrack.codec} ${videoTrack.width}x${videoTrack.height}")
+            val videoFormat = videoExtractor.getTrackFormat(videoTrack.trackIndex)
+            val avcC = buildAvcConfigRecord(videoFormat)
+            if (avcC.isEmpty()) throw IOException("Failed to build avcC from input video format")
+            val w = getIntSafe(videoFormat, MediaFormat.KEY_WIDTH, videoTrack.width)
+            val h = getIntSafe(videoFormat, MediaFormat.KEY_HEIGHT, videoTrack.height)
+            videoConfig = Fmp4Writer.VideoConfig(avcC, w, h)
+            AppLogger.info(TAG, "Video passthrough: ${videoTrack.codec} ${w}x${h}")
         }
 
+        val asc = getCsdBytes(audioEncoderFormat, 0)
+            ?: throw IOException("Failed to read AAC codec config from encoder")
+        val audioConfig = Fmp4Writer.AudioConfig(
+            asc,
+            getIntSafe(audioEncoderFormat, MediaFormat.KEY_SAMPLE_RATE, OUTPUT_AUDIO_SAMPLE_RATE),
+            getIntSafe(audioEncoderFormat, MediaFormat.KEY_CHANNEL_COUNT, OUTPUT_AUDIO_CHANNEL_COUNT)
+        )
+
+        val writer = Fmp4Writer(out, videoConfig, audioConfig)
+
         try {
-            // ── Write MKV header ──
-            writeEbmlHeader(out)
-            writeElementId(out, SEGMENT)
-            writeUnknownSize(out)
-            writeSegmentInfo(out)
-
-            // ── Write Tracks element ──
-            val tracksContent = ByteArrayOutputStream()
-            if (videoFormat != null && videoMime != null) {
-                writeVideoTrackEntryFromFormat(tracksContent, videoFormat, videoMime)
-            }
-            writeAudioTrackEntryFromEncoderFormat(tracksContent, audioEncoderOutputFormat)
-            writeElementId(out, TRACKS)
-            writeElementSize(out, tracksContent.size().toLong())
-            tracksContent.writeTo(out)
-
-            // ── Interleaved write: video passthrough + audio transcode ──
-            writeRemuxClusters(
-                out, videoExtractor, videoTrack?.trackIndex ?: -1,
-                audioExtractor, audioDecoder, audioEncoder,
-                durationUs, listener
-            )
-
+            writer.writeInitSegment()
+            pumpRemux(writer, videoExtractor, videoConfig != null, audioExtractor, audioDecoder, audioEncoder, durationUs, listener)
+            writer.finish()
             out.flush()
-            AppLogger.info(TAG, "Remux with audio transcode MKV stream complete")
+            AppLogger.info(TAG, "Remux+audio-transcode fMP4 stream complete")
         } finally {
-            audioDecoder.stop(); audioDecoder.release()
-            audioEncoder.stop(); audioEncoder.release()
+            safeStopRelease(audioDecoder)
+            safeStopRelease(audioEncoder)
             audioExtractor.release()
             videoExtractor.release()
         }
     }
 
-    private fun writeRemuxClusters(
-        out: OutputStream,
+    private fun pumpRemux(
+        writer: Fmp4Writer,
         videoExtractor: MediaExtractor,
-        videoTrackIndex: Int,
+        hasVideo: Boolean,
         audioExtractor: MediaExtractor,
         audioDecoder: MediaCodec,
         audioEncoder: MediaCodec,
         durationUs: Long,
         listener: ProgressListener?
     ) {
-        val clusterBuffer = ByteArrayOutputStream()
-        var clusterTimecodeMs = -1L
-        val sampleBuffer = ByteBuffer.allocate(1024 * 1024)
+        val sampleBuffer = ByteBuffer.allocate(2 * 1024 * 1024)
         val bufferInfo = MediaCodec.BufferInfo()
 
-        var videoPassthroughDone = videoTrackIndex < 0
+        var videoDone = !hasVideo
         var audioInputDone = false
         var audioDecoderDone = false
         var audioEncoderEosSent = false
+        var audioEncoderDone = false
         var lastReportedProgress = -1
 
-        while (!isCancelled) {
+        while (!isCancelled && (!videoDone || !audioEncoderDone)) {
             // ── Video passthrough ──
-            if (!videoPassthroughDone) {
+            if (!videoDone) {
                 sampleBuffer.clear()
                 val sampleSize = videoExtractor.readSampleData(sampleBuffer, 0)
                 if (sampleSize < 0) {
-                    videoPassthroughDone = true
+                    videoDone = true
                 } else {
-                    val sampleTimeMs = videoExtractor.sampleTime / 1000
-                    val isKeyframe = (videoExtractor.sampleFlags and android.media.MediaExtractor.SAMPLE_FLAG_SYNC) != 0
-
-                    val clusterAge = if (clusterTimecodeMs >= 0) sampleTimeMs - clusterTimecodeMs else 0
-                    val shouldStartNewCluster = clusterTimecodeMs < 0 ||
-                        (isKeyframe && clusterAge >= MIN_CLUSTER_DURATION_MS) ||
-                        clusterAge > MAX_CLUSTER_DURATION_MS
-
-                    if (shouldStartNewCluster) {
-                        if (clusterBuffer.size() > 0) {
-                            writeElementId(out, CLUSTER)
-                            writeElementSize(out, clusterBuffer.size().toLong())
-                            clusterBuffer.writeTo(out)
-                            out.flush()
-                            clusterBuffer.reset()
-                        }
-                        clusterTimecodeMs = sampleTimeMs
-                        writeUintElement(clusterBuffer, CLUSTER_TIMECODE, clusterTimecodeMs)
-                    }
-
-                    val relativeTimeMs = (sampleTimeMs - clusterTimecodeMs).toInt().coerceIn(-32768, 32767)
+                    val ptsUs = videoExtractor.sampleTime
+                    val isKey = (videoExtractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC) != 0
                     val data = ByteArray(sampleSize)
                     sampleBuffer.position(0)
                     sampleBuffer.get(data, 0, sampleSize)
-                    writeSimpleBlock(clusterBuffer, 1, relativeTimeMs, isKeyframe, data)
+                    writer.addVideoSample(data, ptsUs, isKey)
                     videoExtractor.advance()
-
                     if (durationUs > 0) {
-                        val progress = ((videoExtractor.sampleTime * 100) / durationUs).toInt().coerceIn(0, 100)
+                        val progress = ((ptsUs * 100) / durationUs).toInt().coerceIn(0, 100)
                         if (progress != lastReportedProgress) {
                             lastReportedProgress = progress
                             listener?.onProgress(progress)
@@ -752,7 +630,7 @@ class TranscodeStreamer {
                 }
             }
 
-            // ── Audio decode → encode → write ──
+            // ── Feed audio decoder ──
             if (!audioInputDone) {
                 val idx = audioDecoder.dequeueInputBuffer(TIMEOUT_US)
                 if (idx >= 0) {
@@ -770,6 +648,7 @@ class TranscodeStreamer {
                 }
             }
 
+            // ── Decode audio → feed encoder ──
             if (!audioDecoderDone) {
                 val status = audioDecoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
                 if (status >= 0) {
@@ -790,8 +669,15 @@ class TranscodeStreamer {
                                         encIdx, 0, limit, bufferInfo.presentationTimeUs,
                                         if (isEos) MediaCodec.BUFFER_FLAG_END_OF_STREAM else 0
                                     )
+                                    if (isEos) audioEncoderEosSent = true
                                 }
                             }
+                        }
+                    } else if (isEos) {
+                        val encIdx = audioEncoder.dequeueInputBuffer(TIMEOUT_US)
+                        if (encIdx >= 0) {
+                            audioEncoder.queueInputBuffer(encIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            audioEncoderEosSent = true
                         }
                     }
                     audioDecoder.releaseOutputBuffer(status, false)
@@ -799,212 +685,157 @@ class TranscodeStreamer {
                 }
             }
 
-            val encStatus = audioEncoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
-            if (encStatus >= 0) {
-                if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
-                    bufferInfo.size = 0
-                }
-                if (bufferInfo.size > 0) {
-                    val encodedBuf = audioEncoder.getOutputBuffer(encStatus)
-                    if (encodedBuf != null) {
-                        val sampleTimeMs = bufferInfo.presentationTimeUs / 1000
-                        if (clusterTimecodeMs < 0) {
-                            clusterTimecodeMs = sampleTimeMs
-                            writeUintElement(clusterBuffer, CLUSTER_TIMECODE, clusterTimecodeMs)
+            // ── Drain audio encoder → writer ──
+            if (!audioEncoderDone) {
+                val encStatus = audioEncoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
+                if (encStatus >= 0) {
+                    if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
+                        bufferInfo.size = 0
+                    }
+                    if (bufferInfo.size > 0) {
+                        val encodedBuf = audioEncoder.getOutputBuffer(encStatus)
+                        if (encodedBuf != null) {
+                            val data = ByteArray(bufferInfo.size)
+                            encodedBuf.position(bufferInfo.offset)
+                            encodedBuf.get(data, 0, bufferInfo.size)
+                            writer.addAudioSample(data, bufferInfo.presentationTimeUs)
                         }
-                        val relativeTimeMs = (sampleTimeMs - clusterTimecodeMs).toInt().coerceIn(-32768, 32767)
-                        val data = ByteArray(bufferInfo.size)
-                        encodedBuf.position(bufferInfo.offset)
-                        encodedBuf.get(data, 0, bufferInfo.size)
-                        writeSimpleBlock(clusterBuffer, 2, relativeTimeMs, false, data)
+                    }
+                    audioEncoder.releaseOutputBuffer(encStatus, false)
+                    if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
+                        audioEncoderDone = true
                     }
                 }
-                audioEncoder.releaseOutputBuffer(encStatus, false)
-                if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0 && videoPassthroughDone) {
-                    break
-                }
-            }
-
-            if (audioDecoderDone && !audioEncoderEosSent && encStatus == MediaCodec.INFO_TRY_AGAIN_LATER) {
-                val idx = audioEncoder.dequeueInputBuffer(TIMEOUT_US)
-                if (idx >= 0) {
-                    audioEncoder.queueInputBuffer(idx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                    audioEncoderEosSent = true
-                }
-            }
-
-            if (videoPassthroughDone && audioEncoderEosSent && audioDecoderDone) {
-                // Drain remaining audio encoder output
-                val s = audioEncoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
-                if (s >= 0) {
-                    audioEncoder.releaseOutputBuffer(s, false)
-                    if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) break
-                } else if (s == MediaCodec.INFO_TRY_AGAIN_LATER) {
-                    break
+                if (audioDecoderDone && !audioEncoderEosSent && encStatus == MediaCodec.INFO_TRY_AGAIN_LATER) {
+                    val idx = audioEncoder.dequeueInputBuffer(TIMEOUT_US)
+                    if (idx >= 0) {
+                        audioEncoder.queueInputBuffer(idx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                        audioEncoderEosSent = true
+                    }
                 }
             }
         }
+    }
 
-        // Flush final cluster
-        if (clusterBuffer.size() > 0) {
-            writeElementId(out, CLUSTER)
-            writeElementSize(out, clusterBuffer.size().toLong())
-            clusterBuffer.writeTo(out)
-            out.flush()
+    // ──────────────────────────────────────────────────────────────────────────
+    //  Codec / encoder helpers
+    // ──────────────────────────────────────────────────────────────────────────
+
+    private fun createVideoEncoder(): MediaCodec {
+        return try {
+            val codecName = selectHardwareEncoder(OUTPUT_VIDEO_MIME)
+            if (codecName != null) {
+                AppLogger.info(TAG, "Using HW video encoder: $codecName")
+                MediaCodec.createByCodecName(codecName)
+            } else {
+                AppLogger.info(TAG, "No HW video encoder, using default")
+                MediaCodec.createEncoderByType(OUTPUT_VIDEO_MIME)
+            }
+        } catch (e: Exception) {
+            AppLogger.warn(TAG, "HW video encoder setup failed, using default: ${e.message}")
+            MediaCodec.createEncoderByType(OUTPUT_VIDEO_MIME)
         }
     }
 
-    // ──── MKV Track Writing ────
-
-    private fun writeTracksFromEncoderFormats(
-        out: OutputStream,
-        videoFormat: MediaFormat?,
-        audioFormat: MediaFormat?
-    ) {
-        val content = ByteArrayOutputStream()
-
-        if (videoFormat != null) {
-            val mime = videoFormat.getString(MediaFormat.KEY_MIME) ?: OUTPUT_VIDEO_MIME
-            writeVideoTrackEntryFromFormat(content, videoFormat, mime)
+    /**
+     * Pumps an encoder until it emits INFO_OUTPUT_FORMAT_CHANGED, then returns the
+     * format (which carries the codec-specific data needed for the fMP4 sample entry).
+     */
+    private fun pumpEncoderForOutputFormat(encoder: MediaCodec): MediaFormat {
+        val bufferInfo = MediaCodec.BufferInfo()
+        for (i in 0 until ENCODER_FORMAT_PUMP_ATTEMPTS) {
+            val status = encoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
+            if (status == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                return encoder.outputFormat
+            }
+            if (status >= 0) {
+                // Released without consuming; encoder has not produced its format yet.
+                encoder.releaseOutputBuffer(status, false)
+            }
         }
-        if (audioFormat != null) {
-            writeAudioTrackEntryFromEncoderFormat(content, audioFormat)
-        }
-
-        writeElementId(out, TRACKS)
-        writeElementSize(out, content.size().toLong())
-        content.writeTo(out)
+        return encoder.outputFormat
     }
 
-    private fun writeVideoTrackEntryFromFormat(out: OutputStream, format: MediaFormat, mime: String) {
-        val entry = ByteArrayOutputStream()
-
-        writeUintElement(entry, TRACK_NUMBER, 1)
-        writeUintElement(entry, TRACK_UID, 1)
-        writeUintElement(entry, TRACK_TYPE, TRACK_TYPE_VIDEO.toLong())
-        writeStringElement(entry, CODEC_ID, MIME_TO_CODEC_ID[mime] ?: "V_MPEG4/ISO/AVC")
-
-        // CodecPrivate from encoder output format (csd-0/csd-1)
-        val codecPrivate = buildVideoCodecPrivate(format, mime)
-        if (codecPrivate.isNotEmpty()) {
-            writeBinaryElement(entry, CODEC_PRIVATE, codecPrivate)
-        }
-
-        // Video element
-        val videoContent = ByteArrayOutputStream()
-        val width = getIntSafe(format, MediaFormat.KEY_WIDTH, 0)
-        val height = getIntSafe(format, MediaFormat.KEY_HEIGHT, 0)
-        writeUintElement(videoContent, PIXEL_WIDTH, width.toLong())
-        writeUintElement(videoContent, PIXEL_HEIGHT, height.toLong())
-        writeElementId(entry, VIDEO)
-        writeElementSize(entry, videoContent.size().toLong())
-        videoContent.writeTo(entry)
-
-        writeElementId(out, TRACK_ENTRY)
-        writeElementSize(out, entry.size().toLong())
-        entry.writeTo(out)
+    private fun selectHardwareEncoder(mime: String): String? {
+        val codecList = MediaCodecList(MediaCodecList.REGULAR_CODECS)
+        return codecList.codecInfos
+            .filter { it.isEncoder && it.isHardwareAccelerated }
+            .firstOrNull { info ->
+                info.supportedTypes.any { it.equals(mime, ignoreCase = true) }
+            }?.name
     }
 
-    private fun writeAudioTrackEntryFromEncoderFormat(out: OutputStream, format: MediaFormat) {
-        val entry = ByteArrayOutputStream()
-
-        writeUintElement(entry, TRACK_NUMBER, 2)
-        writeUintElement(entry, TRACK_UID, 2)
-        writeUintElement(entry, TRACK_TYPE, TRACK_TYPE_AUDIO.toLong())
-        writeStringElement(entry, CODEC_ID, "A_AAC")
-
-        // CodecPrivate for AAC
-        val codecPrivate = getCsdBytes(format, 0) ?: ByteArray(0)
-        if (codecPrivate.isNotEmpty()) {
-            writeBinaryElement(entry, CODEC_PRIVATE, codecPrivate)
-        }
-
-        // Audio element
-        val audioContent = ByteArrayOutputStream()
-        val sampleRate = getIntSafe(format, MediaFormat.KEY_SAMPLE_RATE, OUTPUT_AUDIO_SAMPLE_RATE)
-        val channels = getIntSafe(format, MediaFormat.KEY_CHANNEL_COUNT, OUTPUT_AUDIO_CHANNEL_COUNT)
-        writeFloat64Element(audioContent, SAMPLING_FREQUENCY, sampleRate.toDouble())
-        writeUintElement(audioContent, CHANNELS, channels.toLong())
-        writeElementId(entry, AUDIO)
-        writeElementSize(entry, audioContent.size().toLong())
-        audioContent.writeTo(entry)
-
-        writeElementId(out, TRACK_ENTRY)
-        writeElementSize(out, entry.size().toLong())
-        entry.writeTo(out)
+    private fun safeStopRelease(codec: MediaCodec?) {
+        if (codec == null) return
+        try { codec.stop() } catch (_: Exception) {}
+        try { codec.release() } catch (_: Exception) {}
     }
 
-    // ──── Codec Private Data ────
-
-    private fun buildVideoCodecPrivate(format: MediaFormat, mime: String): ByteArray {
-        return when (mime) {
-            "video/avc" -> buildAvcConfigRecord(format)
-            else -> getCsdBytes(format, 0) ?: ByteArray(0)
-        }
-    }
-
+    /**
+     * Builds an AVCDecoderConfigurationRecord (the contents of the `avcC` box) from a
+     * [MediaFormat]. Handles both Annex-B SPS/PPS in `csd-0`/`csd-1` (encoder output
+     * and most MP4/MKV inputs) and a format that already exposes a packaged avcC record.
+     */
     private fun buildAvcConfigRecord(format: MediaFormat): ByteArray {
-        val csd0 = format.getByteBuffer("csd-0") ?: return ByteArray(0)
-        val csd1 = format.getByteBuffer("csd-1")
+        val csd0 = getCsdBytes(format, 0) ?: return ByteArray(0)
 
+        // Already a packaged avcC record? (configurationVersion == 1 and no start code)
+        if (csd0.isNotEmpty() && csd0[0].toInt() == 1 && startCodeLength(csd0, 0) == 0) {
+            return csd0
+        }
+
+        val csd1 = getCsdBytes(format, 1)
         val spsNalus = parseAnnexBNalus(csd0)
         val ppsNalus = if (csd1 != null) parseAnnexBNalus(csd1) else emptyList()
 
-        if (spsNalus.isEmpty()) {
-            AppLogger.warn(TAG, "No SPS found in csd-0")
+        // Some inputs pack both SPS and PPS into csd-0.
+        val sps = spsNalus.filter { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 7 }
+        val pps = (spsNalus + ppsNalus).filter { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 8 }
+
+        if (sps.isEmpty()) {
+            AppLogger.warn(TAG, "No SPS found while building avcC")
             return ByteArray(0)
         }
-
-        val sps = spsNalus[0]
-        if (sps.size < 4) {
-            AppLogger.warn(TAG, "SPS too short: ${sps.size} bytes")
+        val sps0 = sps[0]
+        if (sps0.size < 4) {
+            AppLogger.warn(TAG, "SPS too short: ${sps0.size} bytes")
             return ByteArray(0)
         }
 
         val output = ByteArrayOutputStream()
-        output.write(1)                          // configurationVersion
-        output.write(sps[1].toInt() and 0xFF)    // AVCProfileIndication
-        output.write(sps[2].toInt() and 0xFF)    // profile_compatibility
-        output.write(sps[3].toInt() and 0xFF)    // AVCLevelIndication
-        output.write(0xFF)                       // lengthSizeMinusOne = 3
+        output.write(1)                       // configurationVersion
+        output.write(sps0[1].toInt() and 0xFF) // AVCProfileIndication
+        output.write(sps0[2].toInt() and 0xFF) // profile_compatibility
+        output.write(sps0[3].toInt() and 0xFF) // AVCLevelIndication
+        output.write(0xFF)                    // 6 bits reserved + lengthSizeMinusOne = 3
 
-        output.write(0xE0 or spsNalus.size)
-        for (nalu in spsNalus) {
+        output.write(0xE0 or (sps.size and 0x1F)) // 3 bits reserved + numOfSPS
+        for (nalu in sps) {
             output.write((nalu.size shr 8) and 0xFF)
             output.write(nalu.size and 0xFF)
             output.write(nalu)
         }
-
-        output.write(ppsNalus.size)
-        for (nalu in ppsNalus) {
+        output.write(pps.size and 0xFF)
+        for (nalu in pps) {
             output.write((nalu.size shr 8) and 0xFF)
             output.write(nalu.size and 0xFF)
             output.write(nalu)
         }
-
         return output.toByteArray()
     }
 
-    private fun parseAnnexBNalus(buffer: ByteBuffer): List<ByteArray> {
-        val data = ByteArray(buffer.remaining())
-        val pos = buffer.position()
-        buffer.get(data)
-        buffer.position(pos)
-
+    private fun parseAnnexBNalus(data: ByteArray): List<ByteArray> {
         val nalus = mutableListOf<ByteArray>()
         var i = 0
-
         while (i < data.size) {
             val scLen = startCodeLength(data, i)
             if (scLen == 0) { i++; continue }
-
             val naluStart = i + scLen
             var naluEnd = data.size
-            for (j in naluStart until data.size) {
-                if (startCodeLength(data, j) > 0) {
-                    naluEnd = j
-                    break
-                }
+            var j = naluStart
+            while (j < data.size) {
+                if (startCodeLength(data, j) > 0) { naluEnd = j; break }
+                j++
             }
             if (naluEnd > naluStart) {
                 nalus.add(data.copyOfRange(naluStart, naluEnd))
@@ -1024,15 +855,12 @@ class TranscodeStreamer {
         return 0
     }
 
-    // ──── CSD / Format Helpers ────
-
     private fun getCsdBytes(format: MediaFormat, index: Int): ByteArray? {
         return try {
             val buffer = format.getByteBuffer("csd-$index") ?: return null
-            val data = ByteArray(buffer.remaining())
-            val pos = buffer.position()
-            buffer.get(data)
-            buffer.position(pos)
+            val dup = buffer.duplicate()
+            val data = ByteArray(dup.remaining())
+            dup.get(data)
             data
         } catch (e: Exception) { null }
     }
@@ -1041,148 +869,5 @@ class TranscodeStreamer {
         return try {
             if (format.containsKey(key)) format.getInteger(key) else default
         } catch (e: Exception) { default }
-    }
-
-    // ──── EBML Writing ────
-
-    private fun writeEbmlHeader(out: OutputStream) {
-        val content = ByteArrayOutputStream()
-        writeUintElement(content, EBML_VERSION, 1)
-        writeUintElement(content, EBML_READ_VERSION, 1)
-        writeUintElement(content, EBML_MAX_ID_LENGTH, 4)
-        writeUintElement(content, EBML_MAX_SIZE_LENGTH, 8)
-        writeStringElement(content, DOC_TYPE, "matroska")
-        writeUintElement(content, DOC_TYPE_VERSION, 4)
-        writeUintElement(content, DOC_TYPE_READ_VERSION, 2)
-
-        writeElementId(out, EBML_HEADER)
-        writeElementSize(out, content.size().toLong())
-        content.writeTo(out)
-    }
-
-    private fun writeSegmentInfo(out: OutputStream) {
-        val content = ByteArrayOutputStream()
-        writeUintElement(content, TIMECODE_SCALE, 1_000_000)
-        writeUtf8Element(content, MUXING_APP, "StorageCast")
-        writeUtf8Element(content, WRITING_APP, "StorageCast")
-
-        writeElementId(out, INFO)
-        writeElementSize(out, content.size().toLong())
-        content.writeTo(out)
-    }
-
-    private fun writeSimpleBlock(
-        out: OutputStream, trackNumber: Int, relativeTimeMs: Int, keyframe: Boolean, data: ByteArray
-    ) {
-        val trackVint = encodeTrackVint(trackNumber)
-        val totalSize = trackVint.size + 2 + 1 + data.size
-
-        writeElementId(out, SIMPLE_BLOCK)
-        writeElementSize(out, totalSize.toLong())
-        out.write(trackVint)
-        out.write((relativeTimeMs shr 8) and 0xFF)
-        out.write(relativeTimeMs and 0xFF)
-        out.write(if (keyframe) 0x80 else 0x00)
-        out.write(data)
-    }
-
-    private fun writeElementId(out: OutputStream, id: Long) {
-        val bytes = when {
-            id < 0x100L -> 1
-            id < 0x10000L -> 2
-            id < 0x1000000L -> 3
-            else -> 4
-        }
-        for (i in bytes - 1 downTo 0) {
-            out.write(((id shr (i * 8)) and 0xFF).toInt())
-        }
-    }
-
-    private fun writeElementSize(out: OutputStream, size: Long) {
-        if (size < 0) { writeUnknownSize(out); return }
-        val numBytes = when {
-            size < 0x7FL -> 1
-            size < 0x3FFFL -> 2
-            size < 0x1FFFFFL -> 3
-            size < 0x0FFFFFFFL -> 4
-            size < 0x07FFFFFFFFL -> 5
-            size < 0x03FFFFFFFFFFL -> 6
-            size < 0x01FFFFFFFFFFFFL -> 7
-            else -> 8
-        }
-        val marker = 1L shl (7 * numBytes)
-        val value = marker or size
-        for (i in numBytes - 1 downTo 0) {
-            out.write(((value shr (i * 8)) and 0xFF).toInt())
-        }
-    }
-
-    private fun writeUnknownSize(out: OutputStream) {
-        out.write(0x01)
-        for (i in 0 until 7) out.write(0xFF)
-    }
-
-    private fun writeUintElement(out: OutputStream, id: Long, value: Long) {
-        writeElementId(out, id)
-        val numBytes = when {
-            value < 0x100L -> 1
-            value < 0x10000L -> 2
-            value < 0x1000000L -> 3
-            value < 0x100000000L -> 4
-            else -> 8
-        }
-        writeElementSize(out, numBytes.toLong())
-        for (i in numBytes - 1 downTo 0) {
-            out.write(((value shr (i * 8)) and 0xFF).toInt())
-        }
-    }
-
-    private fun writeStringElement(out: OutputStream, id: Long, value: String) {
-        val bytes = value.toByteArray(Charsets.US_ASCII)
-        writeElementId(out, id)
-        writeElementSize(out, bytes.size.toLong())
-        out.write(bytes)
-    }
-
-    private fun writeUtf8Element(out: OutputStream, id: Long, value: String) {
-        val bytes = value.toByteArray(Charsets.UTF_8)
-        writeElementId(out, id)
-        writeElementSize(out, bytes.size.toLong())
-        out.write(bytes)
-    }
-
-    private fun writeFloat64Element(out: OutputStream, id: Long, value: Double) {
-        writeElementId(out, id)
-        writeElementSize(out, 8)
-        val bits = java.lang.Double.doubleToLongBits(value)
-        for (i in 7 downTo 0) {
-            out.write(((bits shr (i * 8)) and 0xFF).toInt())
-        }
-    }
-
-    private fun writeBinaryElement(out: OutputStream, id: Long, data: ByteArray) {
-        writeElementId(out, id)
-        writeElementSize(out, data.size.toLong())
-        out.write(data)
-    }
-
-    private fun encodeTrackVint(trackNumber: Int): ByteArray {
-        return when {
-            trackNumber < 0x80 -> byteArrayOf((trackNumber or 0x80).toByte())
-            trackNumber < 0x4000 -> byteArrayOf(
-                ((trackNumber shr 8) or 0x40).toByte(),
-                (trackNumber and 0xFF).toByte()
-            )
-            else -> throw IOException("Track number too large: $trackNumber")
-        }
-    }
-
-    private fun selectHardwareEncoder(mime: String): String? {
-        val codecList = MediaCodecList(MediaCodecList.REGULAR_CODECS)
-        return codecList.codecInfos
-            .filter { it.isEncoder && it.isHardwareAccelerated }
-            .firstOrNull { info ->
-                info.supportedTypes.any { it.equals(mime, ignoreCase = true) }
-            }?.name
     }
 }

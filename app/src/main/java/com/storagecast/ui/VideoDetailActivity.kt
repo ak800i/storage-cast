@@ -52,8 +52,6 @@ import com.storagecast.media.AudioTrackInfo
 import com.storagecast.media.CastCompatibility
 import com.storagecast.media.MediaProbeResult
 import com.storagecast.media.MediaProber
-import com.storagecast.media.Mp4ToMkvStreamer
-import com.storagecast.media.MkvTrackFilter
 import com.storagecast.media.TranscodeStreamer
 import com.storagecast.media.VideoTranscoder
 import com.storagecast.model.SubtitleTrack
@@ -1471,76 +1469,14 @@ class VideoDetailActivity : AppCompatActivity() {
         val probe = cachedProbeResult
         val audioTrack = selectedAudioTrack
         if (needsAudioRemux() && probe != null && audioTrack != null) {
-            if (isMkvContainer(probe)) {
-                AppLogger.info(TAG, "Using streaming MKV track filter for audio selection")
-                startStreamingMkvFilterAndCast(video, probe, audioTrack)
-            } else {
-                AppLogger.info(TAG, "Using streaming MP4→MKV remux for audio selection")
-                startStreamingMp4AsMkvAndCast(video, probe, audioTrack)
-            }
+            // A non-default audio track was chosen. Produce a Cast-compatible fragmented
+            // MP4 (H.264 video passthrough + selected audio re-encoded to AAC). This
+            // replaces the old MKV remux/filter paths, which cast as video/x-matroska —
+            // a container the Cast receiver does not support.
+            AppLogger.info(TAG, "Audio track selection: remuxing to fMP4 (video passthrough + AAC audio)")
+            startRemuxWithAudioTranscodeAndCast(video, probe)
         } else {
             castVideo(video, getEffectiveSubtitleFile())
-        }
-    }
-
-    private fun isMkvContainer(probe: MediaProbeResult): Boolean {
-        return probe.containerFormat.contains("MKV", ignoreCase = true) ||
-               probe.containerFormat.contains("Matroska", ignoreCase = true) ||
-               probe.containerFormat.contains("WebM", ignoreCase = true)
-    }
-
-    private fun startStreamingMkvFilterAndCast(video: VideoItem, probe: MediaProbeResult, audioTrack: AudioTrackInfo) {
-        // MKV track numbers are 1-based (MediaExtractor index + 1)
-        val videoTrack = probe.primaryVideo
-        if (videoTrack == null) {
-            AppLogger.warn(TAG, "No video track found, falling back to direct cast")
-            castVideo(video, getEffectiveSubtitleFile())
-            return
-        }
-        val videoTrackNum = videoTrack.trackIndex + 1
-        val audioTrackNum = audioTrack.trackIndex + 1
-        val keepTrackNumbers = setOf(videoTrackNum, audioTrackNum)
-
-        AppLogger.info(TAG, "MKV filter (streaming): keeping track numbers $keepTrackNumbers " +
-            "(video=${probe.primaryVideo?.codec}, audio=${audioTrack.codec} ${audioTrack.language})")
-
-        val filter = MkvTrackFilter()
-        val videoPath = video.path
-        val videoUri = video.uri
-
-        castStreamingSource(video, "video/x-matroska") {
-            val sourceStream = try {
-                val pfd = contentResolver.openFileDescriptor(videoUri, "r")
-                if (pfd != null) {
-                    android.os.ParcelFileDescriptor.AutoCloseInputStream(pfd)
-                } else {
-                    java.io.FileInputStream(videoPath)
-                }
-            } catch (e: Exception) {
-                AppLogger.warn(TAG, "ContentResolver failed, falling back to FileInputStream: ${e.message}")
-                java.io.FileInputStream(videoPath)
-            }
-            filter.createFilteredStream(sourceStream, keepTrackNumbers)
-        }
-    }
-
-    private fun startStreamingMp4AsMkvAndCast(video: VideoItem, probe: MediaProbeResult, audioTrack: AudioTrackInfo) {
-        val videoTrack = probe.primaryVideo
-        if (videoTrack == null) {
-            AppLogger.warn(TAG, "No video track found, falling back to direct cast")
-            castVideo(video, getEffectiveSubtitleFile())
-            return
-        }
-
-        AppLogger.info(TAG, "MP4→MKV remux (streaming): video=${videoTrack.codec} (track ${videoTrack.trackIndex}), " +
-            "audio=${audioTrack.codec} ${audioTrack.language} (track ${audioTrack.trackIndex})")
-
-        val videoPath = video.path
-        val videoTrackIndex = videoTrack.trackIndex
-        val audioTrackIndex = audioTrack.trackIndex
-
-        castStreamingSource(video, "video/x-matroska") {
-            Mp4ToMkvStreamer().createStream(videoPath, videoTrackIndex, audioTrackIndex)
         }
     }
 
@@ -1613,7 +1549,7 @@ class VideoDetailActivity : AppCompatActivity() {
         val inputPath = video.path
         val audioTrack = selectedAudioTrack
 
-        castStreamingSource(video, "video/x-matroska") {
+        castStreamingSource(video, "video/mp4") {
             streamer.createTranscodeStream(inputPath, probeResult, audioTrack,
                 object : TranscodeStreamer.ProgressListener {
                     override fun onProgress(percent: Int) {
@@ -1631,21 +1567,6 @@ class VideoDetailActivity : AppCompatActivity() {
         }
     }
 
-    private fun startRemuxAndCast(video: VideoItem, probeResult: MediaProbeResult) {
-        val audioTrack = selectedAudioTrack ?: return
-        val videoTrack = probeResult.primaryVideo ?: return
-
-        AppLogger.info(TAG, "Remuxing (streaming) to select audio track: ${audioTrack.codec} ${audioTrack.language} (index=${audioTrack.trackIndex})")
-
-        val videoPath = video.path
-        val videoTrackIndex = videoTrack.trackIndex
-        val audioTrackIndex = audioTrack.trackIndex
-
-        castStreamingSource(video, "video/x-matroska") {
-            Mp4ToMkvStreamer().createStream(videoPath, videoTrackIndex, audioTrackIndex)
-        }
-    }
-
     private fun startRemuxWithAudioTranscodeAndCast(video: VideoItem, probeResult: MediaProbeResult) {
         val audioTrack = selectedAudioTrack ?: return
         val streamer = TranscodeStreamer()
@@ -1655,7 +1576,7 @@ class VideoDetailActivity : AppCompatActivity() {
 
         val inputPath = video.path
 
-        castStreamingSource(video, "video/x-matroska") {
+        castStreamingSource(video, "video/mp4") {
             streamer.createRemuxWithAudioTranscodeStream(inputPath, probeResult, audioTrack,
                 object : TranscodeStreamer.ProgressListener {
                     override fun onProgress(percent: Int) {
