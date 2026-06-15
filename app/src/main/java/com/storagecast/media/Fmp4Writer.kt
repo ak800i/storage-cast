@@ -22,12 +22,15 @@ import java.io.OutputStream
  */
 class Fmp4Writer(
     private val out: OutputStream,
-    private val videoConfig: VideoConfig?,
-    private val audioConfig: AudioConfig?
+    private val hasVideo: Boolean,
+    private val hasAudio: Boolean
 ) {
 
     data class VideoConfig(val avcC: ByteArray, val width: Int, val height: Int)
     data class AudioConfig(val asc: ByteArray, val sampleRate: Int, val channels: Int)
+
+    private var videoConfig: VideoConfig? = null
+    private var audioConfig: AudioConfig? = null
 
     companion object {
         private const val TAG = "Fmp4Writer"
@@ -89,8 +92,8 @@ class Fmp4Writer(
         }
     }
 
-    private val video = if (videoConfig != null) Track(VIDEO_TRACK_ID, DEFAULT_VIDEO_SAMPLE_US) else null
-    private val audio = if (audioConfig != null) Track(AUDIO_TRACK_ID, DEFAULT_AUDIO_SAMPLE_US) else null
+    private val video = if (hasVideo) Track(VIDEO_TRACK_ID, DEFAULT_VIDEO_SAMPLE_US) else null
+    private val audio = if (hasAudio) Track(AUDIO_TRACK_ID, DEFAULT_AUDIO_SAMPLE_US) else null
     private var sequenceNumber = 1
     private var initWritten = false
 
@@ -98,13 +101,36 @@ class Fmp4Writer(
     //  Public API
     // ──────────────────────────────────────────────────────────────────────────
 
-    fun writeInitSegment() {
+    fun hasVideoConfig(): Boolean = videoConfig != null
+    fun hasAudioConfig(): Boolean = audioConfig != null
+
+    /**
+     * Supplies the H.264 codec config (avcC). A hardware encoder only produces its
+     * SPS/PPS after the first frame is encoded, so configs arrive during the encode
+     * loop rather than up front. The init segment is written once every present
+     * track has its config.
+     */
+    fun setVideoConfig(avcC: ByteArray, width: Int, height: Int) {
+        if (videoConfig != null) return
+        videoConfig = VideoConfig(avcC, width, height)
+        maybeWriteInit()
+    }
+
+    fun setAudioConfig(asc: ByteArray, sampleRate: Int, channels: Int) {
+        if (audioConfig != null) return
+        audioConfig = AudioConfig(asc, sampleRate, channels)
+        maybeWriteInit()
+    }
+
+    private fun maybeWriteInit() {
         if (initWritten) return
-        initWritten = true
+        if (hasVideo && videoConfig == null) return
+        if (hasAudio && audioConfig == null) return
         out.write(buildFtyp())
         out.write(buildMoov())
         out.flush()
-        AppLogger.info(TAG, "Wrote fMP4 init segment (video=${videoConfig != null}, audio=${audioConfig != null})")
+        initWritten = true
+        AppLogger.info(TAG, "Wrote fMP4 init segment (video=$hasVideo, audio=$hasAudio)")
     }
 
     fun addVideoSample(rawData: ByteArray, ptsUs: Long, keyframe: Boolean) {
@@ -141,6 +167,9 @@ class Fmp4Writer(
     // ──────────────────────────────────────────────────────────────────────────
 
     private fun flushFragment() {
+        // Do not emit fragments until the init segment (which needs every track's
+        // codec config) has been written. Samples keep accumulating until then.
+        if (!initWritten) return
         val vSamples = video?.ready ?: emptyList()
         val aSamples = audio?.ready ?: emptyList()
         if (vSamples.isEmpty() && aSamples.isEmpty()) return

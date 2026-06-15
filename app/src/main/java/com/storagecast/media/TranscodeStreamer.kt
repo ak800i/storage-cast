@@ -49,9 +49,6 @@ class TranscodeStreamer {
         private const val TIMEOUT_US = 10_000L
         private const val MAX_WIDTH = 1920
         private const val MAX_HEIGHT = 1080
-
-        /** Max attempts to pump encoder before falling back to configured format. */
-        private const val ENCODER_FORMAT_PUMP_ATTEMPTS = 200
     }
 
     @Volatile
@@ -170,7 +167,7 @@ class TranscodeStreamer {
         var videoDecoder: MediaCodec? = null
         var videoEncoder: MediaCodec? = null
         var videoExtractor: MediaExtractor? = null
-        var videoEncoderFormat: MediaFormat? = null
+        var videoInputSurface: android.view.Surface? = null
         var outWidth = 0
         var outHeight = 0
 
@@ -196,14 +193,12 @@ class TranscodeStreamer {
                 videoTrackInfo.frameRate.toInt().coerceAtMost(OUTPUT_VIDEO_FRAME_RATE)
             } else OUTPUT_VIDEO_FRAME_RATE
 
-            videoDecoder = MediaCodec.createDecoderByType(videoTrackInfo.mime)
-            videoDecoder.configure(inputFormat, null, null, 0)
-
             val videoOutputFormat = MediaFormat.createVideoFormat(OUTPUT_VIDEO_MIME, outWidth, outHeight).apply {
                 setInteger(MediaFormat.KEY_BIT_RATE, outputBitrate)
                 setInteger(MediaFormat.KEY_FRAME_RATE, outputFrameRate)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, OUTPUT_VIDEO_IFRAME_INTERVAL)
-                setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
+                // Surface input → encoder consumes graphics buffers (COLOR_FormatSurface).
+                setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
                 // Discourage B-frames so PTS == DTS (no composition-time offsets needed in fMP4).
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
                     try { setInteger(MediaFormat.KEY_LATENCY, 1) } catch (_: Exception) {}
@@ -213,22 +208,26 @@ class TranscodeStreamer {
                 }
             }
 
+            // Encoder first, so we can obtain its input Surface, then have the decoder
+            // render directly onto it. This lets the GPU handle colour-space conversion
+            // (e.g. 10-bit HEVC → 8-bit YUV) and scaling, instead of an unreliable
+            // manual ByteBuffer copy.
             videoEncoder = createVideoEncoder()
             videoEncoder.configure(videoOutputFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            videoInputSurface = videoEncoder.createInputSurface()
+
+            videoDecoder = MediaCodec.createDecoderByType(videoTrackInfo.mime)
+            videoDecoder.configure(inputFormat, videoInputSurface, null, 0)
 
             videoDecoder.start()
             videoEncoder.start()
 
-            AppLogger.info(TAG, "Video transcode: ${videoTrackInfo.codec} ${videoTrackInfo.width}x${videoTrackInfo.height} → H.264 ${outWidth}x${outHeight}")
-
-            videoEncoderFormat = pumpEncoderForOutputFormat(videoEncoder)
-            AppLogger.info(TAG, "Video encoder format ready")
+            AppLogger.info(TAG, "Video transcode (surface): ${videoTrackInfo.codec} ${videoTrackInfo.width}x${videoTrackInfo.height} → H.264 ${outWidth}x${outHeight}")
         }
 
         var audioDecoder: MediaCodec? = null
         var audioEncoder: MediaCodec? = null
         var audioExtractor: MediaExtractor? = null
-        var audioEncoderFormat: MediaFormat? = null
 
         if (audioTrackInfo != null) {
             audioExtractor = MediaExtractor()
@@ -253,45 +252,31 @@ class TranscodeStreamer {
             audioEncoder.start()
 
             AppLogger.info(TAG, "Audio transcode: ${audioTrackInfo.codec} → AAC")
-            audioEncoderFormat = pumpEncoderForOutputFormat(audioEncoder)
-            AppLogger.info(TAG, "Audio encoder format ready")
         }
 
-        // Build fMP4 track configs from the encoder output formats.
-        val videoConfig = if (videoEncoderFormat != null) {
-            val avcC = buildAvcConfigRecord(videoEncoderFormat)
-            if (avcC.isEmpty()) throw IOException("Failed to build avcC from encoder output")
-            val w = getIntSafe(videoEncoderFormat, MediaFormat.KEY_WIDTH, outWidth)
-            val h = getIntSafe(videoEncoderFormat, MediaFormat.KEY_HEIGHT, outHeight)
-            Fmp4Writer.VideoConfig(avcC, w, h)
-        } else null
-
-        val audioConfig = if (audioEncoderFormat != null) {
-            val asc = getCsdBytes(audioEncoderFormat, 0)
-                ?: throw IOException("Failed to read AAC codec config from encoder")
-            val sr = getIntSafe(audioEncoderFormat, MediaFormat.KEY_SAMPLE_RATE, OUTPUT_AUDIO_SAMPLE_RATE)
-            val ch = getIntSafe(audioEncoderFormat, MediaFormat.KEY_CHANNEL_COUNT, OUTPUT_AUDIO_CHANNEL_COUNT)
-            Fmp4Writer.AudioConfig(asc, sr, ch)
-        } else null
-
-        val writer = Fmp4Writer(out, videoConfig, audioConfig)
+        // The init segment is written lazily by the writer once both encoders report
+        // their codec config (which a hardware encoder only emits after the first
+        // frame). Configs are captured from INFO_OUTPUT_FORMAT_CHANGED in the pump.
+        val writer = Fmp4Writer(out, hasVideo = videoEncoder != null, hasAudio = audioEncoder != null)
 
         try {
-            writer.writeInitSegment()
-
             pumpTranscode(
                 writer,
-                videoExtractor, videoDecoder, videoEncoder,
+                videoExtractor, videoDecoder, videoEncoder, outWidth, outHeight,
                 audioExtractor, audioDecoder, audioEncoder,
                 durationUs, listener
             )
 
             writer.finish()
             out.flush()
+            if (!writer.hasVideoConfig() && videoEncoder != null) {
+                listener?.onError("Encoder did not produce a video codec config")
+            }
             AppLogger.info(TAG, "Transcode fMP4 stream complete")
         } finally {
             safeStopRelease(videoDecoder)
             safeStopRelease(videoEncoder)
+            try { videoInputSurface?.release() } catch (_: Exception) {}
             videoExtractor?.release()
             safeStopRelease(audioDecoder)
             safeStopRelease(audioEncoder)
@@ -308,6 +293,8 @@ class TranscodeStreamer {
         videoExtractor: MediaExtractor?,
         videoDecoder: MediaCodec?,
         videoEncoder: MediaCodec?,
+        outWidth: Int,
+        outHeight: Int,
         audioExtractor: MediaExtractor?,
         audioDecoder: MediaCodec?,
         audioEncoder: MediaCodec?,
@@ -353,71 +340,54 @@ class TranscodeStreamer {
                 }
             }
 
-            // ── Decode video → feed encoder ──
+            // ── Decode video → render onto encoder input surface ──
             if (!videoDecoderDone && videoDecoder != null && videoEncoder != null) {
                 val status = videoDecoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
                 if (status >= 0) {
                     val isEos = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
-                    if (bufferInfo.size > 0) {
-                        val decoded = videoDecoder.getOutputBuffer(status)
-                        if (decoded != null) {
-                            val encIdx = videoEncoder.dequeueInputBuffer(TIMEOUT_US)
-                            if (encIdx >= 0) {
-                                val encBuf = videoEncoder.getInputBuffer(encIdx)
-                                if (encBuf != null) {
-                                    encBuf.clear()
-                                    val limit = minOf(decoded.remaining(), encBuf.remaining())
-                                    val temp = ByteArray(limit)
-                                    decoded.get(temp, 0, limit)
-                                    encBuf.put(temp, 0, limit)
-                                    videoEncoder.queueInputBuffer(
-                                        encIdx, 0, limit, bufferInfo.presentationTimeUs,
-                                        if (isEos) MediaCodec.BUFFER_FLAG_END_OF_STREAM else 0
-                                    )
-                                    if (isEos) videoEncoderEosSent = true
-                                }
-                            }
-                        }
-                    } else if (isEos) {
-                        // Decoder reached EOS with an empty buffer — propagate to encoder.
-                        val encIdx = videoEncoder.dequeueInputBuffer(TIMEOUT_US)
-                        if (encIdx >= 0) {
-                            videoEncoder.queueInputBuffer(encIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                    // render = true pushes the decoded frame to the encoder's input surface.
+                    val render = bufferInfo.size > 0 && (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0
+                    videoDecoder.releaseOutputBuffer(status, render)
+                    if (isEos) {
+                        videoDecoderDone = true
+                        if (!videoEncoderEosSent) {
+                            videoEncoder.signalEndOfInputStream()
                             videoEncoderEosSent = true
                         }
                     }
-                    videoDecoder.releaseOutputBuffer(status, false)
-                    if (isEos) videoDecoderDone = true
                 }
             }
 
             // ── Drain video encoder → writer ──
             if (videoEncoder != null && !videoEncoderDone) {
                 val encStatus = videoEncoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
-                if (encStatus >= 0) {
-                    if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
+                if (encStatus == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    captureVideoConfig(writer, videoEncoder.outputFormat, outWidth, outHeight)
+                } else if (encStatus >= 0) {
+                    val isConfig = bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
+                    val encodedBuf = videoEncoder.getOutputBuffer(encStatus)
+                    if (isConfig) {
+                        // Fallback: some encoders deliver SPS/PPS only as a codec-config
+                        // buffer (Annex-B) rather than via INFO_OUTPUT_FORMAT_CHANGED.
+                        if (!writer.hasVideoConfig() && encodedBuf != null) {
+                            val cfg = ByteArray(bufferInfo.size)
+                            encodedBuf.position(bufferInfo.offset)
+                            encodedBuf.get(cfg, 0, bufferInfo.size)
+                            val avcC = buildAvcConfigFromAnnexB(cfg)
+                            if (avcC.isNotEmpty()) writer.setVideoConfig(avcC, outWidth, outHeight)
+                        }
                         bufferInfo.size = 0
                     }
-                    if (bufferInfo.size > 0) {
-                        val encodedBuf = videoEncoder.getOutputBuffer(encStatus)
-                        if (encodedBuf != null) {
-                            val isKey = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
-                            val data = ByteArray(bufferInfo.size)
-                            encodedBuf.position(bufferInfo.offset)
-                            encodedBuf.get(data, 0, bufferInfo.size)
-                            writer.addVideoSample(data, bufferInfo.presentationTimeUs, isKey)
-                        }
+                    if (bufferInfo.size > 0 && encodedBuf != null) {
+                        val isKey = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
+                        val data = ByteArray(bufferInfo.size)
+                        encodedBuf.position(bufferInfo.offset)
+                        encodedBuf.get(data, 0, bufferInfo.size)
+                        writer.addVideoSample(data, bufferInfo.presentationTimeUs, isKey)
                     }
                     videoEncoder.releaseOutputBuffer(encStatus, false)
                     if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
                         videoEncoderDone = true
-                    }
-                }
-                if (videoDecoderDone && !videoEncoderEosSent && encStatus == MediaCodec.INFO_TRY_AGAIN_LATER) {
-                    val idx = videoEncoder.dequeueInputBuffer(TIMEOUT_US)
-                    if (idx >= 0) {
-                        videoEncoder.queueInputBuffer(idx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                        videoEncoderEosSent = true
                     }
                 }
             }
@@ -480,18 +450,25 @@ class TranscodeStreamer {
             // ── Drain audio encoder → writer ──
             if (audioEncoder != null && !audioEncoderDone) {
                 val encStatus = audioEncoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
-                if (encStatus >= 0) {
-                    if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
+                if (encStatus == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    captureAudioConfig(writer, audioEncoder.outputFormat)
+                } else if (encStatus >= 0) {
+                    val isConfig = bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
+                    val encodedBuf = audioEncoder.getOutputBuffer(encStatus)
+                    if (isConfig) {
+                        if (!writer.hasAudioConfig() && encodedBuf != null) {
+                            val cfg = ByteArray(bufferInfo.size)
+                            encodedBuf.position(bufferInfo.offset)
+                            encodedBuf.get(cfg, 0, bufferInfo.size)
+                            writer.setAudioConfig(cfg, OUTPUT_AUDIO_SAMPLE_RATE, OUTPUT_AUDIO_CHANNEL_COUNT)
+                        }
                         bufferInfo.size = 0
                     }
-                    if (bufferInfo.size > 0) {
-                        val encodedBuf = audioEncoder.getOutputBuffer(encStatus)
-                        if (encodedBuf != null) {
-                            val data = ByteArray(bufferInfo.size)
-                            encodedBuf.position(bufferInfo.offset)
-                            encodedBuf.get(data, 0, bufferInfo.size)
-                            writer.addAudioSample(data, bufferInfo.presentationTimeUs)
-                        }
+                    if (bufferInfo.size > 0 && encodedBuf != null) {
+                        val data = ByteArray(bufferInfo.size)
+                        encodedBuf.position(bufferInfo.offset)
+                        encodedBuf.get(data, 0, bufferInfo.size)
+                        writer.addAudioSample(data, bufferInfo.presentationTimeUs)
                     }
                     audioEncoder.releaseOutputBuffer(encStatus, false)
                     if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
@@ -544,12 +521,12 @@ class TranscodeStreamer {
         audioDecoder.start()
         audioEncoder.start()
         AppLogger.info(TAG, "Audio transcode: ${selectedAudioTrack.codec} → AAC")
-        val audioEncoderFormat = pumpEncoderForOutputFormat(audioEncoder)
 
         // ── Video passthrough setup ──
         val videoExtractor = MediaExtractor()
         videoExtractor.setDataSource(inputPath)
-        var videoConfig: Fmp4Writer.VideoConfig? = null
+        var hasVideo = false
+        val writer = Fmp4Writer(out, hasVideo = videoTrack != null, hasAudio = true)
         if (videoTrack != null) {
             videoExtractor.selectTrack(videoTrack.trackIndex)
             val videoFormat = videoExtractor.getTrackFormat(videoTrack.trackIndex)
@@ -557,23 +534,16 @@ class TranscodeStreamer {
             if (avcC.isEmpty()) throw IOException("Failed to build avcC from input video format")
             val w = getIntSafe(videoFormat, MediaFormat.KEY_WIDTH, videoTrack.width)
             val h = getIntSafe(videoFormat, MediaFormat.KEY_HEIGHT, videoTrack.height)
-            videoConfig = Fmp4Writer.VideoConfig(avcC, w, h)
+            // The passthrough video codec config is known immediately from the input.
+            writer.setVideoConfig(avcC, w, h)
+            hasVideo = true
             AppLogger.info(TAG, "Video passthrough: ${videoTrack.codec} ${w}x${h}")
         }
 
-        val asc = getCsdBytes(audioEncoderFormat, 0)
-            ?: throw IOException("Failed to read AAC codec config from encoder")
-        val audioConfig = Fmp4Writer.AudioConfig(
-            asc,
-            getIntSafe(audioEncoderFormat, MediaFormat.KEY_SAMPLE_RATE, OUTPUT_AUDIO_SAMPLE_RATE),
-            getIntSafe(audioEncoderFormat, MediaFormat.KEY_CHANNEL_COUNT, OUTPUT_AUDIO_CHANNEL_COUNT)
-        )
-
-        val writer = Fmp4Writer(out, videoConfig, audioConfig)
-
         try {
-            writer.writeInitSegment()
-            pumpRemux(writer, videoExtractor, videoConfig != null, audioExtractor, audioDecoder, audioEncoder, durationUs, listener)
+            // The audio codec config arrives from INFO_OUTPUT_FORMAT_CHANGED during the
+            // pump; the writer holds back fragments until the init segment is written.
+            pumpRemux(writer, videoExtractor, hasVideo, audioExtractor, audioDecoder, audioEncoder, durationUs, listener)
             writer.finish()
             out.flush()
             AppLogger.info(TAG, "Remux+audio-transcode fMP4 stream complete")
@@ -688,18 +658,25 @@ class TranscodeStreamer {
             // ── Drain audio encoder → writer ──
             if (!audioEncoderDone) {
                 val encStatus = audioEncoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
-                if (encStatus >= 0) {
-                    if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
+                if (encStatus == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    captureAudioConfig(writer, audioEncoder.outputFormat)
+                } else if (encStatus >= 0) {
+                    val isConfig = bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
+                    val encodedBuf = audioEncoder.getOutputBuffer(encStatus)
+                    if (isConfig) {
+                        if (!writer.hasAudioConfig() && encodedBuf != null) {
+                            val cfg = ByteArray(bufferInfo.size)
+                            encodedBuf.position(bufferInfo.offset)
+                            encodedBuf.get(cfg, 0, bufferInfo.size)
+                            writer.setAudioConfig(cfg, OUTPUT_AUDIO_SAMPLE_RATE, OUTPUT_AUDIO_CHANNEL_COUNT)
+                        }
                         bufferInfo.size = 0
                     }
-                    if (bufferInfo.size > 0) {
-                        val encodedBuf = audioEncoder.getOutputBuffer(encStatus)
-                        if (encodedBuf != null) {
-                            val data = ByteArray(bufferInfo.size)
-                            encodedBuf.position(bufferInfo.offset)
-                            encodedBuf.get(data, 0, bufferInfo.size)
-                            writer.addAudioSample(data, bufferInfo.presentationTimeUs)
-                        }
+                    if (bufferInfo.size > 0 && encodedBuf != null) {
+                        val data = ByteArray(bufferInfo.size)
+                        encodedBuf.position(bufferInfo.offset)
+                        encodedBuf.get(data, 0, bufferInfo.size)
+                        writer.addAudioSample(data, bufferInfo.presentationTimeUs)
                     }
                     audioEncoder.releaseOutputBuffer(encStatus, false)
                     if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
@@ -738,22 +715,34 @@ class TranscodeStreamer {
     }
 
     /**
-     * Pumps an encoder until it emits INFO_OUTPUT_FORMAT_CHANGED, then returns the
-     * format (which carries the codec-specific data needed for the fMP4 sample entry).
+     * Reads the H.264 codec config from the video encoder's output format and sets it
+     * on the writer. Called when the encoder reports INFO_OUTPUT_FORMAT_CHANGED.
      */
-    private fun pumpEncoderForOutputFormat(encoder: MediaCodec): MediaFormat {
-        val bufferInfo = MediaCodec.BufferInfo()
-        for (i in 0 until ENCODER_FORMAT_PUMP_ATTEMPTS) {
-            val status = encoder.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
-            if (status == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                return encoder.outputFormat
-            }
-            if (status >= 0) {
-                // Released without consuming; encoder has not produced its format yet.
-                encoder.releaseOutputBuffer(status, false)
-            }
+    private fun captureVideoConfig(writer: Fmp4Writer, format: MediaFormat, outWidth: Int, outHeight: Int) {
+        if (writer.hasVideoConfig()) return
+        val avcC = buildAvcConfigRecord(format)
+        if (avcC.isEmpty()) {
+            AppLogger.warn(TAG, "Encoder format change but avcC not available yet")
+            return
         }
-        return encoder.outputFormat
+        val w = getIntSafe(format, MediaFormat.KEY_WIDTH, outWidth)
+        val h = getIntSafe(format, MediaFormat.KEY_HEIGHT, outHeight)
+        writer.setVideoConfig(avcC, w, h)
+        AppLogger.info(TAG, "Captured video codec config (avcC ${avcC.size} bytes, ${w}x${h})")
+    }
+
+    /** Reads the AAC codec config (ASC) from the audio encoder's output format. */
+    private fun captureAudioConfig(writer: Fmp4Writer, format: MediaFormat) {
+        if (writer.hasAudioConfig()) return
+        val asc = getCsdBytes(format, 0)
+        if (asc == null || asc.isEmpty()) {
+            AppLogger.warn(TAG, "Audio encoder format change but ASC not available yet")
+            return
+        }
+        val sr = getIntSafe(format, MediaFormat.KEY_SAMPLE_RATE, OUTPUT_AUDIO_SAMPLE_RATE)
+        val ch = getIntSafe(format, MediaFormat.KEY_CHANNEL_COUNT, OUTPUT_AUDIO_CHANNEL_COUNT)
+        writer.setAudioConfig(asc, sr, ch)
+        AppLogger.info(TAG, "Captured audio codec config (ASC ${asc.size} bytes, ${sr}Hz ${ch}ch)")
     }
 
     private fun selectHardwareEncoder(mime: String): String? {
@@ -785,12 +774,24 @@ class TranscodeStreamer {
         }
 
         val csd1 = getCsdBytes(format, 1)
-        val spsNalus = parseAnnexBNalus(csd0)
-        val ppsNalus = if (csd1 != null) parseAnnexBNalus(csd1) else emptyList()
+        // Concatenate csd-0 (SPS) and csd-1 (PPS) into one Annex-B stream and parse.
+        val annexB = if (csd1 != null) csd0 + csd1 else csd0
+        return buildAvcConfigFromAnnexB(annexB)
+    }
 
-        // Some inputs pack both SPS and PPS into csd-0.
-        val sps = spsNalus.filter { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 7 }
-        val pps = (spsNalus + ppsNalus).filter { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 8 }
+    /**
+     * Builds an avcC record from a raw Annex-B byte stream containing SPS and PPS NAL
+     * units (the form some encoders deliver as a single codec-config buffer).
+     */
+    private fun buildAvcConfigFromAnnexB(data: ByteArray): ByteArray {
+        // Already a packaged avcC record?
+        if (data.isNotEmpty() && data[0].toInt() == 1 && startCodeLength(data, 0) == 0) {
+            return data
+        }
+
+        val nalus = parseAnnexBNalus(data)
+        val sps = nalus.filter { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 7 }
+        val pps = nalus.filter { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 8 }
 
         if (sps.isEmpty()) {
             AppLogger.warn(TAG, "No SPS found while building avcC")
