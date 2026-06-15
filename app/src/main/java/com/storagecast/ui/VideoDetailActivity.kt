@@ -130,6 +130,21 @@ class VideoDetailActivity : AppCompatActivity() {
     private val progressHandler = Handler(Looper.getMainLooper())
     private var isSeekBarDragging = false
     private var pendingSeekPositionMs = 0L
+
+    // ── Realtime-transcode (live) session seek state ──
+    // The transcode is served as a single STREAM_TYPE_LIVE pipe, so the Cast
+    // receiver's reported position always restarts at 0 for each stream and
+    // calling remoteMediaClient.seek() on it crashes the receiver. Instead we
+    // seek by restarting the transcode from a new source position. transcodeBaseMs
+    // is the source offset the current live transcode began from, so the real
+    // playback position shown to the user is transcodeBaseMs + streamPosition.
+    private var isTranscodeSession = false
+    private var transcodeBaseMs = 0L
+    private var transcodeVideo: VideoItem? = null
+    private var transcodeProbe: MediaProbeResult? = null
+    // True for any STREAM_TYPE_LIVE streaming source (transcode or live remux). The
+    // Cast receiver cannot seek these, so seek() must never be called on them.
+    private var isLiveStreamSession = false
     private val progressUpdateRunnable = object : Runnable {
         override fun run() {
             updateSeekBarProgress()
@@ -509,6 +524,17 @@ class VideoDetailActivity : AppCompatActivity() {
     private fun seekRelative(offsetMs: Long) {
         val client = castSession?.remoteMediaClient
         if (client?.hasMediaSession() == true && isMediaActive(client.mediaStatus?.playerState)) {
+            // Live transcode: seeking restarts the transcode from the new position,
+            // because the receiver cannot seek a STREAM_TYPE_LIVE pipe (it crashes).
+            if (isTranscodeSession) {
+                seekTranscodeTo(currentLivePositionMs() + offsetMs)
+                return
+            }
+            // Other live streams can't be seeked at all — ignore rather than crash.
+            if (isLiveStreamSession) {
+                Toast.makeText(this, R.string.seek_not_available, Toast.LENGTH_SHORT).show()
+                return
+            }
             val current = client.approximateStreamPosition
             val duration = client.streamDuration
             val target = (current + offsetMs).coerceIn(0, duration.coerceAtLeast(0))
@@ -528,6 +554,35 @@ class VideoDetailActivity : AppCompatActivity() {
             binding.currentTimeText.text = formatDuration(pendingSeekPositionMs)
             AppLogger.info(TAG, "Pending start position: ${formatDuration(pendingSeekPositionMs)}")
         }
+    }
+
+    /** The real playback position of a live transcode = source base + receiver position. */
+    private fun currentLivePositionMs(): Long {
+        val client = castSession?.remoteMediaClient ?: return transcodeBaseMs
+        val streamPos = client.approximateStreamPosition.coerceAtLeast(0)
+        return transcodeBaseMs + streamPos
+    }
+
+    /**
+     * Seeks the live transcode by restarting it from [targetMs] of the source. The
+     * receiver loads a fresh stream (which begins at receiver-position 0) and we track
+     * the source offset in [transcodeBaseMs] so the UI shows the true position.
+     */
+    private fun seekTranscodeTo(targetMs: Long) {
+        val video = transcodeVideo
+        val probe = transcodeProbe
+        if (video == null || probe == null) {
+            AppLogger.warn(TAG, "seekTranscodeTo: no cached transcode source, ignoring")
+            return
+        }
+        val duration = video.duration.coerceAtLeast(0)
+        val clamped = if (duration > 0) targetMs.coerceIn(0, duration) else targetMs.coerceAtLeast(0)
+        AppLogger.info(TAG, "Transcode seek → restarting from ${formatDuration(clamped)}")
+        Toast.makeText(this, getString(R.string.seeking_to, formatDuration(clamped)), Toast.LENGTH_SHORT).show()
+        // Reflect the target immediately so the bar doesn't snap back to the live edge.
+        binding.videoSeekBar.progress = clamped.toInt()
+        binding.currentTimeText.text = formatDuration(clamped)
+        startTranscoding(video, probe, clamped)
     }
 
     private fun adjustSubtitleSync(deltaMs: Long) {
@@ -1434,8 +1489,13 @@ class VideoDetailActivity : AppCompatActivity() {
         val newIndex = selectedAudioTrack?.trackIndex
         if (previousIndex == newIndex) return
 
-        // Save current position, then re-cast
-        pendingSeekPositionMs = client.approximateStreamPosition
+        // Save current position, then re-cast. For a live transcode the receiver
+        // position restarts at 0 per stream, so use the absolute source position.
+        pendingSeekPositionMs = if (isTranscodeSession) {
+            currentLivePositionMs()
+        } else {
+            client.approximateStreamPosition
+        }
         AppLogger.info(TAG, "Audio track changed during cast, reloading from ${formatDuration(pendingSeekPositionMs)}")
         Toast.makeText(this, R.string.audio_track_switch_reload, Toast.LENGTH_SHORT).show()
 
@@ -1498,7 +1558,7 @@ class VideoDetailActivity : AppCompatActivity() {
 
             if (SettingsActivity.getRealtimeTranscode(this@VideoDetailActivity)) {
                 AppLogger.info(TAG, "Realtime transcoding enabled, forcing transcode")
-                startTranscoding(video, probeResult)
+                startTranscoding(video, probeResult, pendingSeekPositionMs)
                 return@launch
             }
 
@@ -1540,18 +1600,28 @@ class VideoDetailActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun startTranscoding(video: VideoItem, probeResult: MediaProbeResult) {
+    private fun startTranscoding(video: VideoItem, probeResult: MediaProbeResult, startPositionMs: Long = 0L) {
+        // Cancel any in-flight transcode before starting a new one (e.g. on seek).
+        transcodeStreamer?.cancel()
+
         val streamer = TranscodeStreamer()
         transcodeStreamer = streamer
 
+        // Remember everything needed to restart the transcode for a seek, and mark
+        // this as a live transcode session so seeks restart rather than crash-seek.
+        isTranscodeSession = true
+        transcodeBaseMs = startPositionMs.coerceAtLeast(0)
+        transcodeVideo = video
+        transcodeProbe = probeResult
+
         val copyAudio = SettingsActivity.getCopyAudio(this)
-        AppLogger.info(TAG, "Starting streaming transcode to fragmented MP4 (copyAudio=$copyAudio)")
+        AppLogger.info(TAG, "Starting streaming transcode to fragmented MP4 (copyAudio=$copyAudio, startPosition=${formatDuration(transcodeBaseMs)})")
 
         val inputPath = video.path
         val audioTrack = selectedAudioTrack
 
         castStreamingSource(video, "video/mp4") {
-            streamer.createTranscodeStream(inputPath, probeResult, audioTrack, copyAudio,
+            streamer.createTranscodeStream(inputPath, probeResult, audioTrack, copyAudio, transcodeBaseMs,
                 object : TranscodeStreamer.ProgressListener {
                     override fun onProgress(percent: Int) {
                         AppLogger.info(TAG, "Transcode progress: $percent%")
@@ -1570,6 +1640,8 @@ class VideoDetailActivity : AppCompatActivity() {
 
     private fun startRemuxWithAudioTranscodeAndCast(video: VideoItem, probeResult: MediaProbeResult) {
         val audioTrack = selectedAudioTrack ?: return
+        // This is a live stream but not a restartable transcode, so disable transcode-seek.
+        isTranscodeSession = false
         val streamer = TranscodeStreamer()
         transcodeStreamer = streamer
 
@@ -1616,6 +1688,9 @@ class VideoDetailActivity : AppCompatActivity() {
 
         val serverIp = getDeviceIpAddress()
         val serverPort = service.getServerPort()
+
+        // All streaming-source casts use STREAM_TYPE_LIVE, which the receiver cannot seek.
+        isLiveStreamSession = true
 
         val streamPath = service.registerStreamingSource(video.title, contentType, factory)
         val streamUrl = "http://$serverIp:$serverPort$streamPath"
@@ -1700,6 +1775,9 @@ class VideoDetailActivity : AppCompatActivity() {
     }
 
     private fun castTranscodedVideo(originalVideo: VideoItem, transcodedFile: File, contentType: String = "video/mp4") {
+        // Buffered file playback — the receiver can seek natively.
+        isLiveStreamSession = false
+        isTranscodeSession = false
         val service = mediaServerService
         if (service == null) {
             AppLogger.error(TAG, "castTranscodedVideo: media server service is null")
@@ -1801,6 +1879,9 @@ class VideoDetailActivity : AppCompatActivity() {
     }
 
     private fun castVideo(video: VideoItem, subtitleFile: File?) {
+        // Direct/buffered playback — the receiver can seek natively.
+        isLiveStreamSession = false
+        isTranscodeSession = false
         val service = mediaServerService
         if (service == null) {
             AppLogger.error(TAG, "castVideo: media server service is null")
@@ -2070,6 +2151,16 @@ class VideoDetailActivity : AppCompatActivity() {
                 val position = seekBar?.progress?.toLong() ?: return
                 val client = castSession?.remoteMediaClient
                 if (client?.hasMediaSession() == true && isMediaActive(client.mediaStatus?.playerState)) {
+                    // Live transcode: restart from the dragged position (absolute source time).
+                    if (isTranscodeSession) {
+                        seekTranscodeTo(position)
+                        return
+                    }
+                    if (isLiveStreamSession) {
+                        Toast.makeText(this@VideoDetailActivity, R.string.seek_not_available, Toast.LENGTH_SHORT).show()
+                        updateSeekBarProgress()
+                        return
+                    }
                     AppLogger.info(TAG, "Seeking cast to ${formatDuration(position)}")
                     client.seek(MediaSeekOptions.Builder().setPosition(position).build()).setResultCallback { result ->
                         if (!result.status.isSuccess) {
@@ -2111,6 +2202,22 @@ class VideoDetailActivity : AppCompatActivity() {
     private fun updateSeekBarProgress() {
         if (isSeekBarDragging) return
         val client = castSession?.remoteMediaClient ?: return
+        // Live transcode: the receiver position restarts at 0 per stream, so the true
+        // position is the source base plus the receiver's reported position, against
+        // the full source duration.
+        if (isTranscodeSession) {
+            val video = videoItem ?: return
+            val duration = video.duration
+            if (duration > 0) {
+                val pos = (transcodeBaseMs + client.approximateStreamPosition.coerceAtLeast(0))
+                    .coerceIn(0, duration)
+                binding.videoSeekBar.max = duration.toInt()
+                binding.videoSeekBar.progress = pos.toInt()
+                binding.currentTimeText.text = formatDuration(pos)
+                binding.totalTimeText.text = formatDuration(duration)
+            }
+            return
+        }
         val duration = client.streamDuration
         val position = client.approximateStreamPosition
         if (duration > 0) {

@@ -73,6 +73,7 @@ class TranscodeStreamer {
         probeResult: MediaProbeResult,
         selectedAudioTrack: AudioTrackInfo? = null,
         copyAudio: Boolean = false,
+        startPositionMs: Long = 0L,
         listener: ProgressListener? = null
     ): InputStream {
         isCancelled = false
@@ -81,7 +82,7 @@ class TranscodeStreamer {
 
         Thread {
             try {
-                transcodeToFmp4(inputPath, probeResult, selectedAudioTrack, copyAudio, pipedOut, listener)
+                transcodeToFmp4(inputPath, probeResult, selectedAudioTrack, copyAudio, startPositionMs, pipedOut, listener)
             } catch (e: IOException) {
                 // Pipe broken = reader closed (Cast device disconnected) — expected
                 AppLogger.info(TAG, "Transcode stream ended: ${e.message}")
@@ -125,7 +126,7 @@ class TranscodeStreamer {
                     remuxWithAudioTranscodeToFmp4(inputPath, probeResult, selectedAudioTrack, pipedOut, listener)
                 } else {
                     AppLogger.info(TAG, "Video is $videoMime (not H.264), full-transcoding instead of passthrough")
-                    transcodeToFmp4(inputPath, probeResult, selectedAudioTrack, copyAudio = false, pipedOut, listener)
+                    transcodeToFmp4(inputPath, probeResult, selectedAudioTrack, copyAudio = false, startPositionMs = 0L, pipedOut, listener)
                 }
             } catch (e: IOException) {
                 AppLogger.info(TAG, "Remux stream ended: ${e.message}")
@@ -152,6 +153,7 @@ class TranscodeStreamer {
         probeResult: MediaProbeResult,
         selectedAudioTrack: AudioTrackInfo?,
         copyAudio: Boolean,
+        startPositionMs: Long,
         output: OutputStream,
         listener: ProgressListener?
     ) {
@@ -165,6 +167,7 @@ class TranscodeStreamer {
         }
 
         val durationUs = if (probeResult.durationMs > 0) probeResult.durationMs * 1000 else 0L
+        val startPositionUs = startPositionMs.coerceAtLeast(0) * 1000
 
         var videoDecoder: MediaCodec? = null
         var videoEncoder: MediaCodec? = null
@@ -172,11 +175,20 @@ class TranscodeStreamer {
         var videoInputSurface: android.view.Surface? = null
         var outWidth = 0
         var outHeight = 0
+        // The actual time the video extractor lands on after seeking (a sync sample).
+        // Audio is then seeked to the same time so the two stay in sync.
+        var seekLandingUs = startPositionUs
 
         if (videoTrackInfo != null) {
             videoExtractor = MediaExtractor()
             videoExtractor.setDataSource(inputPath)
             videoExtractor.selectTrack(videoTrackInfo.trackIndex)
+            if (startPositionUs > 0) {
+                videoExtractor.seekTo(startPositionUs, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+                val landed = videoExtractor.sampleTime
+                if (landed >= 0) seekLandingUs = landed
+                AppLogger.info(TAG, "Seek: video sought to ${startPositionUs / 1000}ms, landed ${seekLandingUs / 1000}ms")
+            }
             val inputFormat = videoExtractor.getTrackFormat(videoTrackInfo.trackIndex)
 
             // 10-bit / HDR HEVC (e.g. Main10) decoded straight onto an 8-bit AVC
@@ -249,6 +261,11 @@ class TranscodeStreamer {
             audioExtractor = MediaExtractor()
             audioExtractor.setDataSource(inputPath)
             audioExtractor.selectTrack(audioTrackInfo.trackIndex)
+            if (startPositionUs > 0) {
+                // Seek audio to where the video landed so A/V stay aligned.
+                audioExtractor.seekTo(seekLandingUs, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+                AppLogger.info(TAG, "Seek: audio sought to ${seekLandingUs / 1000}ms")
+            }
             val audioInputFormat = audioExtractor.getTrackFormat(audioTrackInfo.trackIndex)
 
             // ── Audio copy (passthrough) path ──

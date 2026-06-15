@@ -36,6 +36,8 @@
     <string name="not_connected">Not connected to a Cast device. Use the Cast button in the toolbar to connect.</string>
     <string name="video_playing">Playing: %s</string>
     <string name="video_paused">Paused</string>
+    <string name="seeking_to">Seeking to %s…</string>
+    <string name="seek_not_available">Seeking isn\'t available for this stream</string>
     <string name="video_stopped">Stopped</string>
     <string name="view_logs">Logs</string>
     <string name="copy_logs">Copy All</string>
