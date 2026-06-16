@@ -300,6 +300,13 @@ class MediaServerService : Service() {
         }
 
         fun registerHlsSession(id: String, session: com.storagecast.media.HlsTranscodeSession) {
+            // Only one HLS cast is active at a time; evict and free any prior sessions so
+            // their cached transcoded segments (several MB each) don't accumulate.
+            if (hlsMap.isNotEmpty()) {
+                val stale = hlsMap.keys.toList()
+                stale.forEach { key -> hlsMap.remove(key)?.release() }
+                AppLogger.info("MediaServer", "Evicted ${stale.size} stale HLS session(s)")
+            }
             hlsMap[id] = session
         }
 

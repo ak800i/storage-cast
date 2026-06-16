@@ -198,4 +198,12 @@ class HlsTranscodeSession(
         AppLogger.info(TAG, "Built segment $index (${bytes.size} bytes, v=${result.videoSamples.size} a=${result.audioSamples.size})")
         return bytes
     }
+
+    /** Frees cached transcoded segments. Safe to call when the session is no longer cast. */
+    fun release() {
+        synchronized(lock) {
+            segmentCache.clear()
+            initSegment = null
+        }
+    }
 }
