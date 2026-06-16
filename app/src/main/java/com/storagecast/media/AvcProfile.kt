@@ -25,6 +25,9 @@ object AvcProfile {
             if (nal.size < 2) continue
             val type = nal[0].toInt() and 0x1F
             if (type == NAL_TYPE_SPS) {
+                // nal[1] (profile_idc) is read raw: an emulation-prevention 0x03 is only
+                // inserted after two 0x00 bytes, but nal[0] (= nal_ref_idc<<5 | 7) is always
+                // >= 0x07, so no 00 00 03 sequence can shift profile_idc.
                 return when (nal[1].toInt() and 0xFF) {
                     66 -> 1   // AVCProfileBaseline
                     77 -> 2   // AVCProfileMain

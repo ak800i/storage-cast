@@ -28,6 +28,10 @@ object HevcProfile {
             if (nal.size < 4) continue
             val type = (nal[0].toInt() and 0x7E) shr 1
             if (type == NAL_TYPE_SPS) {
+                // nal[3] is read raw (no emulation-prevention removal needed): an EP 0x03 is
+                // only inserted after two consecutive 0x00 bytes, but nal[1]
+                // (= layer_id<<3 | temporal_id_plus1, with temporal_id_plus1 >= 1) is always
+                // non-zero, so no 00 00 03 sequence can shift the first four bytes.
                 return nal[3].toInt() and 0x1F
             }
         }
