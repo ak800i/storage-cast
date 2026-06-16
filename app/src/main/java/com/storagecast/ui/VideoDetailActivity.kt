@@ -1596,13 +1596,16 @@ class VideoDetailActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setTitle(R.string.codec_incompatible_title)
             .setView(dialogView)
-            .setPositiveButton(R.string.direct_stream) { _, _ ->
-                AppLogger.info(TAG, "User chose direct stream despite incompatible codecs")
-                directStreamOrRemux(video)
-            }
-            .setNegativeButton(R.string.transcode) { _, _ ->
+            // Transcode is the recommended action: an incompatible result means a codec
+            // the receiver can't decode (e.g. 10-bit HEVC), so a direct cast would fail.
+            // Keep "direct stream" as a secondary override rather than the emphasized default.
+            .setPositiveButton(R.string.transcode) { _, _ ->
                 AppLogger.info(TAG, "User chose to transcode")
                 startTranscoding(video, probeResult)
+            }
+            .setNegativeButton(R.string.direct_stream) { _, _ ->
+                AppLogger.info(TAG, "User chose direct stream despite incompatible codecs")
+                directStreamOrRemux(video)
             }
             .setNeutralButton(R.string.cancel, null)
             .show()
