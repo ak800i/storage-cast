@@ -23,10 +23,11 @@ class SettingsActivity : AppCompatActivity() {
         const val KEY_COPY_AUDIO = "copy_audio"
         const val DEFAULT_COPY_AUDIO = false
         const val KEY_HLS_SEEKING = "hls_seeking"
-        // On by default: incompatible files (e.g. 10-bit HEVC) then transcode to a
-        // seekable HLS VOD stream automatically. Users can turn it off from the video
-        // overflow menu to fall back to the live (seek-by-restart) transcode path.
-        const val DEFAULT_HLS_SEEKING = true
+        // Off by default: the live progressive-fMP4 transcode path is the proven-working
+        // one on real hardware (incl. first-gen Chromecast, which plays it but failed on
+        // HLS fMP4/CMAF). HLS gives native seeking instead of seek-by-restart, but it is
+        // not supported on every receiver, so it stays opt-in via the video overflow menu.
+        const val DEFAULT_HLS_SEEKING = false
 
         private const val OPENSUBTITLES_PREFS = "opensubtitles"
 

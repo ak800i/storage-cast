@@ -18,18 +18,20 @@ on the release build.
 
 ## Settings
 
-- [ ] **Settings / video overflow menu → "Seekable HLS transcoding"** is ON (this is the
-      default; turn it off only to test the live seek-by-restart fallback).
+- [ ] **Default path is the live progressive-fMP4 transcode** (proven on first-gen
+      Chromecast). The **"Seekable HLS (experimental)"** toggle in the video overflow menu
+      is OFF by default; enable it only to test native seeking on receivers that support
+      HLS fMP4/CMAF.
 - [ ] **Settings → "Copy audio (preserve surround)"** — test both states (see below).
 
 ## Core playback
 
-- [ ] Cast an incompatible source (e.g. HEVC 10-bit MKV with E-AC-3 5.1). With HLS
-      seeking ON it transcodes **automatically with no codec dialog** (10-bit HEVC/AVC
-      is detected and routed to the transcoder); video starts within a few seconds and
-      plays smoothly (no green/garbled frames, no stutter).
-- [ ] With HLS seeking OFF, the same source still shows the codec dialog (Direct
-      stream / Transcode / Cancel) — choosing Transcode plays it.
+- [ ] Cast an incompatible source (e.g. HEVC 10-bit MKV with E-AC-3 5.1). 10-bit HEVC/AVC
+      is detected and the codec dialog appears; choosing **Transcode** plays it via the
+      live path — video starts within a few seconds and plays smoothly (no green/garbled
+      frames, no stutter).
+- [ ] With **Seekable HLS** enabled, the same source transcodes automatically (no dialog)
+      to an HLS VOD stream — only on receivers that support HLS fMP4.
 - [ ] An 8-bit H.264/AAC MP4 still casts directly (no transcode, no dialog).
 - [ ] Resolution looks correct (≤ 1080p, no stretching). 4K and 21:9 sources are
       letterbox-correct and not upscaled.
