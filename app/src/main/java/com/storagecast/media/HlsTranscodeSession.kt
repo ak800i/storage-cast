@@ -194,6 +194,17 @@ class HlsTranscodeSession(
         if (segmentAvcC != null && !HlsTranscodeMath.avcConfigsMatch(establishedAvcC, segmentAvcC)) {
             AppLogger.warn(TAG, "Segment $index avcC differs from init segment avcC; receiver may corrupt this segment")
         }
+        // Likewise the audio codec must match the shared init. passthroughAudioRange decides
+        // passthrough-vs-AAC-fallback per segment, so a later segment that fell back to AAC
+        // while the init declares AC-3/E-AC-3 (or vice versa) would be decoded with the wrong
+        // codec. This shouldn't happen for sync-word-aligned Dolby frames, but warn if it does.
+        val establishedAudioCodec = audioInit?.codec
+        val segmentAudioCodec = result.audio?.codec
+        if (segmentAudioCodec != null && establishedAudioCodec != null &&
+            segmentAudioCodec != establishedAudioCodec
+        ) {
+            AppLogger.warn(TAG, "Segment $index audio codec ($segmentAudioCodec) differs from init ($establishedAudioCodec); receiver may corrupt this segment's audio")
+        }
         val bytes = HlsMp4Builder.buildMediaSegment(
             sequenceNumber = index + 1,
             videoSamples = result.videoSamples,
