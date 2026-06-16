@@ -1827,8 +1827,10 @@ class VideoDetailActivity : AppCompatActivity() {
 
         val hlsSession = HlsTranscodeSession(video.path, probeResult, selectedAudioTrack, copyAudio, subtitleVtt)
         val hlsBasePath = service.registerHlsSession(video.title, hlsSession)
-        val playlistResource = if (hlsSession.hasSubtitles) "master.m3u8" else "playlist.m3u8"
-        val playlistUrl = "http://$serverIp:$serverPort$hlsBasePath/$playlistResource"
+        // Always cast the master playlist: it advertises the real audio CODECS
+        // (ec-3/ac-3/mp4a) so the receiver picks the correct decoder, and carries the
+        // in-manifest subtitle rendition when subtitles are present.
+        val playlistUrl = "http://$serverIp:$serverPort$hlsBasePath/master.m3u8"
         AppLogger.info(TAG, "castHls: url=$playlistUrl (subtitles=${hlsSession.hasSubtitles})")
 
         val metadata = MediaMetadata(MediaMetadata.MEDIA_TYPE_MOVIE).apply {
