@@ -176,6 +176,63 @@ class HlsMp4BuilderTest {
         assertEquals("negative PTS clamped to 0", 0L, u64(seg, traf.start + 36))
     }
 
+    @Test
+    fun initAndMediaSegments_haveFullyConsistentBoxTree() {
+        // A real demuxer rejects a file whose box sizes don't tile exactly. This walks the
+        // entire container tree and asserts every container's children fill it with no
+        // overrun and no trailing slack — the structural check a parser does before decode.
+        val video = HlsMp4Builder.VideoInit(avcC, 1920, 960)
+        val audio = HlsMp4Builder.AudioInit(HlsMp4Builder.AudioCodec.AAC, asc, 48000, 2)
+        val init = HlsMp4Builder.buildInitSegment(video, audio)
+        val media = HlsMp4Builder.buildMediaSegment(
+            5,
+            listOf(
+                HlsMp4Builder.Sample(byteArrayOf(0, 0, 0, 1, 9), 0L, true),
+                HlsMp4Builder.Sample(byteArrayOf(0, 0, 0, 1, 8), 33_000L, false)
+            ),
+            listOf(HlsMp4Builder.Sample(byteArrayOf(1, 2, 3), 0L, true)),
+            33_333L, 21_333L
+        )
+        assertBoxTreeConsistent(init)
+        assertBoxTreeConsistent(media)
+    }
+
+    /** Container boxes whose payload is purely a sequence of child boxes. */
+    private val pureContainers = setOf(
+        "moov", "trak", "mdia", "minf", "stbl", "dinf", "mvex", "edts", "moof", "traf", "udta"
+    )
+
+    private fun assertBoxTreeConsistent(data: ByteArray) {
+        val top = topLevelBoxes(data)
+        // Top-level boxes must cover the file exactly, with none truncated.
+        assertTrue("file has boxes", top.isNotEmpty())
+        assertEquals("top-level boxes tile the whole file", data.size, top.sumOf { it.size })
+        var cursor = 0
+        for (b in top) {
+            assertEquals("no gap before ${b.type}", cursor, b.start)
+            assertTrue("box ${b.type} size >= 8", b.size >= 8)
+            walkContainer(data, b)
+            cursor += b.size
+        }
+        assertEquals("no trailing bytes", data.size, cursor)
+    }
+
+    private fun walkContainer(data: ByteArray, box: Box) {
+        if (box.type !in pureContainers) return
+        val children = childBoxes(data, box)
+        assertTrue("container ${box.type} must have children", children.isNotEmpty())
+        var cursor = box.payloadStart
+        val end = box.start + box.size
+        for (c in children) {
+            assertEquals("no gap inside ${box.type} before ${c.type}", cursor, c.start)
+            assertTrue("child ${c.type} size >= 8", c.size >= 8)
+            assertTrue("child ${c.type} fits in ${box.type}", c.start + c.size <= end)
+            walkContainer(data, c)
+            cursor += c.size
+        }
+        assertEquals("children fill ${box.type} exactly (no slack)", end, cursor)
+    }
+
     private fun containsAscii(data: ByteArray, s: String): Boolean {
         val needle = s.toByteArray(Charsets.US_ASCII)
         outer@ for (i in 0..data.size - needle.size) {
