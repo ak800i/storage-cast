@@ -1813,29 +1813,25 @@ class VideoDetailActivity : AppCompatActivity() {
 
         val serverIp = getDeviceIpAddress()
         val serverPort = service.getServerPort()
-        val hlsSession = HlsTranscodeSession(video.path, probeResult, selectedAudioTrack)
-        val playlistPath = service.registerHlsSession(video.title, hlsSession)
-        val playlistUrl = "http://$serverIp:$serverPort$playlistPath"
-        AppLogger.info(TAG, "castHls: url=$playlistUrl")
+
+        // Deliver subtitles as an in-manifest HLS WebVTT rendition (not a sideloaded
+        // MediaTrack): sideloaded text tracks don't follow the HLS media timeline on
+        // the receiver, so they desync/play from the beginning when seeking.
+        val effectiveSubtitle = getEffectiveSubtitleFile()
+        val subtitleVtt: ByteArray? = effectiveSubtitle?.let {
+            try { it.readBytes() } catch (e: Exception) {
+                AppLogger.warn(TAG, "castHls: failed to read subtitle: ${e.message}"); null
+            }
+        }
+
+        val hlsSession = HlsTranscodeSession(video.path, probeResult, selectedAudioTrack, subtitleVtt)
+        val hlsBasePath = service.registerHlsSession(video.title, hlsSession)
+        val playlistResource = if (hlsSession.hasSubtitles) "master.m3u8" else "playlist.m3u8"
+        val playlistUrl = "http://$serverIp:$serverPort$hlsBasePath/$playlistResource"
+        AppLogger.info(TAG, "castHls: url=$playlistUrl (subtitles=${hlsSession.hasSubtitles})")
 
         val metadata = MediaMetadata(MediaMetadata.MEDIA_TYPE_MOVIE).apply {
             putString(MediaMetadata.KEY_TITLE, video.title)
-        }
-
-        val mediaTracks = mutableListOf<MediaTrack>()
-        val effectiveSubtitle = getEffectiveSubtitleFile()
-        if (effectiveSubtitle != null) {
-            val subtitlePath = service.registerSubtitle(effectiveSubtitle)
-            val subtitleUrl = "http://$serverIp:$serverPort$subtitlePath"
-            mediaTracks.add(
-                MediaTrack.Builder(1, MediaTrack.TYPE_TEXT)
-                    .setName("Subtitles")
-                    .setSubtype(MediaTrack.SUBTYPE_SUBTITLES)
-                    .setContentId(subtitleUrl)
-                    .setContentType("text/vtt")
-                    .setLanguage("en")
-                    .build()
-            )
         }
 
         val mediaInfo = MediaInfo.Builder(playlistUrl)
@@ -1845,7 +1841,6 @@ class VideoDetailActivity : AppCompatActivity() {
             .setHlsVideoSegmentFormat(com.google.android.gms.cast.HlsVideoSegmentFormat.FMP4)
             .setMetadata(metadata)
             .apply {
-                if (mediaTracks.isNotEmpty()) setMediaTracks(mediaTracks)
                 if (probeResult.durationMs > 0) {
                     setStreamDuration(probeResult.durationMs * 1000)
                 }
@@ -1856,12 +1851,9 @@ class VideoDetailActivity : AppCompatActivity() {
             .setMediaInfo(mediaInfo)
             .setAutoplay(true)
             .setCurrentTime(pendingSeekPositionMs)
-            .apply {
-                if (mediaTracks.isNotEmpty()) setActiveTrackIds(longArrayOf(1))
-            }
             .build()
 
-        if (mediaTracks.isNotEmpty()) {
+        if (hlsSession.hasSubtitles) {
             remoteMediaClient.setTextTrackStyle(createSubtitleStyle())
         }
 
@@ -1870,7 +1862,7 @@ class VideoDetailActivity : AppCompatActivity() {
             val status = result.status
             if (status.isSuccess) {
                 AppLogger.info(TAG, "castHls: load SUCCESS")
-                if (mediaTracks.isNotEmpty()) {
+                if (hlsSession.hasSubtitles) {
                     remoteMediaClient.setTextTrackStyle(createSubtitleStyle())
                 }
             } else {

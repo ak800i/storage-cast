@@ -144,15 +144,15 @@ class MediaServerService : Service() {
     }
 
     /**
-     * Registers an on-demand HLS VOD session. Returns the path of the media playlist
-     * (`/hls/{id}/playlist.m3u8`); the receiver then fetches `init.mp4` and `segN.m4s`
-     * under the same `/hls/{id}/` prefix, each produced/cached by the session.
+     * Registers an on-demand HLS VOD session and returns its base path (`/hls/{id}`).
+     * The receiver fetches `master.m3u8` / `playlist.m3u8`, `init.mp4`, `segN.m4s`, and
+     * (when subtitles are present) `subs.m3u8` / `subs.vtt` under that prefix.
      */
     fun registerHlsSession(label: String, session: com.storagecast.media.HlsTranscodeSession): String {
         val id = "hls_${label.hashCode().toUInt()}_${System.currentTimeMillis()}"
         server?.registerHlsSession(id, session)
         AppLogger.info("MediaServer", "Register HLS session: label=$label, id=$id")
-        return "/hls/$id/playlist.m3u8"
+        return "/hls/$id"
     }
 
     fun getServerPort(): Int = server?.listeningPort ?: 8080
@@ -405,6 +405,16 @@ class MediaServerService : Service() {
             val basePath = "/hls/$id"
             return try {
                 when {
+                    resource == "master.m3u8" -> {
+                        val playlist = hls.masterPlaylist(basePath)
+                        val resp = newFixedLengthResponse(
+                            Response.Status.OK, "application/vnd.apple.mpegurl", playlist
+                        )
+                        addCorsHeaders(resp)
+                        resp.addHeader("Cache-Control", "no-store")
+                        AppLogger.info("MediaServer", "Served HLS master ($id, ${playlist.length} chars)")
+                        resp
+                    }
                     resource == "playlist.m3u8" -> {
                         val playlist = hls.playlist(basePath)
                         val resp = newFixedLengthResponse(
@@ -414,6 +424,29 @@ class MediaServerService : Service() {
                         resp.addHeader("Cache-Control", "no-store")
                         AppLogger.info("MediaServer", "Served HLS playlist ($id, ${playlist.length} chars)")
                         resp
+                    }
+                    resource == "subs.m3u8" -> {
+                        val playlist = hls.subtitlePlaylist(basePath)
+                        val resp = newFixedLengthResponse(
+                            Response.Status.OK, "application/vnd.apple.mpegurl", playlist
+                        )
+                        addCorsHeaders(resp)
+                        resp.addHeader("Cache-Control", "no-store")
+                        AppLogger.info("MediaServer", "Served HLS subtitle playlist ($id)")
+                        resp
+                    }
+                    resource == "subs.vtt" -> {
+                        val vtt = hls.subtitleVttBytes()
+                        if (vtt == null) {
+                            newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "No subtitles")
+                        } else {
+                            val resp = newResponse(
+                                Response.Status.OK, "text/vtt", java.io.ByteArrayInputStream(vtt), vtt.size.toLong()
+                            )
+                            addCorsHeaders(resp)
+                            resp.addHeader("Cache-Control", "no-store")
+                            resp
+                        }
                     }
                     resource == "init.mp4" -> serveBytes(hls.initBytes(), "video/mp4", rangeHeader)
                     resource.startsWith("seg") && resource.endsWith(".m4s") -> {

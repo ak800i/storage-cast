@@ -17,13 +17,17 @@ import com.storagecast.log.AppLogger
 class HlsTranscodeSession(
     private val inputPath: String,
     private val probeResult: MediaProbeResult,
-    private val selectedAudioTrack: AudioTrackInfo?
+    private val selectedAudioTrack: AudioTrackInfo?,
+    /** Raw WebVTT bytes for the selected subtitle, or null. Served as an in-manifest rendition. */
+    private val subtitleVtt: ByteArray? = null
 ) {
     companion object {
         private const val TAG = "HlsTranscodeSession"
         const val SEGMENT_DURATION_US = 6_000_000L
         private const val MAX_CACHED_SEGMENTS = 4
     }
+
+    val hasSubtitles: Boolean = subtitleVtt != null && subtitleVtt.isNotEmpty()
 
     private val transcoder = HlsSegmentTranscoder()
     private val durationUs: Long = (probeResult.durationMs.coerceAtLeast(0)) * 1000
@@ -70,7 +74,57 @@ class HlsTranscodeSession(
         return sb.toString()
     }
 
-    /** Returns the init segment, transcoding segment 0 first if needed to learn the codec config. */
+    /**
+     * Master playlist that references the video media playlist plus an in-manifest
+     * WebVTT subtitle rendition. Sideloaded text tracks don't reliably follow the HLS
+     * media timeline on the Cast receiver (subtitles desync on seek); an in-manifest
+     * rendition shares the video timeline so cues stay aligned through seeks.
+     */
+    fun masterPlaylist(basePath: String): String {
+        val sb = StringBuilder()
+        sb.append("#EXTM3U\n")
+        sb.append("#EXT-X-VERSION:7\n")
+        if (hasSubtitles) {
+            sb.append("#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"Subtitles\",")
+            sb.append("DEFAULT=YES,AUTOSELECT=YES,FORCED=NO,LANGUAGE=\"en\",URI=\"")
+            sb.append(basePath).append("/subs.m3u8\"\n")
+            sb.append("#EXT-X-STREAM-INF:BANDWIDTH=8000000,CODECS=\"avc1.640029,mp4a.40.2\",SUBTITLES=\"subs\"\n")
+        } else {
+            sb.append("#EXT-X-STREAM-INF:BANDWIDTH=8000000,CODECS=\"avc1.640029,mp4a.40.2\"\n")
+        }
+        sb.append(basePath).append("/playlist.m3u8\n")
+        return sb.toString()
+    }
+
+    /** WebVTT subtitle media playlist: a single segment covering the whole VOD. */
+    fun subtitlePlaylist(basePath: String): String {
+        val totalSecs = (durationUs.coerceAtLeast(1)).toDouble() / 1_000_000.0
+        val sb = StringBuilder()
+        sb.append("#EXTM3U\n")
+        sb.append("#EXT-X-VERSION:7\n")
+        sb.append("#EXT-X-PLAYLIST-TYPE:VOD\n")
+        sb.append("#EXT-X-TARGETDURATION:").append(Math.ceil(totalSecs).toInt()).append('\n')
+        sb.append("#EXT-X-MEDIA-SEQUENCE:0\n")
+        sb.append("#EXTINF:").append(String.format(java.util.Locale.US, "%.3f", totalSecs)).append(",\n")
+        sb.append(basePath).append("/subs.vtt\n")
+        sb.append("#EXT-X-ENDLIST\n")
+        return sb.toString()
+    }
+
+    /**
+     * The WebVTT body with an `X-TIMESTAMP-MAP` header so the receiver maps cue local
+     * time directly onto the (0-based, absolute-source) media timeline. MPEGTS:0 +
+     * LOCAL:0 is an identity mapping, so cue at time T shows at media time T.
+     */
+    fun subtitleVttBytes(): ByteArray? {
+        val raw = subtitleVtt ?: return null
+        val text = String(raw, Charsets.UTF_8)
+        // Strip a leading BOM and the existing "WEBVTT..." header line, then re-add our own.
+        val body = text.replaceFirst(Regex("^\\uFEFF?WEBVTT[^\\n]*\\r?\\n"), "")
+        val out = "WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000\n\n" + body
+        return out.toByteArray(Charsets.UTF_8)
+    }
+
     fun initBytes(): ByteArray {
         initSegment?.let { return it }
         synchronized(lock) {
