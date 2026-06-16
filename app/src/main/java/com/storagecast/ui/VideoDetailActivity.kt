@@ -1568,10 +1568,9 @@ class VideoDetailActivity : AppCompatActivity() {
                 AppLogger.info(TAG, "All codecs compatible, casting directly")
                 directStreamOrRemux(video)
             } else if (SettingsActivity.getHlsSeeking(this@VideoDetailActivity)) {
-                // The user has opted into seekable HLS transcoding; an incompatible file
-                // would fail as a direct cast, so transcode it automatically rather than
-                // prompting (and defaulting to the failing "Direct stream" option) on
-                // every cast. Mirrors the realtime-transcode bypass above.
+                // The user has opted into seekable HLS transcoding, so transcode an
+                // incompatible file automatically instead of prompting — the dialog choice
+                // would only ever be "transcode" here anyway. Mirrors the realtime bypass.
                 AppLogger.info(TAG, "Incompatible codecs + HLS seeking enabled, transcoding automatically: ${result.summary}")
                 startTranscoding(video, probeResult, pendingSeekPositionMs)
             } else {
