@@ -302,6 +302,47 @@ class HlsMp4BuilderTest {
         return sum
     }
 
+    @Test
+    fun consecutiveSegments_videoTimelineIsContinuousAcrossBoundary() {
+        // Same boundary-continuity invariant for the (re-encoded) video track. Video trun
+        // entries are 12 bytes (per-sample flags present), so the offsets differ from audio.
+        val seg0Video = listOf(
+            HlsMp4Builder.Sample(byteArrayOf(1), 0L, true),
+            HlsMp4Builder.Sample(byteArrayOf(2), 33_333L, false),
+            HlsMp4Builder.Sample(byteArrayOf(3), 66_666L, false)
+        )
+        val seg1Video = listOf(
+            HlsMp4Builder.Sample(byteArrayOf(4), 99_999L, true),
+            HlsMp4Builder.Sample(byteArrayOf(5), 133_332L, false)
+        )
+        val a = listOf(HlsMp4Builder.Sample(byteArrayOf(9), 0L, true))
+        val seg0 = HlsMp4Builder.buildMediaSegment(1, seg0Video, a, 33_333L, 21_333L)
+        val seg1 = HlsMp4Builder.buildMediaSegment(2, seg1Video, a, 33_333L, 21_333L)
+
+        val seg0End = videoTfdt(seg0) + videoDurationSum(seg0)
+        val seg1Start = videoTfdt(seg1)
+        assertEquals("seg0 video end must meet seg1 video tfdt (no gap/overlap)", seg1Start, seg0End)
+        assertEquals("expected continuity point", 99_999L, seg1Start)
+    }
+
+    /** tfdt of the video traf (first traf), at traf.start + 36. */
+    private fun videoTfdt(seg: ByteArray): Long {
+        val moof = find(topLevelBoxes(seg), "moof")!!
+        val videoTraf = childBoxes(seg, moof).first { it.type == "traf" }
+        return u64(seg, videoTraf.start + 36)
+    }
+
+    /** Sum of the video traf's per-sample trun durations (12-byte entries, flags present). */
+    private fun videoDurationSum(seg: ByteArray): Long {
+        val moof = find(topLevelBoxes(seg), "moof")!!
+        val videoTraf = childBoxes(seg, moof).first { it.type == "traf" }
+        val trunStart = videoTraf.start + 44
+        val count = u32(seg, trunStart + 12)
+        var sum = 0L
+        for (k in 0 until count) sum += u32(seg, trunStart + 20 + k * 12).toLong()
+        return sum
+    }
+
     private fun containsAscii(data: ByteArray, s: String): Boolean {
         val needle = s.toByteArray(Charsets.US_ASCII)
         outer@ for (i in 0..data.size - needle.size) {
