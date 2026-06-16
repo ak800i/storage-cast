@@ -63,9 +63,9 @@
     <string name="copy_audio">Copy audio (video-only transcode)</string>
     <string name="copy_audio_on">Audio copy on (video-only transcode)</string>
     <string name="copy_audio_off">Audio copy off (audio will be transcoded)</string>
-    <string name="hls_seeking">Seekable HLS (experimental)</string>
-    <string name="hls_seeking_on">Seekable HLS on (experimental)</string>
-    <string name="hls_seeking_off">Seekable HLS off</string>
+    <string name="hls_seeking">Seekable HLS transcoding</string>
+    <string name="hls_seeking_on">Seekable HLS on</string>
+    <string name="hls_seeking_off">Seekable HLS off (live transcode)</string>
     <string name="select_audio_track">Audio</string>
     <string name="audio_track_title">Audio track</string>
     <string name="audio_track_default">Default (first track)</string>

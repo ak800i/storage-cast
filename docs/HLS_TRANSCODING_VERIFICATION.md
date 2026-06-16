@@ -18,7 +18,8 @@ on the release build.
 
 ## Settings
 
-- [ ] **Settings → "HLS seeking (VOD)"** is ON.
+- [ ] **Settings / video overflow menu → "Seekable HLS transcoding"** is ON (this is the
+      default; turn it off only to test the live seek-by-restart fallback).
 - [ ] **Settings → "Copy audio (preserve surround)"** — test both states (see below).
 
 ## Core playback
