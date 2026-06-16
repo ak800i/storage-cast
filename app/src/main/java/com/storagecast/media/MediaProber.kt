@@ -128,14 +128,23 @@ class MediaProber {
         var profile = format.getIntSafe(MediaFormat.KEY_PROFILE, -1)
         val level = format.getIntSafe(MediaFormat.KEY_LEVEL, -1)
 
-        // MediaExtractor often omits KEY_PROFILE for HEVC in MKV; recover it from the SPS
-        // so 10-bit (Main 10) content is still detected and routed to transcoding.
-        if (profile < 0 && mime == "video/hevc") {
-            csdBytes(format, 0)?.let { csd ->
-                val idc = HevcProfile.profileIdcFromCsd(csd)
-                if (idc >= 0) {
-                    profile = idc
-                    AppLogger.info(TAG, "HEVC profile recovered from SPS: general_profile_idc=$idc")
+        // MediaExtractor often omits KEY_PROFILE for HEVC/AVC in MKV; recover it from the
+        // SPS so 10-bit (HEVC Main 10 / AVC High 10) content is still detected for transcode.
+        if (profile < 0) {
+            when (mime) {
+                "video/hevc" -> csdBytes(format, 0)?.let { csd ->
+                    val idc = HevcProfile.profileIdcFromCsd(csd)
+                    if (idc >= 0) {
+                        profile = idc
+                        AppLogger.info(TAG, "HEVC profile recovered from SPS: general_profile_idc=$idc")
+                    }
+                }
+                "video/avc" -> csdBytes(format, 0)?.let { csd ->
+                    val p = AvcProfile.profileFromCsd(csd)
+                    if (p >= 0) {
+                        profile = p
+                        AppLogger.info(TAG, "AVC profile recovered from SPS: profile=$p")
+                    }
                 }
             }
         }

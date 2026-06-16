@@ -24,7 +24,7 @@ object HevcProfile {
 
     /** Returns the HEVC `general_profile_idc`, or -1 if no SPS is found. */
     fun profileIdcFromCsd(csd0: ByteArray): Int {
-        for (nal in splitAnnexB(csd0)) {
+        for (nal in AnnexBNal.split(csd0)) {
             if (nal.size < 4) continue
             val type = (nal[0].toInt() and 0x7E) shr 1
             if (type == NAL_TYPE_SPS) {
@@ -32,26 +32,5 @@ object HevcProfile {
             }
         }
         return -1
-    }
-
-    /** Splits an Annex-B byte stream (3- or 4-byte start codes) into NAL unit payloads. */
-    private fun splitAnnexB(data: ByteArray): List<ByteArray> {
-        val codePositions = ArrayList<Int>()
-        var i = 0
-        while (i + 2 < data.size) {
-            if (data[i] == 0.toByte() && data[i + 1] == 0.toByte() && data[i + 2] == 1.toByte()) {
-                codePositions.add(i)
-                i += 3
-            } else {
-                i++
-            }
-        }
-        val nalus = ArrayList<ByteArray>(codePositions.size)
-        for (k in codePositions.indices) {
-            val start = codePositions[k] + 3
-            val end = if (k + 1 < codePositions.size) codePositions[k + 1] else data.size
-            if (end - start >= 4) nalus.add(data.copyOfRange(start, end))
-        }
-        return nalus
     }
 }
