@@ -16,8 +16,8 @@ import org.junit.Test
  */
 class CastCompatibilityTest {
 
-    private fun video(mime: String, w: Int = 1920, h: Int = 1080) =
-        VideoTrackInfo(0, mime.substringAfter('/'), mime, w, h, 24f, 5_000_000, "unknown", "unknown")
+    private fun video(mime: String, w: Int = 1920, h: Int = 1080, profile: String = "unknown") =
+        VideoTrackInfo(0, mime.substringAfter('/'), mime, w, h, 24f, 5_000_000, profile, "unknown")
 
     private fun audio(mime: String, ch: Int = 2) =
         AudioTrackInfo(1, mime.substringAfter('/'), mime, 48000, ch, 192_000, "und")
@@ -92,12 +92,25 @@ class CastCompatibilityTest {
     }
 
     @Test
-    fun characterize_hevcByMimeIsTreatedAsSupported() {
-        // NOTE: support is decided by MIME only — video/hevc passes even for 10-bit, which
-        // a first-gen Chromecast cannot actually decode. Pinned here so a future, more
-        // precise check (profile/bit-depth aware) is a deliberate change, not a surprise.
-        val r = cc.checkCompatibility(probe("mkv", listOf(video("video/hevc")), listOf(audio("audio/eac3", ch = 6))))
-        assertTrue("hevc currently passes the MIME gate", r.unsupportedVideoCodecs.isEmpty())
+    fun hevc8bit_passesTheCodecGate() {
+        // 8-bit HEVC (Main) is left to the receiver — only 10-bit is force-transcoded.
+        val r = cc.checkCompatibility(probe("mkv", listOf(video("video/hevc", profile = "Main")), listOf(audio("audio/eac3", ch = 6))))
+        assertTrue("8-bit hevc passes the codec gate", r.unsupportedVideoCodecs.isEmpty())
         assertTrue(r.isFullyCompatible)
+    }
+
+    @Test
+    fun hevcMain10_isFlaggedForTranscode() {
+        // 10-bit HEVC (Main 10) fails on most Cast targets, so it must route to transcoding.
+        val r = cc.checkCompatibility(probe("mkv", listOf(video("video/hevc", profile = "Main 10")), listOf(audio("audio/eac3", ch = 6))))
+        assertEquals(1, r.unsupportedVideoCodecs.size)
+        assertFalse("Main 10 must not be reported fully compatible", r.isFullyCompatible)
+    }
+
+    @Test
+    fun avcHigh10_isFlaggedForTranscode() {
+        val r = cc.checkCompatibility(probe("mp4", listOf(video("video/avc", profile = "High 10")), listOf(audio("audio/mp4a-latm"))))
+        assertEquals(1, r.unsupportedVideoCodecs.size)
+        assertFalse(r.isFullyCompatible)
     }
 }

@@ -42,7 +42,14 @@ class CastCompatibility {
     )
 
     fun checkCompatibility(probeResult: MediaProbeResult): CompatibilityResult {
-        val unsupportedVideo = probeResult.videoTracks.filter { it.mime !in SUPPORTED_VIDEO_MIMES }
+        // A video track needs transcoding if its codec MIME is unsupported, OR it is a
+        // 10-bit profile (HEVC "Main 10" / AVC "High 10"). 10-bit decode fails on most
+        // Cast targets — even ones that handle 8-bit HEVC — and is the HDR/10-bit case the
+        // transcoder tone-maps to SDR. Flagging it routes such files to the transcode path
+        // instead of attempting a direct cast that silently fails on the receiver.
+        val unsupportedVideo = probeResult.videoTracks.filter {
+            it.mime !in SUPPORTED_VIDEO_MIMES || isHighBitDepthProfile(it.profile)
+        }
         val unsupportedAudio = probeResult.audioTracks.filter { it.mime !in SUPPORTED_AUDIO_MIMES }
 
         val containerExt = probeResult.containerFormat
@@ -73,6 +80,14 @@ class CastCompatibility {
 
         return result
     }
+
+    /**
+     * 10-bit video profiles (HEVC Main 10, AVC High 10). These are reported by
+     * [MediaProber.formatProfile] as the exact strings below and must be transcoded for
+     * broad Cast compatibility regardless of whether the codec MIME itself is supported.
+     */
+    private fun isHighBitDepthProfile(profile: String): Boolean =
+        profile == "Main 10" || profile == "High 10"
 
     private fun buildSummary(
         unsupportedVideo: List<VideoTrackInfo>,
