@@ -109,9 +109,34 @@ class HlsTranscodeSessionTest {
         assertTrue("has identity timestamp map", out.contains("X-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000"))
         assertTrue("keeps the cue", out.contains("00:00:01.000 --> 00:00:02.000"))
         assertTrue("keeps cue text", out.contains("Hello"))
-        // The original "WEBVTT - some header" line must be stripped (no duplicate header).
-        assertFalse("no leftover original header", out.contains("WEBVTT - some header"))
+        // The original "WEBVTT - some header" first line is preserved (map injected after it).
+        assertTrue("keeps original signature line", out.contains("WEBVTT - some header"))
+        // The map line sits on line 2, inside the header block (before the first blank line).
+        val lines = out.split("\n")
+        assertEquals("map is line 2", "X-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000", lines[1])
         assertEquals("exactly one WEBVTT token", 1, Regex("WEBVTT").findAll(out).count())
+    }
+
+    @Test
+    fun subtitleVtt_keepsStyleBlockInHeader() {
+        // A STYLE block must remain after the header lines and before the first cue,
+        // with no stray blank line splitting it from the header.
+        val src = "WEBVTT\n\nSTYLE\n::cue { color: yellow }\n\n00:00:01.000 --> 00:00:02.000\nHi\n"
+        val out = String(session(12_000, subtitle = src.toByteArray()).subtitleVttBytes()!!)
+        val lines = out.split("\n")
+        assertEquals("WEBVTT first", "WEBVTT", lines[0])
+        assertEquals("map second", "X-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000", lines[1])
+        assertEquals("blank line ends header", "", lines[2])
+        assertEquals("STYLE block preserved", "STYLE", lines[3])
+        assertTrue("cue preserved", out.contains("00:00:01.000 --> 00:00:02.000"))
+    }
+
+    @Test
+    fun subtitleVtt_doesNotDuplicateExistingTimestampMap() {
+        val src = "WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:900000,LOCAL:00:00:00.000\n\n00:00:01.000 --> 00:00:02.000\nHi\n"
+        val out = String(session(12_000, subtitle = src.toByteArray()).subtitleVttBytes()!!)
+        assertEquals("one timestamp map only", 1, Regex("X-TIMESTAMP-MAP").findAll(out).count())
+        assertTrue("preserves the existing map value", out.contains("MPEGTS:900000"))
     }
 
     @Test

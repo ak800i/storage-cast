@@ -131,14 +131,31 @@ class HlsTranscodeSession(
     /**
      * The WebVTT body with an `X-TIMESTAMP-MAP` header so the receiver maps cue local
      * time directly onto the (0-based, absolute-source) media timeline. MPEGTS:0 +
-     * LOCAL:0 is an identity mapping, so cue at time T shows at media time T.
+     * LOCAL:0 is an identity mapping, so a cue at time T shows at media time T.
+     *
+     * The `X-TIMESTAMP-MAP` line is injected immediately after the existing `WEBVTT`
+     * signature so it stays inside the header block (before the first blank line),
+     * preserving any other header metadata or STYLE blocks that follow.
      */
     fun subtitleVttBytes(): ByteArray? {
         val raw = subtitleVtt ?: return null
-        val text = String(raw, Charsets.UTF_8)
-        // Strip a leading BOM and the existing "WEBVTT..." header line, then re-add our own.
-        val body = text.replaceFirst(Regex("^\\uFEFF?WEBVTT[^\\n]*\\r?\\n"), "")
-        val out = "WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000\n\n" + body
+        var text = String(raw, Charsets.UTF_8)
+        // Drop a leading UTF-8 BOM if present.
+        if (text.isNotEmpty() && text[0] == '\uFEFF') text = text.substring(1)
+
+        val mapLine = "X-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000"
+        // Already has a timestamp map? Leave it untouched.
+        if (text.contains("X-TIMESTAMP-MAP")) return text.toByteArray(Charsets.UTF_8)
+
+        val nl = text.indexOf('\n')
+        val out = if (nl < 0 || !text.take(6).startsWith("WEBVTT")) {
+            // No newline yet, or doesn't start with the signature — write a clean header.
+            "WEBVTT\n$mapLine\n\n" + text.removePrefix("WEBVTT")
+        } else {
+            // Insert the map line right after the WEBVTT signature line.
+            val firstLineEnd = nl + 1
+            text.substring(0, firstLineEnd) + mapLine + "\n" + text.substring(firstLineEnd)
+        }
         return out.toByteArray(Charsets.UTF_8)
     }
 
