@@ -187,6 +187,13 @@ class HlsTranscodeSession(
         // Capture configs from the first segment we build (used for the shared init).
         if (videoInit == null) videoInit = result.video
         if (audioInit == null) audioInit = result.audio
+        // All segments share one init segment, so each must decode against the same
+        // SPS/PPS. Warn if a later segment's avcC diverges (would corrupt on the receiver).
+        val establishedAvcC = videoInit?.avcC
+        val segmentAvcC = result.video?.avcC
+        if (segmentAvcC != null && !HlsTranscodeMath.avcConfigsMatch(establishedAvcC, segmentAvcC)) {
+            AppLogger.warn(TAG, "Segment $index avcC differs from init segment avcC; receiver may corrupt this segment")
+        }
         val bytes = HlsMp4Builder.buildMediaSegment(
             sequenceNumber = index + 1,
             videoSamples = result.videoSamples,

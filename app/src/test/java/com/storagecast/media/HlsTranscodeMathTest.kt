@@ -156,4 +156,34 @@ class HlsTranscodeMathTest {
         assertTrue(HlsTranscodeMath.audioFrameIncluded(6_000_000, 6_000_000))
         assertFalse(HlsTranscodeMath.audioFrameIncluded(5_999_999, 6_000_000))
     }
+
+    // ── avcC equivalence (shared-init invariant) ──────────────────────────────
+
+    @Test
+    fun avcConfigsMatch_trueForIdenticalRecords() {
+        val a = byteArrayOf(1, 0x64, 0, 0x29, 7, 8, 9)
+        val b = byteArrayOf(1, 0x64, 0, 0x29, 7, 8, 9)
+        assertTrue(HlsTranscodeMath.avcConfigsMatch(a, b))
+    }
+
+    @Test
+    fun avcConfigsMatch_falseWhenContentDiffers() {
+        val a = byteArrayOf(1, 0x64, 0, 0x29, 7, 8, 9)
+        val b = byteArrayOf(1, 0x4D, 0, 0x28, 7, 8, 9) // different profile/level
+        assertFalse(HlsTranscodeMath.avcConfigsMatch(a, b))
+    }
+
+    @Test
+    fun avcConfigsMatch_falseWhenLengthDiffers() {
+        val a = byteArrayOf(1, 0x64, 0, 0x29)
+        val b = byteArrayOf(1, 0x64, 0, 0x29, 0)
+        assertFalse(HlsTranscodeMath.avcConfigsMatch(a, b))
+    }
+
+    @Test
+    fun avcConfigsMatch_nullHandling() {
+        assertTrue("both null match", HlsTranscodeMath.avcConfigsMatch(null, null))
+        assertFalse("one null differs", HlsTranscodeMath.avcConfigsMatch(byteArrayOf(1), null))
+        assertFalse("other null differs", HlsTranscodeMath.avcConfigsMatch(null, byteArrayOf(1)))
+    }
 }

@@ -56,4 +56,19 @@ object HlsTranscodeMath {
 
     /** Whether a source audio frame falls within this segment (at/after start; end already checked). */
     fun audioFrameIncluded(ptsUs: Long, startUs: Long): Boolean = ptsUs >= startUs
+
+    /**
+     * Whether two `avcC` (AVCDecoderConfigurationRecord) blobs are interchangeable.
+     *
+     * HLS fMP4 segments share a single init segment, so every independently-encoded
+     * segment must decode against the same SPS/PPS. Encoding each segment with an
+     * identical output format should yield a byte-identical record; this is the check
+     * used to detect (and warn about) a hardware encoder that deviates, since that
+     * would otherwise surface as silent corruption on the receiver.
+     */
+    fun avcConfigsMatch(a: ByteArray?, b: ByteArray?): Boolean = when {
+        a == null && b == null -> true
+        a == null || b == null -> false
+        else -> a.contentEquals(b)
+    }
 }
