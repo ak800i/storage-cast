@@ -143,6 +143,39 @@ class HlsMp4BuilderTest {
         assertEquals(mdat.payloadStart - moof.start, videoDataOffset)
     }
 
+    @Test
+    fun mediaSegment_tfdtAnchorsTimelineToFirstSamplePts() {
+        // tfdt (baseMediaDecodeTime) is the seek anchor: the receiver places the segment
+        // on the timeline at this value, so it must equal each track's first sample PTS.
+        val vStart = 18_000_000L
+        val aStart = 18_021_000L
+        val vSamples = listOf(
+            HlsMp4Builder.Sample(byteArrayOf(0, 0, 0, 1, 5), vStart, true),
+            HlsMp4Builder.Sample(byteArrayOf(0, 0, 0, 1, 6), vStart + 33_000L, false)
+        )
+        val aSamples = listOf(
+            HlsMp4Builder.Sample(byteArrayOf(1, 2), aStart, true),
+            HlsMp4Builder.Sample(byteArrayOf(3, 4), aStart + 21_000L, true)
+        )
+        val seg = HlsMp4Builder.buildMediaSegment(3, vSamples, aSamples, 33_333L, 21_333L)
+        val moof = find(topLevelBoxes(seg), "moof")!!
+        val trafs = childBoxes(seg, moof).filter { it.type == "traf" }
+
+        // tfdt v1 u64 sits at traf.start + 36 (8 traf + 16 tfhd + 8 tfdt header + 4 ver/flags).
+        assertEquals("video tfdt == first video PTS", vStart, u64(seg, trafs[0].start + 36))
+        assertEquals("audio tfdt == first audio PTS", aStart, u64(seg, trafs[1].start + 36))
+    }
+
+    @Test
+    fun mediaSegment_tfdtClampsNegativePtsToZero() {
+        // A pre-roll/edit-list negative PTS must not produce a negative (huge unsigned) tfdt.
+        val vSamples = listOf(HlsMp4Builder.Sample(byteArrayOf(1, 2, 3), -5_000L, true))
+        val seg = HlsMp4Builder.buildMediaSegment(1, vSamples, emptyList(), 33_333L, 21_333L)
+        val moof = find(topLevelBoxes(seg), "moof")!!
+        val traf = childBoxes(seg, moof).first { it.type == "traf" }
+        assertEquals("negative PTS clamped to 0", 0L, u64(seg, traf.start + 36))
+    }
+
     private fun containsAscii(data: ByteArray, s: String): Boolean {
         val needle = s.toByteArray(Charsets.US_ASCII)
         outer@ for (i in 0..data.size - needle.size) {
@@ -150,5 +183,11 @@ class HlsMp4BuilderTest {
             return true
         }
         return false
+    }
+
+    private fun u64(d: ByteArray, o: Int): Long {
+        var v = 0L
+        for (k in 0 until 8) v = (v shl 8) or (d[o + k].toLong() and 0xFF)
+        return v
     }
 }
