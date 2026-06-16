@@ -1567,47 +1567,16 @@ class VideoDetailActivity : AppCompatActivity() {
             if (result.isFullyCompatible) {
                 AppLogger.info(TAG, "All codecs compatible, casting directly")
                 directStreamOrRemux(video)
-            } else if (SettingsActivity.getHlsSeeking(this@VideoDetailActivity)) {
-                // The user has opted into seekable HLS transcoding, so transcode an
-                // incompatible file automatically instead of prompting — the dialog choice
-                // would only ever be "transcode" here anyway. Mirrors the realtime bypass.
-                AppLogger.info(TAG, "Incompatible codecs + HLS seeking enabled, transcoding automatically: ${result.summary}")
-                startTranscoding(video, probeResult, pendingSeekPositionMs)
             } else {
-                showCodecCompatibilityDialog(video, probeResult, result)
+                // An incompatible result means the receiver can't decode a codec in the file
+                // (e.g. 10-bit HEVC), so a direct cast would fail. Transcode automatically via
+                // the active path (live by default, HLS if opted in) — no prompt needed; a
+                // direct cast was never a viable choice here.
+                AppLogger.warn(TAG, "Incompatible codecs, transcoding automatically: ${result.summary}")
+                AppLogger.info(TAG, result.detailedInfo)
+                startTranscoding(video, probeResult, pendingSeekPositionMs)
             }
         }
-    }
-
-    private fun showCodecCompatibilityDialog(
-        video: VideoItem,
-        probeResult: MediaProbeResult,
-        compatResult: CastCompatibility.CompatibilityResult
-    ) {
-        AppLogger.warn(TAG, "Codec compatibility issue: ${compatResult.summary}")
-
-        val dialogView = layoutInflater.inflate(R.layout.dialog_codec_info, null)
-        val infoText = dialogView.findViewById<android.widget.TextView>(R.id.codecInfoText)
-        infoText.text = compatResult.detailedInfo
-        infoText.typeface = android.graphics.Typeface.MONOSPACE
-        infoText.setTextIsSelectable(true)
-
-        AlertDialog.Builder(this)
-            .setTitle(R.string.codec_incompatible_title)
-            .setView(dialogView)
-            // Transcode is the recommended action: an incompatible result means a codec
-            // the receiver can't decode (e.g. 10-bit HEVC), so a direct cast would fail.
-            // Keep "direct stream" as a secondary override rather than the emphasized default.
-            .setPositiveButton(R.string.transcode) { _, _ ->
-                AppLogger.info(TAG, "User chose to transcode")
-                startTranscoding(video, probeResult)
-            }
-            .setNegativeButton(R.string.direct_stream) { _, _ ->
-                AppLogger.info(TAG, "User chose direct stream despite incompatible codecs")
-                directStreamOrRemux(video)
-            }
-            .setNeutralButton(R.string.cancel, null)
-            .show()
     }
 
     private fun startTranscoding(video: VideoItem, probeResult: MediaProbeResult, startPositionMs: Long = 0L) {
