@@ -233,6 +233,32 @@ class HlsMp4BuilderTest {
         assertEquals("children fill ${box.type} exactly (no slack)", end, cursor)
     }
 
+    @Test
+    fun mediaSegment_lastAudioSampleDurationReusesPriorDeltaNotAacDefault() {
+        // E-AC-3 frames are 32000us (1536 samples / 48kHz). The last sample of a segment has
+        // no successor to measure, so it must reuse the prior real delta (32000), NOT the
+        // AAC-shaped default of 21333 — otherwise every segment ends ~10ms short and the
+        // receiver gets a periodic A/V discontinuity at each 6s boundary.
+        val vSamples = listOf(HlsMp4Builder.Sample(byteArrayOf(1, 2, 3), 0L, true))
+        val aSamples = listOf(
+            HlsMp4Builder.Sample(byteArrayOf(1), 0L, true),
+            HlsMp4Builder.Sample(byteArrayOf(2), 32_000L, true),
+            HlsMp4Builder.Sample(byteArrayOf(3), 64_000L, true)
+        )
+        val seg = HlsMp4Builder.buildMediaSegment(1, vSamples, aSamples, 33_333L, 21_333L)
+        val moof = find(topLevelBoxes(seg), "moof")!!
+        val trafs = childBoxes(seg, moof).filter { it.type == "traf" }
+        // Audio traf is second; its trun (no per-sample flags) has 8-byte entries starting
+        // at traf.start + 64 (8 traf + 16 tfhd + 20 tfdt + 20 trun header).
+        val audioTraf = trafs[1]
+        assertEquals("first audio duration", 32_000, u32(seg, audioTraf.start + 64))
+        assertEquals("middle audio duration", 32_000, u32(seg, audioTraf.start + 64 + 8))
+        assertEquals(
+            "last audio sample reuses 32000us delta, not the 21333 AAC default",
+            32_000, u32(seg, audioTraf.start + 64 + 16)
+        )
+    }
+
     private fun containsAscii(data: ByteArray, s: String): Boolean {
         val needle = s.toByteArray(Charsets.US_ASCII)
         outer@ for (i in 0..data.size - needle.size) {

@@ -245,12 +245,18 @@ object HlsMp4Builder {
         defaultDurUs: Long,
         includeFlags: Boolean
     ): Traf {
-        // Convert PTS to per-sample durations; last sample uses the default.
+        // Convert PTS to per-sample durations; the last sample has no successor to measure
+        // against, so reuse the previous real inter-sample delta (codec-agnostic) rather
+        // than a fixed default — a hardcoded default is only correct for one frame rate /
+        // audio sample layout (e.g. AAC's 21333us is wrong for AC-3/E-AC-3's 32000us, which
+        // would otherwise add a ~10ms discontinuity at every segment boundary).
         val enc = ArrayList<EncSample>(samples.size)
         for (i in samples.indices) {
-            val dur = if (i + 1 < samples.size) {
-                (samples[i + 1].ptsUs - samples[i].ptsUs).coerceAtLeast(1)
-            } else defaultDurUs
+            val dur = when {
+                i + 1 < samples.size -> (samples[i + 1].ptsUs - samples[i].ptsUs).coerceAtLeast(1)
+                samples.size >= 2 -> (samples[i].ptsUs - samples[i - 1].ptsUs).coerceAtLeast(1)
+                else -> defaultDurUs
+            }
             enc.add(EncSample(samples[i].data, dur, samples[i].keyframe))
         }
         val baseDecodeTimeUs = samples.first().ptsUs.coerceAtLeast(0)
