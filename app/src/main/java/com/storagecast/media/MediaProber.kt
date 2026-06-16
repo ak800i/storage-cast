@@ -125,8 +125,20 @@ class MediaProber {
         val height = format.getIntSafe(MediaFormat.KEY_HEIGHT, 0)
         val frameRate = format.getFloatSafe(MediaFormat.KEY_FRAME_RATE, 0f)
         val bitrate = format.getIntSafe(MediaFormat.KEY_BIT_RATE, 0)
-        val profile = format.getIntSafe(MediaFormat.KEY_PROFILE, -1)
+        var profile = format.getIntSafe(MediaFormat.KEY_PROFILE, -1)
         val level = format.getIntSafe(MediaFormat.KEY_LEVEL, -1)
+
+        // MediaExtractor often omits KEY_PROFILE for HEVC in MKV; recover it from the SPS
+        // so 10-bit (Main 10) content is still detected and routed to transcoding.
+        if (profile < 0 && mime == "video/hevc") {
+            csdBytes(format, 0)?.let { csd ->
+                val idc = HevcProfile.profileIdcFromCsd(csd)
+                if (idc >= 0) {
+                    profile = idc
+                    AppLogger.info(TAG, "HEVC profile recovered from SPS: general_profile_idc=$idc")
+                }
+            }
+        }
 
         return VideoTrackInfo(
             trackIndex = index,
@@ -139,6 +151,18 @@ class MediaProber {
             profile = formatProfile(mime, profile),
             level = formatLevel(mime, level)
         )
+    }
+
+    /** Reads a `csd-N` codec-config buffer into a byte array without disturbing the format. */
+    private fun csdBytes(format: MediaFormat, index: Int): ByteArray? {
+        if (!format.containsKey("csd-$index")) return null
+        return try {
+            val buf = format.getByteBuffer("csd-$index")?.duplicate() ?: return null
+            ByteArray(buf.remaining()).also { buf.get(it) }
+        } catch (e: Exception) {
+            AppLogger.warn(TAG, "Failed to read csd-$index: ${e.message}")
+            null
+        }
     }
 
     private fun extractAudioTrack(index: Int, format: MediaFormat, mime: String): AudioTrackInfo {
