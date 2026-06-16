@@ -31,6 +31,9 @@ jobs:
       - name: Decode keystore
         run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > app/keystore.jks
 
+      - name: Run unit tests
+        run: ./gradlew testDebugUnitTest
+
       - name: Build signed release APK
         env:
           KEYSTORE_PATH: ${{ github.workspace }}/app/keystore.jks

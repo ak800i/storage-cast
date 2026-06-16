@@ -27,6 +27,9 @@ jobs:
         id: version
         run: echo "code=$(date -u +%s)" >> "$GITHUB_OUTPUT"
 
+      - name: Run unit tests
+        run: ./gradlew testDebugUnitTest
+
       - name: Build debug APK
         env:
           KEYSTORE_PATH: ${{ github.event.pull_request.head.repo.full_name == github.repository && format('{0}/app/keystore.jks', github.workspace) || '' }}
