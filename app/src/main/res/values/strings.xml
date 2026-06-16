@@ -50,9 +50,6 @@
     <string name="server_not_ready">Media server not ready</string>
     <string name="probing_media">Analyzing media…</string>
     <string name="probe_failed">Failed to analyze media codecs</string>
-    <string name="codec_incompatible_title">Unsupported Codecs Detected</string>
-    <string name="direct_stream">Direct Stream</string>
-    <string name="transcode">Transcode (HW)</string>
     <string name="cancel">Cancel</string>
     <string name="transcoding_title">Transcoding…</string>
     <string name="transcoding_progress">Transcoding: %d%%</string>
