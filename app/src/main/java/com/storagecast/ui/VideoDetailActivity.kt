@@ -1603,8 +1603,8 @@ class VideoDetailActivity : AppCompatActivity() {
 
     private fun startTranscoding(video: VideoItem, probeResult: MediaProbeResult, startPositionMs: Long = 0L) {
         // Experimental: serve the transcode as seekable HLS VOD instead of a live pipe.
-        // Falls back to live for the copy-audio case (HLS path transcodes audio to AAC).
-        if (SettingsActivity.getHlsSeeking(this) && !SettingsActivity.getCopyAudio(this)) {
+        // Works with copy-audio too (the HLS segments mux the source audio untouched).
+        if (SettingsActivity.getHlsSeeking(this)) {
             castHls(video, probeResult)
             return
         }
@@ -1811,6 +1811,7 @@ class VideoDetailActivity : AppCompatActivity() {
         isLiveStreamSession = false
         isTranscodeSession = false
 
+        val copyAudio = SettingsActivity.getCopyAudio(this)
         val serverIp = getDeviceIpAddress()
         val serverPort = service.getServerPort()
 
@@ -1824,7 +1825,7 @@ class VideoDetailActivity : AppCompatActivity() {
             }
         }
 
-        val hlsSession = HlsTranscodeSession(video.path, probeResult, selectedAudioTrack, subtitleVtt)
+        val hlsSession = HlsTranscodeSession(video.path, probeResult, selectedAudioTrack, copyAudio, subtitleVtt)
         val hlsBasePath = service.registerHlsSession(video.title, hlsSession)
         val playlistResource = if (hlsSession.hasSubtitles) "master.m3u8" else "playlist.m3u8"
         val playlistUrl = "http://$serverIp:$serverPort$hlsBasePath/$playlistResource"

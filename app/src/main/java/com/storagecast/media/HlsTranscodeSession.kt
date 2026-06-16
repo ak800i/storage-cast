@@ -18,6 +18,8 @@ class HlsTranscodeSession(
     private val inputPath: String,
     private val probeResult: MediaProbeResult,
     private val selectedAudioTrack: AudioTrackInfo?,
+    /** When true, mux source audio untouched (5.1 passthrough) instead of AAC transcode. */
+    private val copyAudio: Boolean = false,
     /** Raw WebVTT bytes for the selected subtitle, or null. Served as an in-manifest rendition. */
     private val subtitleVtt: ByteArray? = null
 ) {
@@ -34,6 +36,21 @@ class HlsTranscodeSession(
     private val segmentCount: Int =
         if (durationUs <= 0) 1
         else ((durationUs + SEGMENT_DURATION_US - 1) / SEGMENT_DURATION_US).toInt().coerceAtLeast(1)
+
+    /**
+     * HLS CODECS attribute audio component. With copy-audio on, reflect the source
+     * codec so the receiver sets up the correct decoder (AAC/AC-3/E-AC-3); otherwise
+     * we transcode to AAC-LC. Falls back to AAC if the source codec isn't muxable.
+     */
+    private val audioCodecAttr: String = run {
+        val mime = (probeResult.primaryAudio?.mime ?: "").lowercase()
+        if (!copyAudio) "mp4a.40.2"
+        else when {
+            mime.contains("eac3") || mime.contains("ec3") || mime.contains("ec-3") -> "ec-3"
+            mime.contains("ac3") || mime.contains("ac-3") -> "ac-3"
+            else -> "mp4a.40.2"
+        }
+    }
 
     @Volatile
     private var initSegment: ByteArray? = null
@@ -88,9 +105,9 @@ class HlsTranscodeSession(
             sb.append("#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"Subtitles\",")
             sb.append("DEFAULT=YES,AUTOSELECT=YES,FORCED=NO,LANGUAGE=\"en\",URI=\"")
             sb.append(basePath).append("/subs.m3u8\"\n")
-            sb.append("#EXT-X-STREAM-INF:BANDWIDTH=8000000,CODECS=\"avc1.640029,mp4a.40.2\",SUBTITLES=\"subs\"\n")
+            sb.append("#EXT-X-STREAM-INF:BANDWIDTH=8000000,CODECS=\"avc1.640029,").append(audioCodecAttr).append("\",SUBTITLES=\"subs\"\n")
         } else {
-            sb.append("#EXT-X-STREAM-INF:BANDWIDTH=8000000,CODECS=\"avc1.640029,mp4a.40.2\"\n")
+            sb.append("#EXT-X-STREAM-INF:BANDWIDTH=8000000,CODECS=\"avc1.640029,").append(audioCodecAttr).append("\"\n")
         }
         sb.append(basePath).append("/playlist.m3u8\n")
         return sb.toString()
@@ -149,7 +166,7 @@ class HlsTranscodeSession(
 
     private fun buildAndCacheSegment(index: Int): ByteArray {
         val (startUs, endUs) = rangeFor(index)
-        val result = transcoder.transcodeRange(inputPath, probeResult, selectedAudioTrack, startUs, endUs)
+        val result = transcoder.transcodeRange(inputPath, probeResult, selectedAudioTrack, startUs, endUs, copyAudio)
         // Capture configs from the first segment we build (used for the shared init).
         if (videoInit == null) videoInit = result.video
         if (audioInit == null) audioInit = result.audio

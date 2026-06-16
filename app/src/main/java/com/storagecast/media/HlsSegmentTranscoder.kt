@@ -7,6 +7,7 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import com.storagecast.log.AppLogger
 import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
 
 /**
  * Transcodes a bounded time range `[startUs, endUs)` of the source into encoded
@@ -48,7 +49,8 @@ class HlsSegmentTranscoder {
         probeResult: MediaProbeResult,
         selectedAudioTrack: AudioTrackInfo?,
         startUs: Long,
-        endUs: Long
+        endUs: Long,
+        copyAudio: Boolean
     ): Result {
         val videoTrack = probeResult.primaryVideo
         val audioTrack = selectedAudioTrack ?: probeResult.primaryAudio
@@ -58,7 +60,10 @@ class HlsSegmentTranscoder {
         } else null
 
         val audioOut = if (audioTrack != null) {
-            transcodeAudioRange(inputPath, audioTrack, startUs, endUs)
+            // When copy-audio is on, mux the source audio untouched (preserves 5.1).
+            // Falls back to AAC transcoding when the codec can't be muxed.
+            (if (copyAudio) passthroughAudioRange(inputPath, audioTrack, startUs, endUs) else null)
+                ?: transcodeAudioRange(inputPath, audioTrack, startUs, endUs)
         } else null
 
         return Result(
@@ -344,8 +349,76 @@ class HlsSegmentTranscoder {
             extractor.release()
         }
 
-        val init = asc?.let { HlsMp4Builder.AudioInit(it, sampleRate, channels) }
+        val init = asc?.let { HlsMp4Builder.AudioInit(HlsMp4Builder.AudioCodec.AAC, it, sampleRate, channels) }
         return TrackOut(init, samples)
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    //  Audio range → passthrough copy (AAC / AC-3 / E-AC-3)
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Copies the source audio bitstream for the range without re-encoding (preserves
+     * the original track, e.g. 5.1). Returns null when the codec can't be muxed, so the
+     * caller falls back to AAC transcoding.
+     */
+    private fun passthroughAudioRange(
+        inputPath: String,
+        track: AudioTrackInfo,
+        startUs: Long,
+        endUs: Long
+    ): TrackOut<HlsMp4Builder.AudioInit>? {
+        val extractor = MediaExtractor()
+        extractor.setDataSource(inputPath)
+        extractor.selectTrack(track.trackIndex)
+        val format = extractor.getTrackFormat(track.trackIndex)
+        val mime = (format.getString(MediaFormat.KEY_MIME) ?: track.mime).lowercase()
+        val sampleRate = getIntSafe(format, MediaFormat.KEY_SAMPLE_RATE, track.sampleRate)
+        val channels = getIntSafe(format, MediaFormat.KEY_CHANNEL_COUNT, track.channelCount)
+
+        // Read all frames in [startUs, endUs).
+        extractor.seekTo(startUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+        val frames = ArrayList<HlsMp4Builder.Sample>()
+        val buf = ByteBuffer.allocate(64 * 1024)
+        var firstFrame: ByteArray? = null
+        try {
+            while (true) {
+                buf.clear()
+                val size = extractor.readSampleData(buf, 0)
+                if (size < 0) break
+                val pts = extractor.sampleTime
+                if (pts >= endUs) break
+                if (pts >= startUs) {
+                    val data = ByteArray(size)
+                    buf.position(0); buf.get(data, 0, size)
+                    if (firstFrame == null) firstFrame = data
+                    frames.add(HlsMp4Builder.Sample(data, pts, true))
+                }
+                extractor.advance()
+            }
+        } finally {
+            extractor.release()
+        }
+        if (frames.isEmpty()) return null
+
+        val init: HlsMp4Builder.AudioInit = when {
+            mime.contains("mp4a") || mime.contains("aac") -> {
+                val asc = getCsdBytes(format, 0) ?: return null
+                HlsMp4Builder.AudioInit(HlsMp4Builder.AudioCodec.AAC, asc, sampleRate, channels)
+            }
+            mime.contains("eac3") || mime.contains("ec3") || mime.contains("ec-3") -> {
+                val dec3 = DolbyAudioConfig.buildDec3(firstFrame!!) ?: return null
+                HlsMp4Builder.AudioInit(HlsMp4Builder.AudioCodec.EAC3, dec3, sampleRate, channels)
+            }
+            mime.contains("ac3") || mime.contains("ac-3") -> {
+                val dac3 = DolbyAudioConfig.buildDac3(firstFrame!!) ?: return null
+                HlsMp4Builder.AudioInit(HlsMp4Builder.AudioCodec.AC3, dac3, sampleRate, channels)
+            }
+            else -> return null
+        }
+
+        AppLogger.info(TAG, "Segment audio passthrough: ${init.codec} ${frames.size} frames")
+        return TrackOut(init, frames)
     }
 
     // ──────────────────────────────────────────────────────────────────────────

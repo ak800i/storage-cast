@@ -26,7 +26,20 @@ object HlsMp4Builder {
     class Sample(val data: ByteArray, val ptsUs: Long, val keyframe: Boolean)
 
     class VideoInit(val avcC: ByteArray, val width: Int, val height: Int)
-    class AudioInit(val asc: ByteArray, val sampleRate: Int, val channels: Int)
+
+    /** Audio codecs muxable into an HLS fMP4 segment (transcoded AAC or passthrough). */
+    enum class AudioCodec { AAC, AC3, EAC3 }
+
+    /**
+     * @param codecData For [AudioCodec.AAC] the raw AudioSpecificConfig (ASC); for
+     * [AudioCodec.AC3]/[AudioCodec.EAC3] the `dac3`/`dec3` box contents.
+     */
+    class AudioInit(
+        val codec: AudioCodec,
+        val codecData: ByteArray,
+        val sampleRate: Int,
+        val channels: Int
+    )
 
     // ──────────────────────────────────────────────────────────────────────────
     //  Init segment
@@ -109,7 +122,12 @@ object HlsMp4Builder {
 
     private fun buildAudioMinf(cfg: AudioInit): ByteArray {
         val smhd = fullBox("smhd", 0, 0) { b -> b.u16(0); b.u16(0) }
-        return box("minf", smhd + buildDinf() + buildStbl(buildMp4a(cfg)))
+        val sampleEntry = when (cfg.codec) {
+            AudioCodec.AAC -> buildMp4a(cfg)
+            AudioCodec.AC3 -> buildAudioSampleEntry("ac-3", cfg, box("dac3", cfg.codecData))
+            AudioCodec.EAC3 -> buildAudioSampleEntry("ec-3", cfg, box("dec3", cfg.codecData))
+        }
+        return box("minf", smhd + buildDinf() + buildStbl(sampleEntry))
     }
 
     private fun buildDinf(): ByteArray {
@@ -137,13 +155,17 @@ object HlsMp4Builder {
         return box("avc1", b.toByteArray())
     }
 
-    private fun buildMp4a(cfg: AudioInit): ByteArray {
+    private fun buildMp4a(cfg: AudioInit): ByteArray =
+        buildAudioSampleEntry("mp4a", cfg, buildEsds(cfg.codecData))
+
+    /** Standard AudioSampleEntry header ([boxType] mp4a/ac-3/ec-3) + codec-specific box. */
+    private fun buildAudioSampleEntry(boxType: String, cfg: AudioInit, codecBox: ByteArray): ByteArray {
         val b = ByteArrayOutputStream()
         repeat(6) { b.u8(0) }; b.u16(1); b.u32(0L); b.u32(0L)
         b.u16(cfg.channels); b.u16(16); b.u16(0); b.u16(0)
         b.u32(cfg.sampleRate.toLong() shl 16)
-        b.write(buildEsds(cfg.asc))
-        return box("mp4a", b.toByteArray())
+        b.write(codecBox)
+        return box(boxType, b.toByteArray())
     }
 
     private fun buildEsds(asc: ByteArray): ByteArray {
