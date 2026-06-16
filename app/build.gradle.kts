@@ -50,6 +50,13 @@ android {
     buildFeatures {
         viewBinding = true
     }
+    testOptions {
+        unitTests {
+            // android.util.Log (used by AppLogger) is a no-op stub in JVM unit tests
+            // instead of throwing, so pure decision logic that happens to log is testable.
+            isReturnDefaultValues = true
+        }
+    }
     lint {
         // Don't gate release builds on lint. lint-vital pulls the lint-gradle
         // toolchain (groovy/kotlin-reflect/httpclient) from Maven Central at build
