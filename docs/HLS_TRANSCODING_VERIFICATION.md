@@ -9,7 +9,7 @@ can only be confirmed against a real Chromecast.
 
 ```powershell
 $env:ANDROID_HOME="<sdk>"; $env:ANDROID_SDK_ROOT="<sdk>"
-.\gradlew.bat assembleDebug testDebugUnitTest --no-configuration-cache --console=plain
+.\gradlew.bat assembleDebug testDebugUnitTest --console=plain
 ```
 
 Expected: `BUILD SUCCESSFUL`, all unit tests pass (fMP4 layout, Dolby config,
