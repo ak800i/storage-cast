@@ -101,13 +101,10 @@ class HlsSegmentTranscoder {
 
         val inW = track.width
         val inH = track.height
-        require(inW > 0 && inH > 0) { "Invalid video dimensions ${inW}x${inH}" }
-        val scale = minOf(MAX_WIDTH.toFloat() / inW, MAX_HEIGHT.toFloat() / inH, 1f)
-        val outW = ((inW * scale).toInt() / 2) * 2
-        val outH = ((inH * scale).toInt() / 2) * 2
+        val (outW, outH) = HlsTranscodeMath.outputSize(inW, inH, MAX_WIDTH, MAX_HEIGHT)
 
-        val outBitrate = if (track.bitrate in 1 until OUTPUT_VIDEO_BITRATE) track.bitrate else OUTPUT_VIDEO_BITRATE
-        val outFps = if (track.frameRate > 0) track.frameRate.toInt().coerceAtMost(OUTPUT_VIDEO_FRAME_RATE) else OUTPUT_VIDEO_FRAME_RATE
+        val outBitrate = HlsTranscodeMath.clampBitrate(track.bitrate, OUTPUT_VIDEO_BITRATE)
+        val outFps = HlsTranscodeMath.clampFrameRate(track.frameRate.toDouble(), OUTPUT_VIDEO_FRAME_RATE)
 
         val outFormat = MediaFormat.createVideoFormat(OUTPUT_VIDEO_MIME, outW, outH).apply {
             setInteger(MediaFormat.KEY_BIT_RATE, outBitrate)
@@ -162,11 +159,10 @@ class HlsSegmentTranscoder {
                         val eos = (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
                         val pts = info.presentationTimeUs
                         // Drop pre-roll frames before the segment start; stop feeding at end.
-                        val render = info.size > 0 &&
-                            (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0 &&
-                            pts >= startUs && pts < endUs
+                        val isCfg = (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
+                        val render = HlsTranscodeMath.shouldRenderVideoFrame(info.size, isCfg, pts, startUs, endUs)
                         decoder.releaseOutputBuffer(status, render)
-                        if (eos || pts >= endUs) {
+                        if (HlsTranscodeMath.isVideoSegmentComplete(eos, pts, endUs)) {
                             decoderDone = true
                             if (!encoderEosSent) { encoder.signalEndOfInputStream(); encoderEosSent = true }
                         }
@@ -387,8 +383,8 @@ class HlsSegmentTranscoder {
                 val size = extractor.readSampleData(buf, 0)
                 if (size < 0) break
                 val pts = extractor.sampleTime
-                if (pts >= endUs) break
-                if (pts >= startUs) {
+                if (HlsTranscodeMath.audioRangeEnded(pts, endUs)) break
+                if (HlsTranscodeMath.audioFrameIncluded(pts, startUs)) {
                     val data = ByteArray(size)
                     buf.position(0); buf.get(data, 0, size)
                     if (firstFrame == null) firstFrame = data
