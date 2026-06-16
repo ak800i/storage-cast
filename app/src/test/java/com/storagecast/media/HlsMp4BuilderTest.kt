@@ -259,6 +259,49 @@ class HlsMp4BuilderTest {
         )
     }
 
+    @Test
+    fun consecutiveSegments_audioTimelineIsContinuousAcrossBoundary() {
+        // The end of one segment's audio (tfdt + sum of durations) must equal the next
+        // segment's audio tfdt, or the receiver gets a gap/overlap every boundary. This is
+        // exactly what the "reuse prior delta for the last sample" rule guarantees for the
+        // E-AC-3 cadence (32000us), where frames don't divide the 6s boundary evenly.
+        val seg0Audio = listOf(
+            HlsMp4Builder.Sample(byteArrayOf(1), 0L, true),
+            HlsMp4Builder.Sample(byteArrayOf(2), 32_000L, true),
+            HlsMp4Builder.Sample(byteArrayOf(3), 64_000L, true)
+        )
+        val seg1Audio = listOf(
+            HlsMp4Builder.Sample(byteArrayOf(4), 96_000L, true),
+            HlsMp4Builder.Sample(byteArrayOf(5), 128_000L, true)
+        )
+        val v = listOf(HlsMp4Builder.Sample(byteArrayOf(9), 0L, true))
+        val seg0 = HlsMp4Builder.buildMediaSegment(1, v, seg0Audio, 33_333L, 21_333L)
+        val seg1 = HlsMp4Builder.buildMediaSegment(2, v, seg1Audio, 33_333L, 21_333L)
+
+        val seg0End = audioTfdt(seg0) + audioDurationSum(seg0)
+        val seg1Start = audioTfdt(seg1)
+        assertEquals("seg0 audio end must meet seg1 audio tfdt (no gap/overlap)", seg1Start, seg0End)
+        assertEquals("expected continuity point", 96_000L, seg1Start)
+    }
+
+    /** tfdt (baseMediaDecodeTime) of the audio traf (second traf), at traf.start + 36. */
+    private fun audioTfdt(seg: ByteArray): Long {
+        val moof = find(topLevelBoxes(seg), "moof")!!
+        val audioTraf = childBoxes(seg, moof).filter { it.type == "traf" }[1]
+        return u64(seg, audioTraf.start + 36)
+    }
+
+    /** Sum of the audio traf's per-sample trun durations (8-byte entries, no flags). */
+    private fun audioDurationSum(seg: ByteArray): Long {
+        val moof = find(topLevelBoxes(seg), "moof")!!
+        val audioTraf = childBoxes(seg, moof).filter { it.type == "traf" }[1]
+        val trunStart = audioTraf.start + 44
+        val count = u32(seg, trunStart + 12)
+        var sum = 0L
+        for (k in 0 until count) sum += u32(seg, trunStart + 20 + k * 8).toLong()
+        return sum
+    }
+
     private fun containsAscii(data: ByteArray, s: String): Boolean {
         val needle = s.toByteArray(Charsets.US_ASCII)
         outer@ for (i in 0..data.size - needle.size) {
