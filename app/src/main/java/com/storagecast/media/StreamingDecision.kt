@@ -1,0 +1,87 @@
+package com.storagecast.media
+
+/**
+ * Decides, from a probed source, how to get it onto the Cast receiver with the least
+ * processing: direct play when both streams are supported, otherwise transcode only what's
+ * needed. Pure (Android-free) so it is unit-tested.
+ *
+ * Routing reflects two on-device-verified receiver constraints (Default Media Receiver):
+ *  - Dolby (AC-3 / E-AC-3) plays via direct play and the progressive live stream, but the
+ *    receiver REJECTS it in HLS fMP4 ("Invalid Request"). So Dolby that must accompany a
+ *    transcoded video stays on the live path (seek-by-restart) to keep 5.1; everything else
+ *    transcodes over seekable HLS VOD.
+ *  - The SDK exposes no codec-capability list, so [decide] uses a conservative baseline; the
+ *    caller layers reactive learning on top (escalate + remember when a direct play errors).
+ */
+object StreamingDecision {
+
+    enum class Path { DIRECT, HLS, LIVE }
+
+    data class Plan(
+        val path: Path,
+        /** Whether the video stream is re-encoded (false only for DIRECT). */
+        val transcodeVideo: Boolean,
+        /** For HLS/LIVE: pass the source audio through (true) vs transcode to AAC (false). */
+        val copyAudio: Boolean,
+        val reason: String
+    )
+
+    /** 8-bit video codecs the receiver can typically decode directly. */
+    private val DIRECT_VIDEO = setOf(
+        "video/avc", "video/x-vnd.on2.vp8", "video/x-vnd.on2.vp9", "video/av01"
+    )
+
+    /** Audio the receiver can play directly (includes Dolby via passthrough). */
+    private val DIRECT_AUDIO = setOf(
+        "audio/mp4a-latm", "audio/mpeg", "audio/vorbis", "audio/opus", "audio/flac",
+        "audio/ac3", "audio/eac3"
+    )
+
+    /** Audio that can be muxed into HLS fMP4 and accepted by the receiver (NOT Dolby). */
+    private val HLS_FRIENDLY_AUDIO = setOf("audio/mp4a-latm", "audio/mpeg")
+
+    /**
+     * @param forceTranscode user/advanced override: never direct-play (always transcode).
+     * @param keepOriginalAudio advanced override: prefer passing audio through even when
+     *   that forces the live path for Dolby (vs. the default which already keeps Dolby 5.1).
+     */
+    fun decide(
+        probe: MediaProbeResult,
+        forceTranscode: Boolean = false
+    ): Plan {
+        val v = probe.primaryVideo
+        val a = probe.primaryAudio
+        val vMime = (v?.mime ?: "").lowercase()
+        val aMime = (a?.mime ?: "").lowercase()
+
+        val tenBit = v != null && (v.profile == "Main 10" || v.profile == "High 10")
+        val videoSupported = v == null || (vMime in DIRECT_VIDEO && !tenBit)
+        val audioSupported = a == null || aMime in DIRECT_AUDIO
+        val audioHlsFriendly = a == null || aMime in HLS_FRIENDLY_AUDIO
+        val audioDolby = aMime.contains("ac3") || aMime.contains("ac-3") ||
+            aMime.contains("eac3") || aMime.contains("ec3")
+
+        if (!forceTranscode && videoSupported && audioSupported) {
+            return Plan(
+                Path.DIRECT, transcodeVideo = false, copyAudio = true,
+                reason = "receiver supports both streams; direct play"
+            )
+        }
+
+        // Dolby audio that must accompany a transcoded video: HLS would reject the codec,
+        // so keep it on the live path to preserve 5.1 (the single live case).
+        if (audioDolby && !videoSupported) {
+            return Plan(
+                Path.LIVE, transcodeVideo = true, copyAudio = true,
+                reason = "incompatible video + Dolby audio: live preserves 5.1 (receiver rejects $aMime over HLS)"
+            )
+        }
+
+        // Seekable HLS for everything else. The HLS engine always re-encodes video; audio is
+        // passed through when HLS-friendly, otherwise transcoded to AAC.
+        return Plan(
+            Path.HLS, transcodeVideo = true, copyAudio = audioHlsFriendly,
+            reason = "HLS transcode (audio=${if (audioHlsFriendly) "copy" else "AAC"})"
+        )
+    }
+}
