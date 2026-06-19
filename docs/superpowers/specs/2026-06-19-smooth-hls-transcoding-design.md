@@ -1,7 +1,7 @@
 # Smooth HLS transcoding — sequential pipeline + principled downscaling
 
 Date: 2026-06-19
-Status: Draft for review (rev 11 — incorporates spec-review findings)
+Status: Draft for review (rev 12 — incorporates spec-review findings)
 
 ## Problem
 
@@ -296,13 +296,20 @@ probe breaks the run rather than advancing it. **One-off builds are serialized**
 the lock released during the build) so concurrent NanoHTTPD threads can't allocate several extra
 codec sessions at once; results are cached so a repeated request hits the cache. Serving a one-off
 while the pipeline is alive (a seek *and* the subsequent cold catch-up) uses a **second hardware
-codec session**, so **2+2 hardware codecs is a hard device gate** for the pipeline path. Android
-exposes no max-concurrent-instance count, so the limit is detected by catching a
-`configure()` / `start()` failure (handling both "new codec refused" and "existing pipeline codec
-killed"). A device that can't sustain 2+2 falls back **wholesale to the current per-segment path**
-(no pipeline) — the same all-or-nothing fallback as the frame-exact-IDR and avcC-mismatch gates —
-rather than running a half-pipeline. The device request trace captures **parallelism**, not just
-ordering, since it sizes both `LEAD` and this rule.
+codec session**, so 2+2 concurrent codecs is a **fast-seek capability**, not a pipeline-eligibility
+gate. It is detected **reactively at the first concurrent one-off** (the first mid-session seek —
+`prepare()` never runs a concurrent one-off): `MediaCodecInfo.CodecCapabilities.getMaxSupportedInstances()`
+is a conservative preflight hint, confirmed by catching a `configure()` / `start()` failure (which
+may surface as "new codec refused" or "existing pipeline codec killed," the latter briefly
+disturbing the playing segment). On a 2+2-capable device, a seek is served one-off **while** the
+pipeline re-bases behind it. On a **1+1-only** device, seeks **degrade serially** — tear down the
+pipeline, serve the seek via the one-off, rebuild the pipeline at the target, and serve the cold
+catch-up by bounded `WAIT_MARGIN` waits (a brief rebuffer), never a concurrent one-off — so the
+steady-state benefit (pipeline only, 1+1) is kept and only seeks are slower (accepted per the
+product decision). Wholesale fallback to the current per-segment path is reserved for the
+frame-exact-IDR and avcC-mismatch gates (where the pipeline can't produce a correct stream), not
+for codec count. The device request trace captures **parallelism**, not just ordering, since it
+sizes both `LEAD` and this rule.
 
 ### Startup: prepare-before-load (uses the 15 s budget)
 
@@ -366,7 +373,10 @@ one-time `SEEK_TO_PREVIOUS_SYNC` pre-roll (the ~1.6× decode the new architectur
 steady state); measuring that pre-roll-inflated segment would over-estimate cost and needlessly
 downscale capable devices (against Goals 1 & 4). It **bails early**: if the steady-state segment
 can't sustain a lead (ratio above ~0.85) it steps down one rung (1080p → 720p → 540p) without
-finishing a full pre-buffer at the doomed resolution.
+finishing a full pre-buffer at the doomed resolution. If a viability gate (frame-exact-IDR /
+avcC stability) disables the pipeline, `prepare()` resolves viability **before** measuring
+resolution, and resolution is then chosen from the per-segment path's cold build ratio (or a
+conservative default rung), since there is no warm-frontier segment to measure.
 So the common case (the first resolution sustains) stays within the ~15 s budget, and each
 rejected rung adds only ~two segments of measurement, not a whole pre-buffer. The session then
 commits to the chosen resolution — still automatic and measured, without violating the one-init
@@ -437,11 +447,12 @@ A log line records each decision; an optional brief toast can inform the user.
   (interrupt the worker, release codecs in `finally`) before starting a new one, mirroring the
   live path's teardown. The pipeline owns one codec session; a one-off build during a seek
   transiently adds a second (bounded 2+2), handled below.
-- **Concurrent codec limits.** Serving a one-off while the pipeline is alive (a seek and the
-  subsequent cold catch-up) needs 2+2 hardware codecs. This is a **hard device gate** (detected by
-  catching a `configure()` / `start()` failure); a device that can't sustain 2+2 falls back
-  **wholesale to the current per-segment path**, like the other device gates (see *Production &
-  request coordination*).
+- **Concurrent codec limits.** Serving a one-off while the pipeline is alive (seek + cold catch-up)
+  needs 2+2 hardware codecs — a **fast-seek capability** detected reactively at the first seek
+  (`getMaxSupportedInstances()` hint + `configure()` / `start()` failure). A **1+1-only** device
+  keeps the pipeline (and its steady-state benefit) but **degrades seeks serially** (teardown →
+  one-off → rebuild → catch-up via bounded waits); wholesale per-segment fallback is reserved for
+  the frame-exact-IDR / avcC gates, not codec count (see *Production & request coordination*).
 - **Boundary IDRs are best-effort.** Android's `REQUEST_SYNC_FRAME` is advisory and
   `KEY_I_FRAME_INTERVAL` is a cadence hint, so the pipeline cuts on the **observed** keyframe; if a
   boundary frame is not an IDR, that index is served by the one-off builder (guaranteed IDR), not a
@@ -509,16 +520,18 @@ A log line records each decision; an optional brief toast can inform the user.
    via `HlsMp4Builder` using the shared boundary cut rule, and adopts the live path's audio
    semantics with absolute-source PTS, constrained to `Plan.copyAudio`. Live path stays untouched.
 2. Parameterize `HlsSegmentTranscoder` from the committed encoder config and keep it as the
-   one-off / immediate-serve builder (interchangeable segments; one-off builds serialized + cached).
-   Wire `HlsTranscodeSession` to the pipeline: production frontier, `prevIndex` (init =
-   `initialSegmentIndex`), frontier-gated routing (`WAIT_MARGIN`), back-pressure (`LEAD` ≥ measured
-   read-ahead, sized for a steady-state reserve), retained-window cache, the
-   lock-released-during-waits concurrency model, init capture.
+   one-off / immediate-serve builder (interchangeable segments; one-off builds serialized + cached);
+   this includes replacing its lossy AAC copy with the live path's no-PCM-loss semantics, which must
+   land **before** any device verification of pipeline+one-off interaction (the pipeline delegates
+   every seek / catch-up / IDR-miss to it). Wire `HlsTranscodeSession` to the pipeline: production
+   frontier, `prevIndex` (init = `initialSegmentIndex`), frontier-gated routing (`WAIT_MARGIN`),
+   back-pressure (`LEAD` ≥ measured read-ahead, sized for a steady-state reserve), retained-window
+   cache, the lock-released-during-waits concurrency model, init capture.
 3. Seek / relocation: serve out-of-reach requests via the one-off builder, re-base after a
    `RELOCATE_AFTER` monotonic-adjacent run at a new location (forward jump > `READAHEAD` from the
-   moving playhead, or backward below the retained low-watermark); `NeedsRecast` via
-   `AtomicReference` → `castHls` (HTTP 503 + `Retry-After`) for config-change / init-mismatch
-   re-casts.
+   moving playhead, or backward below the retained low-watermark); `NeedsRecast` via a listener the
+   activity registers at session creation → `castHls` (posts to main; HTTP 503 + `Retry-After`) for
+   config-change / init-mismatch re-casts.
 4. Prepare-before-load: `castHls` computes `initialSegmentIndex` from `pendingSeekPositionMs`
    and runs `prepare()` (resolution select + `PREBUFFER`) before `remoteMediaClient.load(...)`.
 5. Explicit quality setting → `HlsTranscodeMath.outputSize` plumbing.
