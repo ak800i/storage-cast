@@ -785,6 +785,16 @@ object EncoderFormatFactory {
         c.encoderName?.let { name -> runCatching { return MediaCodec.createByCodecName(name) } }
         return MediaCodec.createEncoderByType(OUTPUT_VIDEO_MIME)
     }
+
+    /** Pick a hardware AVC encoder name (so both builders use the same codec implementation). */
+    fun pickHardwareAvcEncoderName(): String? {
+        val list = android.media.MediaCodecList(android.media.MediaCodecList.REGULAR_CODECS)
+        return list.codecInfos.firstOrNull { info ->
+            info.isEncoder &&
+                (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || info.isHardwareAccelerated) &&
+                info.supportedTypes.any { it.equals(OUTPUT_VIDEO_MIME, ignoreCase = true) }
+        }?.name
+    }
 }
 ```
 
@@ -938,7 +948,7 @@ class HlsSegmentPipeline(
     as `TranscodeStreamer` does).
   - For each decoded output frame at `ptsUs`: if `HlsTranscodeMath.crossesBoundary(prevPts, ptsUs, nextBoundaryUs)`, call `encoder.setParameters(REQUEST_SYNC_FRAME)` **before** `decoder.releaseOutputBuffer(idx, true)`, then advance `nextBoundaryUs += segDurUs`.
   - Accumulate encoded video samples (AVCC via `HlsMp4Builder.ensureAvcc`) and AAC samples into per-segment buckets keyed by `HlsTranscodeMath.segmentIndexForPts(samplePts, segDurUs)`.
-  - When `HlsTranscodeMath.segmentDrained(videoMaxPts, audioMaxPts, (segIndex+1)*segDurUs)` for the current `segIndex`, assemble `HlsMp4Builder.buildMediaSegment(sequenceNumber = segIndex + 1, videoSamples, audioSamples, 33_333L, 21_333L)`, capture `videoInit`/`audioInit` on the first segment, set `frontier = segIndex`, and invoke `onSegment(...)`.
+  - When `HlsTranscodeMath.segmentDrained(videoMaxPts, audioMaxPts, (segIndex+1)*segDurUs)` for the current `segIndex`, assemble `HlsMp4Builder.buildMediaSegment(sequenceNumber = segIndex + 1, videoSamples, audioSamples, 33_333L, 21_333L)`, capture `videoInit`/`audioInit` on the first segment, set the pipeline's internal `frontier = segIndex` (**advisory only** — the *routing* frontier is owned by the session, which advances it in `putSegment` after the segment is actually cached), and invoke `onSegment(...)`.
   - **Boundary-IDR miss recovery:** when a segment is assembled, verify its first video sample is a keyframe. If not, drop that segment's pipeline bytes (do **not** publish), log a miss, and let the session serve that index via the one-off builder (it forces an IDR). Continue the pipeline.
   - **Back-pressure:** before producing `segIndex`, if `segIndex > playhead() + lead`, park briefly (`Thread.sleep(20)` loop) until the playhead advances or cancelled.
   - Audio uses the same no-PCM-loss / absolute-source-PTS feeder as Task 7 (share the private helper).
@@ -997,6 +1007,8 @@ class HlsTranscodeSession(
     private var coordinator: HlsSegmentCoordinator? = null
     private var pipeline: HlsSegmentPipeline? = null
     @Volatile private var committedConfig: CommittedEncoderConfig? = null   // chosen in prepare()
+    @Volatile private var frontier: Int = -1                                // highest CACHED index (routing frontier)
+    @Volatile var draining: Boolean = false                                 // set on NeedsRecast (Task 12)
     private val oneOffLock = Any()                                          // serializes one-off builds
     @Volatile private var serialSeekMode = false                           // set on a 1+1 codec-limit failure
 ```
@@ -1021,7 +1033,7 @@ fun prepare(initialSegmentIndex: Int) {
     waitForFrontier(initialSegmentIndex + PREBUFFER - 1, timeoutMs = 20_000)
 }
 ```
-`putSegment(result)` (under `lock`): cache the bytes, validate `result.videoInit.avcC` against the committed init's avcC via `HlsTranscodeMath.avcConfigsMatch`; on first segment build `initSegment`; on a genuine mismatch, raise `onNeedsRecast(NeedsRecast("avcc-mismatch", ...))` and do NOT publish; signal `produced`.
+`putSegment(result)` (under `lock`): cache the bytes, validate `result.videoInit.avcC` against the committed init's avcC via `HlsTranscodeMath.avcConfigsMatch`; on first segment build `initSegment`; on a genuine mismatch, raise `onNeedsRecast(NeedsRecast("avcc-mismatch", ...))` and do NOT publish; **after a successful cache, set `frontier = maxOf(frontier, result.index)`** so the routing frontier only advances once the segment is actually cached (avoids routing a just-announced-but-not-yet-cached index to a one-off); then signal `produced`. (`HlsSegmentPipeline.frontier` stays internal/advisory — the session owns the routing frontier.)
 
 - [ ] **Step 4: Rewrite `segmentBytes(index)` to route via the coordinator**
 
@@ -1031,7 +1043,7 @@ fun segmentBytes(index: Int): ByteArray? {
     lock.lock()
     try {
         val coord = coordinator ?: return buildOneOff(index)   // no pipeline (fallback) -> per-segment
-        val frontier = pipeline?.frontier ?: -1
+        val frontier = this.frontier                           // session-owned (highest CACHED index)
         val low = coord.prevIndex - BACK_BUFFER
         when (val d = coord.route(index, frontier, low) { i -> segmentCache.containsKey(i) }) {
             HlsSegmentCoordinator.Decision.ServeCached -> return segmentCache[index]
@@ -1118,24 +1130,31 @@ Run `prepare()` on a background worker before `remoteMediaClient.load(...)`, bui
 private fun configForQuality(probe: MediaProbeResult, q: CastQuality): CommittedEncoderConfig {
     val v = probe.primaryVideo!!
     val base = CommittedEncoderConfig.derive(v.width, v.height, v.bitrate, v.frameRate.toInt(), q)
-    // pick the hardware AVC encoder name + a profile/level its capabilities support for base.width/height
-    val encoderName = pickHardwareAvcEncoderName()          // existing hardware-encoder selection logic
-    val profile = MediaCodecInfo.CodecProfileLevel.AVCProfileHigh
-    val level = avcLevelFor(base.width, base.height, base.frameRate)  // smallest level that fits
-    return base.copy(profile = profile, level = level, encoderName = encoderName)
+    // Pin only the encoder NAME so both builders use the same codec implementation. Leave
+    // profile/level UNSET: identical encoder name + identical EncoderFormatFactory keys yield an
+    // identical default profile/level (deterministic encoder, identical input) => identical avcC.
+    // avcConfigsMatch (+ NeedsRecast) is the defensive backstop. This honors the spec's
+    // "identical avcC" invariant without inventing an AVC-level table.
+    return base.copy(encoderName = EncoderFormatFactory.pickHardwareAvcEncoderName())
 }
 
-val quality = CastQuality.fromPref(prefs.getString("cast_quality", "auto"))
+val quality = CastQuality.fromPref(SettingsActivity.getCastQuality(this))
 ```
 
 - [ ] **Step 2: Build the session, run `prepare()` off-main via the activity coroutine, then `load()`
   on-main.** Use the codebase's coroutine idiom (`activityScope = CoroutineScope(SupervisorJob() +
-  Dispatchers.Main)` already exists; there is **no** `Executor` field). Create three small helpers in
-  the activity: `showPreparingUi()` / `hidePreparingUi()` (toggle a determinate/indeterminate
+  Dispatchers.Main)` already exists; there is **no** `Executor` field). Add two activity fields to hold
+  the **active** HLS session + its base path (`private var activeHlsSession: HlsTranscodeSession? =
+  null`, `private var activeHlsBasePath: String? = null`) so a later re-cast (Task 12) can reach it.
+  Create three small helpers in the activity: `showPreparingUi()` / `hidePreparingUi()` (toggle a
   progress state) and `loadHlsOnReceiver(hlsBasePath, probeResult)` (the existing `MediaInfo` /
-  `MediaLoadRequestData` build + `remoteMediaClient.load(...)`). Then:
+  `MediaLoadRequestData` build + `remoteMediaClient.load(...)`). **Evict/cancel the currently-active
+  HLS session BEFORE preparing the new one** (spec: "any already-active HLS session is
+  cancelled/evicted before the new one prepares") so two long-lived pipelines never coexist:
 
 ```kotlin
+activeHlsSession?.release()    // cancel old pipeline + free its codecs before the new prepare()
+activeHlsSession = null
 val hlsSession = HlsTranscodeSession(
     video.path, probeResult, selectedAudioTrack, copyAudio, subtitleVtt,
     quality = quality,
@@ -1149,6 +1168,7 @@ activityScope.launch {
         withContext(Dispatchers.IO) { hlsSession.prepare(initialSegmentIndex) }
         hidePreparingUi()
         val hlsBasePath = service.registerHlsSession(video.title, hlsSession)
+        activeHlsSession = hlsSession; activeHlsBasePath = hlsBasePath
         loadHlsOnReceiver(hlsBasePath, probeResult)
     } catch (t: Throwable) {
         hidePreparingUi()
@@ -1190,7 +1210,7 @@ git commit -m "feat(hls): prepare-before-load on background worker; fix setStrea
 **Files:**
 - Modify: `app/src/main/java/com/storagecast/ui/SettingsActivity.kt`, `app/src/main/res/layout/activity_settings.xml`, `app/src/main/res/values/strings.xml`
 
-- [ ] **Step 1:** Add a 4-option control (Auto / 1080p / 720p / 540p) writing SharedPreferences key `cast_quality` ∈ `auto`/`1080`/`720`/`540` (default `auto`). Read it in `castHls` (Task 10, Step 1). Match the existing Settings UI style (spinner or radio group).
+- [ ] **Step 1:** Add a 4-option control (Auto / 1080p / 720p / 540p) writing SharedPreferences key `cast_quality` ∈ `auto`/`1080`/`720`/`540` (default `auto`). Add a `getCastQuality(context): String` companion helper to `SettingsActivity` following the existing `getHlsSeeking`/`getRealtimeTranscode` companion pattern (read it via `CastQuality.fromPref(SettingsActivity.getCastQuality(this))` in `castHls`). Match the existing Settings UI style (spinner or radio group).
 - [ ] **Step 2:** `.\gradlew.bat assembleDebug --console=plain` → BUILD SUCCESSFUL.
 - [ ] **Step 3:** Commit `feat(hls): cast quality preference (auto/1080/720/540)`.
 
@@ -1235,10 +1255,12 @@ session (no hard-evict) so a straggler old-id request never 404s mid-transition.
   session after a short TTL (e.g. 5 s) or on a swap-complete signal (first successful request against
   the new id), then `oldSession.release()`. (The existing hard-evict `registerHlsSession` stays for
   the **user-initiated fresh cast** path only.)
-- [ ] **Step 3: `handleNeedsRecast`** (main thread): mark the old session `draining`, build a
-  replacement `HlsTranscodeSession` (same title, new id) with `pendingSeekPositionMs = recast.startMs`
-  and the recast quality, run `prepare()` off-main (as in Task 10), register it via
-  `registerHlsSessionWithoutEvict`, and `load(...)` the new url. The old id drains (503) until TTL.
+- [ ] **Step 3: `handleNeedsRecast`** (main thread): mark the stored old session draining
+  (`activeHlsSession?.draining = true`), build a replacement `HlsTranscodeSession` (same title, new
+  id) with `pendingSeekPositionMs = recast.startMs` and the recast quality, run `prepare()` off-main
+  (as in Task 10), register it via `registerHlsSessionWithoutEvict`, update
+  `activeHlsSession`/`activeHlsBasePath`, and `load(...)` the new url. The old id drains (503) until
+  TTL.
 - [ ] **Step 4:** `.\gradlew.bat assembleDebug --console=plain` → BUILD SUCCESSFUL.
 - [ ] **Step 5:** Commit `feat(hls): draining in-session re-cast + 503 backoff`.
 
