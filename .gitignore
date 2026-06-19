@@ -10,3 +10,8 @@
 local.properties
 /app/build
 *.jks
+
+# On-device test artifacts
+screen.png
+ui.xml
+logcat_capture.txt

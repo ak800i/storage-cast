@@ -1587,9 +1587,17 @@ class VideoDetailActivity : AppCompatActivity() {
     }
 
     private fun startTranscoding(video: VideoItem, probeResult: MediaProbeResult, startPositionMs: Long = 0L) {
-        // Experimental: serve the transcode as seekable HLS VOD instead of a live pipe.
-        // Works with copy-audio too (the HLS segments mux the source audio untouched).
-        if (SettingsActivity.getHlsSeeking(this)) {
+        // Serve the transcode as seekable HLS VOD when enabled — except for a Dolby
+        // passthrough. Cast receivers reject AC-3/E-AC-3 in HLS fMP4 (the receiver answers
+        // "Invalid Request" and goes IDLE/ERROR right after the master playlist), even
+        // though they play those codecs fine on the progressive live stream. So copy-audio
+        // of a Dolby source stays on the live path (seek-by-restart) to keep 5.1 intact;
+        // HLS still serves everything else (transcoded to AAC), giving native seeking.
+        val audioMime = (selectedAudioTrack?.mime ?: probeResult.primaryAudio?.mime ?: "").lowercase()
+        val dolbyPassthrough = SettingsActivity.getCopyAudio(this) &&
+            (audioMime.contains("ac3") || audioMime.contains("ac-3") ||
+                audioMime.contains("eac3") || audioMime.contains("ec3"))
+        if (SettingsActivity.getHlsSeeking(this) && !dolbyPassthrough) {
             castHls(video, probeResult)
             return
         }
