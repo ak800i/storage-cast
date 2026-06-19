@@ -273,7 +273,8 @@ segmentBytes(index):
     else:                                                # contiguous forward catch-up — not a seek
         relocRun = 0; relocAnchor = none
     if relocRun >= RELOCATE_AFTER:                        # confirmed — follow the receiver
-        reBase(pipeline, baseIndex = relocAnchor); relocRun = 0; relocAnchor = none
+        # decode base = first non-cached index in the run; cached one-offs are served from cache
+        reBase(pipeline, baseIndex = firstNonCached(relocAnchor)); relocRun = 0; relocAnchor = none
     prevIndex = index
     return bytes
 ```
