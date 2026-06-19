@@ -471,6 +471,9 @@ A log line records each decision; an optional brief toast can inform the user.
   keeps the pipeline (and its steady-state benefit) but **degrades seeks serially** (teardown →
   one-off → rebuild → catch-up via bounded waits); wholesale per-segment fallback is reserved for
   the frame-exact-IDR / avcC gates, not codec count (see *Production & request coordination*).
+  (Implementation note: the **v1** plan may instead fall back **wholesale to the per-segment path**
+  on a 1+1 device — a documented limitation — with the pipeline-preserving serial-degrade as a
+  follow-up; the target device is verified 2+2.)
 - **Boundary IDRs are best-effort.** Android's `REQUEST_SYNC_FRAME` is advisory and
   `KEY_I_FRAME_INTERVAL` is a cadence hint, so the pipeline cuts on the **observed** keyframe; if a
   boundary frame is not an IDR, that index is served by the one-off builder (guaranteed IDR), not a

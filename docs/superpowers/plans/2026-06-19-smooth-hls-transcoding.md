@@ -1190,7 +1190,11 @@ private fun actuallyBuildOneOff(index: Int): ByteArray? = synchronized(oneOffLoc
     }
     val bytes = HlsMp4Builder.buildMediaSegment(index + 1, res.videoSamples, res.audioSamples, 33_333L, 21_333L)
     lock.withLock {
-        val videoBad = videoInit != null && !HlsTranscodeMath.avcConfigsMatch(videoInit!!.avcC, res.video?.avcC)
+        if (videoInit == null) {                       // first segment of the run -> CAPTURE the committed init
+            videoInit = res.video; audioInit = res.audio
+            initSegment = HlsMp4Builder.buildInitSegment(res.video, res.audio)
+        }
+        val videoBad = !HlsTranscodeMath.avcConfigsMatch(videoInit!!.avcC, res.video?.avcC)
         val audioBad = audioInit != null && res.audio != null &&
             (audioInit!!.codec != res.audio!!.codec || !audioInit!!.codecData.contentEquals(res.audio!!.codecData) ||
              audioInit!!.sampleRate != res.audio!!.sampleRate || audioInit!!.channels != res.audio!!.channels)
@@ -1428,6 +1432,13 @@ session (no hard-evict) so a straggler old-id request never 404s mid-transition.
   (as in Task 10), register it via `registerHlsSessionWithoutEvict`, update
   `activeHlsSession`/`activeHlsBasePath`, and `load(...)` the new url. The old id drains (503) until
   TTL.
+- [ ] **Step 3b: Loop-breaker for a *persistent* `init-mismatch`.** A thermal-collapse recast changes
+  config (lower rung) so it can't loop, but a same-config `init-mismatch` recast would re-mismatch the
+  same segment forever. Track per-title `init-mismatch` recasts; on the **second** one, do not recast
+  again — build the replacement session in **per-segment mode** (the spec's "persistent mismatch →
+  wholesale per-segment fallback"): construct it with a `forcePerSegment = true` flag so `prepare()`
+  captures init from a single one-off build and leaves `coordinator = null` (every request served
+  one-off, no pipeline) for the rest of the run.
 - [ ] **Step 4:** `.\gradlew.bat assembleDebug --console=plain` → BUILD SUCCESSFUL.
 - [ ] **Step 5:** Commit `feat(hls): draining in-session re-cast + 503 backoff`.
 
