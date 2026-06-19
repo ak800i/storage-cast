@@ -12,7 +12,11 @@ class SubtitleExtractor {
 
     companion object {
         private const val BUFFER_SIZE_BYTES = 1024 * 1024
-        private const val DEFAULT_CUE_DURATION_US = 3_000_000L
+
+        // Embedded subtitle samples carry no end time that MediaExtractor exposes (the
+        // Matroska BlockDuration is dropped), so a cue runs until the next real cue. This
+        // caps how long an isolated line lingers before a long gap.
+        private const val MAX_CUE_DURATION_US = 7_000_000L
 
         private val SUBTITLE_MIME_TYPES = setOf(
             "text/vtt",
@@ -92,7 +96,10 @@ class SubtitleExtractor {
 
             extractor.selectTrack(trackIndex)
 
-            val timestamps = mutableListOf<Long>()
+            // Keep only samples that actually carry text. Some MKV subtitle tracks emit many
+            // spurious empty samples between real cues; ending a cue at the next raw sample
+            // then makes each line flash for a few milliseconds.
+            val starts = mutableListOf<Long>()
             val texts = mutableListOf<String>()
             val buffer = ByteBuffer.allocate(BUFFER_SIZE_BYTES)
 
@@ -105,22 +112,24 @@ class SubtitleExtractor {
                 val bytes = ByteArray(size)
                 buffer.rewind()
                 buffer.get(bytes, 0, size)
-                val text = String(bytes, Charsets.UTF_8)
+                val text = String(bytes, Charsets.UTF_8).trim()
 
-                timestamps.add(timeUs)
-                texts.add(text.trim())
+                if (text.isNotEmpty()) {
+                    starts.add(timeUs)
+                    texts.add(text)
+                }
 
                 extractor.advance()
             }
 
+            // A cue runs until the next real cue (so consecutive lines don't overlap), capped
+            // so an isolated line before a long gap doesn't linger. The true end (Matroska
+            // BlockDuration) isn't exposed by MediaExtractor.
             val cues = mutableListOf<SubtitleCue>()
-            for (i in timestamps.indices) {
-                val startUs = timestamps[i]
-                val endUs = if (i + 1 < timestamps.size) {
-                    timestamps[i + 1]
-                } else {
-                    startUs + DEFAULT_CUE_DURATION_US
-                }
+            for (i in starts.indices) {
+                val startUs = starts[i]
+                val nextStartUs = if (i + 1 < starts.size) starts[i + 1] else Long.MAX_VALUE
+                val endUs = minOf(nextStartUs, startUs + MAX_CUE_DURATION_US)
                 cues.add(SubtitleCue(startUs, endUs, texts[i]))
             }
 
