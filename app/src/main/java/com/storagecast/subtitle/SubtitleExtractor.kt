@@ -2,6 +2,7 @@ package com.storagecast.subtitle
 
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import com.storagecast.media.MkvSubtitleExtractor
 import com.storagecast.model.SubtitleTrack
 import java.io.File
 import java.nio.ByteBuffer
@@ -9,6 +10,8 @@ import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 class SubtitleExtractor {
+
+    private val mkvSubtitleExtractor = MkvSubtitleExtractor()
 
     companion object {
         private const val BUFFER_SIZE_BYTES = 1024 * 1024
@@ -79,15 +82,58 @@ class SubtitleExtractor {
             extractor.release()
         }
 
+        // Fallback: some devices' MediaExtractor doesn't expose MKV subtitle tracks (e.g.
+        // Xiaomi/HyperOS, which also hides AC-3/E-AC-3 audio). Parse the MKV at the EBML
+        // level so embedded text subtitles are still available.
+        if (tracks.isEmpty() && isMkv(videoPath)) {
+            mkvSubtitleExtractor.listTracks(File(videoPath)).forEachIndexed { i, t ->
+                val codec = when {
+                    t.codecId.contains("UTF8", true) -> "subrip"
+                    t.codecId.contains("ASS", true) || t.codecId.contains("SSA", true) -> "ass"
+                    t.codecId.contains("WEBVTT", true) -> "vtt"
+                    else -> t.codecId
+                }
+                val title = t.name.ifBlank { "Track ${i + 1}" }
+                tracks.add(
+                    SubtitleTrack(
+                        index = t.trackNumber, language = t.language, title = title,
+                        codec = codec, mkvTrackNumber = t.trackNumber
+                    )
+                )
+            }
+        }
+
         return tracks
     }
 
-    fun extractSubtitleAsVtt(videoPath: String, trackIndex: Int, outputDir: File): File? {
-        val outputFile = File(outputDir, "subtitle_${trackIndex}.vtt")
-        if (outputFile.exists()) {
-            outputFile.delete()
-        }
+    private fun isMkv(videoPath: String): Boolean {
+        val ext = File(videoPath).extension.lowercase()
+        return ext == "mkv" || ext == "webm"
+    }
 
+    fun extractSubtitleAsVtt(videoPath: String, track: SubtitleTrack, outputDir: File): File? {
+        val outputFile = File(outputDir, "subtitle_${track.index}.vtt")
+        if (outputFile.exists()) outputFile.delete()
+        return if (track.mkvTrackNumber != null) {
+            extractViaEbml(videoPath, track.mkvTrackNumber, outputFile)
+        } else {
+            extractViaMediaExtractor(videoPath, track.index, outputFile)
+        }
+    }
+
+    /** Extracts a subtitle track parsed from the MKV's EBML structure (BlockDuration gives ends). */
+    private fun extractViaEbml(videoPath: String, mkvTrackNumber: Int, outputFile: File): File? {
+        return try {
+            val cues = mkvSubtitleExtractor.extractCues(File(videoPath), mkvTrackNumber)
+            if (cues.isEmpty()) return null
+            writeVtt(cues.map { SubtitleCue(it.startMs * 1000, it.endMs * 1000, it.text) }, outputFile)
+            outputFile
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun extractViaMediaExtractor(videoPath: String, trackIndex: Int, outputFile: File): File? {
         val extractor = MediaExtractor()
         try {
             extractor.setDataSource(videoPath)
@@ -139,18 +185,8 @@ class SubtitleExtractor {
                 cues.add(SubtitleCue(startUs, endUs, texts[i]))
             }
 
-            val vttContent = buildString {
-                appendLine("WEBVTT")
-                appendLine()
-                cues.forEachIndexed { index, cue ->
-                    appendLine("${index + 1}")
-                    appendLine("${formatVttTime(cue.startUs)} --> ${formatVttTime(cue.endUs)}")
-                    appendLine(cue.text)
-                    appendLine()
-                }
-            }
-
-            outputFile.writeText(SubtitleConverter.ensureVttStyle(vttContent))
+            val vttCues = cues.map { SubtitleCue(it.startUs, it.endUs, it.text) }
+            writeVtt(vttCues, outputFile)
             return outputFile
         } catch (e: Exception) {
             // Failed to extract subtitles
@@ -167,6 +203,21 @@ class SubtitleExtractor {
         val seconds = TimeUnit.MILLISECONDS.toSeconds(totalMs) % 60
         val millis = totalMs % 1000
         return String.format(Locale.US, "%02d:%02d:%02d.%03d", hours, minutes, seconds, millis)
+    }
+
+    /** Writes [cues] as a styled WebVTT file (shared by the MediaExtractor and EBML paths). */
+    private fun writeVtt(cues: List<SubtitleCue>, outputFile: File) {
+        val vttContent = buildString {
+            appendLine("WEBVTT")
+            appendLine()
+            cues.forEachIndexed { index, cue ->
+                appendLine("${index + 1}")
+                appendLine("${formatVttTime(cue.startUs)} --> ${formatVttTime(cue.endUs)}")
+                appendLine(cue.text)
+                appendLine()
+            }
+        }
+        outputFile.writeText(SubtitleConverter.ensureVttStyle(vttContent))
     }
 
     private fun MediaFormat.getStringOrDefault(key: String, default: String): String {

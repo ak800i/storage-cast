@@ -900,7 +900,7 @@ class VideoDetailActivity : AppCompatActivity() {
             val subtitleFile = withContext(Dispatchers.IO) {
                 val outputDir = File(cacheDir, "subtitles")
                 outputDir.mkdirs()
-                subtitleExtractor.extractSubtitleAsVtt(videoPath, track.index, outputDir)
+                subtitleExtractor.extractSubtitleAsVtt(videoPath, track, outputDir)
             }
             binding.progressBar.visibility = View.GONE
             if (subtitleFile != null) {
