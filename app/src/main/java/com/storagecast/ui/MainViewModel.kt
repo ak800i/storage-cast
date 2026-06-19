@@ -34,7 +34,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val filteredVideos: List<VideoItem>
         get() = if (minDurationMs > 0) {
-            allVideos.filter { it.duration >= minDurationMs }
+            // A duration of 0 means MediaStore couldn't measure the file (common for some
+            // MKVs after a lightweight scan); don't hide those — they're usually full-length
+            // videos. Only filter out files that report a real, below-threshold duration.
+            allVideos.filter { it.duration <= 0L || it.duration >= minDurationMs }
         } else {
             allVideos
         }
