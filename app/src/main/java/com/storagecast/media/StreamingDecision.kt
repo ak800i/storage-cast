@@ -74,7 +74,11 @@ object StreamingDecision {
             (vMime in DIRECT_VIDEO && !tenBit && vMime !in hints.unsupportedDirect)
         val audioSupported = a == null ||
             (aMime in DIRECT_AUDIO && aMime !in hints.unsupportedDirect)
-        val audioHlsFriendly = a == null || aMime in HLS_FRIENDLY_AUDIO
+        // Copy HLS-friendly audio over HLS only when it's stereo/mono. The Default Media
+        // Receiver rejects multichannel audio over HLS (the same way it rejects Dolby), so
+        // >2-channel AAC/MP3 is transcoded down to stereo AAC instead of passed through.
+        val audioHlsCopyable = a == null ||
+            (aMime in HLS_FRIENDLY_AUDIO && a.channelCount in 1..2)
         val audioDolby = aMime.contains("ac3") || aMime.contains("ac-3") ||
             aMime.contains("eac3") || aMime.contains("ec3")
 
@@ -107,10 +111,10 @@ object StreamingDecision {
         }
 
         // Seekable HLS for everything else. The HLS engine always re-encodes video; audio is
-        // passed through when HLS-friendly, otherwise transcoded to AAC.
+        // passed through when HLS-friendly and stereo, otherwise transcoded to stereo AAC.
         return Plan(
-            Path.HLS, transcodeVideo = true, copyAudio = audioHlsFriendly,
-            reason = "HLS transcode (audio=${if (audioHlsFriendly) "copy" else "AAC"})"
+            Path.HLS, transcodeVideo = true, copyAudio = audioHlsCopyable,
+            reason = "HLS transcode (audio=${if (audioHlsCopyable) "copy" else "AAC"})"
         )
     }
 }

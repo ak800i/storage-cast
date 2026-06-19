@@ -51,6 +51,15 @@ class StreamingDecisionTest {
     }
 
     @Test
+    fun multichannelAac_hls_transcodesToStereo() {
+        // 10-bit HEVC + 7.1 AAC: HLS, but the receiver rejects multichannel audio over HLS,
+        // so the 8-channel AAC is transcoded down to stereo rather than copied.
+        val p = decide(video("video/hevc", "Main 10"), audio("audio/mp4a-latm", ch = 8))
+        assertEquals(StreamingDecision.Path.HLS, p.path)
+        assertFalse("7.1 AAC downmixed to stereo, not copied", p.copyAudio)
+    }
+
+    @Test
     fun hevc8bitAac_hlsCopyAudio() {
         // 8-bit HEVC isn't in the direct set, so transcode video; copy AAC over HLS.
         val p = decide(video("video/hevc", "Main"), audio("audio/mp4a-latm"))
