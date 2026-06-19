@@ -1,7 +1,7 @@
 # Smooth HLS transcoding — sequential pipeline + principled downscaling
 
 Date: 2026-06-19
-Status: Draft for review (rev 7 — incorporates spec-review findings)
+Status: Draft for review (rev 8 — incorporates spec-review findings)
 
 ## Problem
 
@@ -110,11 +110,17 @@ isolated transcode.
   multichannel through on HLS. Copy eligibility **and** the master-playlist `CODECS` value are
   keyed off the **effective (user-selected) audio track / committed `AudioInit`**, not
   `probe.primaryAudio` (today the decision uses `primaryAudio` while the builder uses
-  `selectedAudioTrack ?: primaryAudio` — they must agree). Both builders timestamp audio with
-  **absolute source PTS**, so audio is interchangeable at any index. A unit test locks this
-  contract.
-- **Segment cutting** — the encoder is configured with `KEY_I_FRAME_INTERVAL ≈ 6 s`;
-  additionally, when a *decoded* frame's PTS crosses an `N·6 s` boundary the pipeline calls
+  `selectedAudioTrack ?: primaryAudio` — they must agree). The effective selected audio track is
+  also an input to **`StreamingDecision`** itself, so the HLS-vs-live route and copy/transcode
+  choice are made on the track that will actually be muxed (today `decide()` keys off
+  `primaryAudio` only, so a selected track differing from primary — e.g. primary Dolby / selected
+  AAC, or primary stereo / selected multichannel — can route or advertise wrong). Both builders
+  timestamp audio with **absolute source PTS**, so audio is interchangeable at any index. Unit
+  tests lock this contract (including primary≠selected codec / channel-count cases).
+- **Segment cutting** — the committed config includes `KEY_I_FRAME_INTERVAL ≈ 6 s` (shared by both
+  builders, so the one-off builder must drop its current all-IDR `KEY_I_FRAME_INTERVAL = 1` and
+  force an IDR only at its first frame — otherwise junction bitrate/quality jumps); additionally,
+  when a *decoded* frame's PTS crosses an `N·6 s` boundary the pipeline calls
   `encoder.setParameters(PARAMETER_KEY_REQUEST_SYNC_FRAME)` **before rendering that frame to the
   encoder input surface**, so that frame is encoded as an IDR. Encoded video + AAC samples
   accumulate per segment and, at each boundary, are assembled into an fMP4 segment via
@@ -166,7 +172,12 @@ introduced; `#EXTINF:6.000` and `#EXT-X-TARGETDURATION:6` stay honest.
   shared init and works, which is exactly this case at equal config. The `avcConfigsMatch` check
   stays as a guard; the **only** cause of a genuine avcC mismatch is an actual config/resolution
   change, handled by a **full re-cast** (new session id → new init → `load(...)`), never by serving
-  a mismatched segment. Routine seeks do not change config, so they never re-cast.
+  a mismatched segment. Same committed config *should* yield a matching avcC, but this is **not
+  assumed**: the implementation **validates each one-off / re-based segment's avcC against the
+  committed init before serving it**, and on a mismatch does not serve it under the old init — it
+  raises `NeedsRecast` (below). A device that shows persistent mismatch disables the pipeline path
+  and falls back wholesale to the per-segment path (with its own committed init). Routine seeks do
+  not change config, so in practice they never re-cast.
 - **Builder interchangeability (scoped).** The steady-state pipeline and the one-off
   `HlsSegmentTranscoder` are two implementations of *one* segment contract: identical committed
   config, the same boundary cut rule (see *Segment-boundary timing*), and the same
@@ -185,74 +196,86 @@ introduced; `#EXTINF:6.000` and `#EXT-X-TARGETDURATION:6` stay honest.
       steady-state seam.
 - **Absolute PTS across re-base.** Segment `i` always carries source-absolute PTS for
   `[i·6 s, …)` regardless of the pipeline's base, so a re-based pipeline produces
-  byte-compatible segments at the same indices.
+  index-interchangeable segments at the same indices (interchangeable per the scoped contract
+  above, not byte-identical across two encoder runs).
 
 ### Production & request coordination (`segmentBytes(index)`)
 
 The hot pipeline produces forward from its base for the **steady-state** stream; anything it
-can't satisfy from its producible window — a seek, a stray probe, or the first segments right
-after a re-base — is served **immediately** by the `HlsSegmentTranscoder` (the existing
-per-segment transcode, **parameterized from the committed config** as the *one-off builder*). That path has the same bounded latency as
-today's working-but-rebuffering path, so a seek never blocks longer than a single isolated
-segment build, well inside the receiver's segment-fetch timeout. The pipeline then re-bases to
-*follow* a sustained relocation and takes over subsequent requests. Two parameters:
+can't deliver from its **production frontier** in time — a seek, a stray probe, or the first
+segments during a cold re-base catch-up — is served **immediately** by the `HlsSegmentTranscoder`
+(the existing per-segment transcode, brought to the committed config as the *one-off builder*).
+That path has the same bounded latency as today's working-but-rebuffering path, so such a request
+never blocks longer than a single isolated segment build, well inside the receiver's segment-fetch
+timeout. The routing gate is the **actual production frontier** (what the pipeline has built), not
+index arithmetic, so a cold re-based pipeline keeps serving one-off until its frontier catches up
+to the playhead. Parameters:
 
-- **`LEAD`** — the production run-ahead / back-pressure cap: the pipeline builds up to
-  `lastRequestedIndex + LEAD`, then waits. Sized **≥ the receiver's read-ahead depth** (so normal
-  buffering requests are always in-window) **and** large enough to hold a steady-state reserve
-  against transient throughput dips (a heavy GOP, a thermal blip); its upper bound is memory
-  (each cached segment is several MB).
+- **`LEAD`** — the production run-ahead cap: the pipeline builds up to `lastRequestedIndex + LEAD`
+  ahead of the receiver, then waits. Sized **≥ the receiver's read-ahead depth** and large enough
+  for a steady-state reserve against transient throughput dips; upper bound is memory (each cached
+  segment is several MB). In steady state the frontier stays ahead of the playhead, so requests hit
+  the cache.
+- **`WAIT_MARGIN`** — how far *past the current frontier* a request may wait for production (a small
+  ~1–2 segments, bounded by the fetch timeout) before it is served one-off instead. This is what
+  makes cold re-base catch-up serve one-off rather than block.
 - **`BACK_BUFFER`** — the retained window of already-built segments kept behind the playhead for
   short rewinds (~12 s ≈ 2 segments; same memory bound).
+- **`RELOCATE_AFTER`** — how many monotonic-adjacent out-of-frontier requests confirm a real
+  relocation (vs a lone stray probe) before the pipeline re-bases.
 
 ```
-state: lastRequestedIndex (init = initialSegmentIndex), relocRun = 0, relocAnchor = none
+state: lastRequestedIndex (init = initialSegmentIndex), base (init = initialSegmentIndex),
+       frontier (highest segment produced), relocRun = 0, relocAnchor = none
 
 segmentBytes(index):
-    if cached(index): return it                       # already in the producible window
-    inWindow = (lastRequestedIndex - BACK_BUFFER) <= index <= (lastRequestedIndex + LEAD)
-    if inWindow:
-        relocRun = 0                                  # back to steady state
-        lastRequestedIndex = max(lastRequestedIndex, index)
-        return waitForProduction(index)               # the pipeline is heading here
+    if cached(index): return it
+    lastRequestedIndex = max(lastRequestedIndex, index)
+    if index <= frontier + WAIT_MARGIN:           # pipeline has it or is about to — short wait
+        relocRun = 0
+        return waitForProduction(index)
 
-    # out of window: a seek or a stray probe — serve it NOW, don't yank the pipeline
+    # beyond the frontier's reach: a seek, a stray probe, or cold re-base catch-up — serve NOW
     bytes = oneOffBuild(index)
-    if index continues a monotonic adjacent out-of-window run (prevOoW+1):
+    if index == relocAnchor + relocRun:           # continues a monotonic run from the anchor
         relocRun += 1
     else:
-        relocRun = 1; relocAnchor = index            # new/isolated out-of-window index
-    if relocRun >= RELOCATE_AFTER:                    # a real relocation, not a lone probe
-        reBase(pipeline, baseIndex = relocAnchor)
-        lastRequestedIndex = relocAnchor             # reset the cursor to the new base
+        relocAnchor = index; relocRun = 1         # a new / isolated out-of-frontier index
+    # re-base only for a region outside what the pipeline can reach by producing forward:
+    if relocRun >= RELOCATE_AFTER and not (base - BACK_BUFFER <= relocAnchor <= base + LEAD):
+        base = relocAnchor
+        reBase(pipeline, baseIndex = base)        # frontier resets cold; catch-up served one-off
         relocRun = 0
     return bytes
 ```
 
-- **Normal forward read-ahead / steady playback** (within `lastRequestedIndex + LEAD`) is served
-  from cache or a short wait; the pipeline is already producing toward it.
-- **Short backward rewind** (within `BACK_BUFFER`) is served from cache.
-- **Seek** (forward or backward, out of window) is served immediately by the one-off builder; the
-  pipeline re-bases only once `RELOCATE_AFTER` out-of-window requests form a **monotonic adjacent
-  run** (a real playhead relocation), anchored at the run's start, then **resets its cursor** so
-  post-seek playback near the new base is never mis-read as another discontinuity.
-- **Stray / isolated probe** (e.g. a lone `seg0` duration probe while based far ahead) is served
-  by the one-off builder and, being isolated (not part of an adjacent run), never moves the base.
+- **Steady playback / read-ahead** — the frontier is ahead of the playhead, so requests are cached
+  or a short `WAIT_MARGIN` wait; no one-off, no re-base.
+- **Forward read-ahead / cold catch-up** — requests within `[base, base + LEAD]` are what the
+  pipeline is producing toward; one-off fills the gap until the frontier reaches them, then they
+  hit the cache. They are inside the forward window, so they never re-base.
+- **Seek** — a sustained run (`RELOCATE_AFTER` monotonic-adjacent requests) **outside**
+  `[base − BACK_BUFFER, base + LEAD]` re-bases the pipeline to the run's start; the immediate
+  requests are served one-off meanwhile.
+- **Stray / isolated probe** (a lone `seg0` duration probe while based far ahead) is served one-off
+  and, being isolated, never reaches `RELOCATE_AFTER`, so it never moves the base.
 
 The pipeline is the steady-state optimizer; the one-off builder is the universal immediate-serve
-path. (The receiver's actual request ordering — expected monotonic / playhead-local for fMP4 VOD,
-including a non-zero start — is verified on device before the plan commits to this heuristic.)
+path, gated on the production frontier. (The receiver's actual request ordering — expected
+monotonic / playhead-local for fMP4 VOD, including a non-zero start — is verified on device before
+the plan commits to this rule.)
 
 **Concurrency & resources.** `segmentBytes` is called on NanoHTTPD worker threads, so the
-cursor/relocation/cache state (`lastRequestedIndex`, `relocRun`, `relocAnchor`, the cache) is
-mutated only under a lock that is **released while waiting for production** (a wait must not
-serialize every request behind one build). The relocation rule uses only the observable request
-index — re-base needs a *monotonic adjacent run*, so an interleaved or far-flung parallel probe
-breaks the run rather than advancing it toward `RELOCATE_AFTER`. Serving a one-off while the
-pipeline is alive transiently uses a **second hardware codec session** (a bounded 2+2 window):
-this is a device-verification gate (the target Snapdragon handles 2+2), and on a codec-limited
-device the pipeline's codecs are parked for the one-off's duration. The device request trace
-captures **parallelism**, not just ordering, since it sizes both `LEAD` and this rule.
+cursor/relocation/cache/frontier state is mutated only under an explicit `ReentrantLock` +
+`Condition` (not a `synchronized` block) that is **released while waiting for production** (a wait
+must not serialize every request behind one build). The relocation rule uses only the observable
+request index — re-base needs a monotonic-adjacent run, so an interleaved or far-flung parallel
+probe breaks the run rather than advancing it. Serving a one-off while the pipeline is alive
+transiently uses a **second hardware codec session**: 2+2 hardware codecs is a **hard device gate**
+for the pipeline path. On a device that can't sustain 2+2, the seek path uses a defined
+teardown→serve→re-base sequence instead — cancel/release the pipeline's codecs, serve the one-off,
+then re-base/recreate the pipeline from the new base — never an undefined "park." The device
+request trace captures **parallelism**, not just ordering, since it sizes both `LEAD` and this rule.
 
 ### Startup: prepare-before-load (uses the 15 s budget)
 
@@ -261,11 +284,16 @@ fetching, so this is an explicit `prepare()` phase on the sender, ahead of
 `remoteMediaClient.load(...)`:
 
 1. `castHls` computes `initialSegmentIndex = pendingSeekPositionMs / 6000` (the sender can load
-   HLS at a non-zero start time).
-2. `prepare(initialSegmentIndex)` runs **resolution selection** (the Auto fallback below) and
-   builds `PREBUFFER` segments from `initialSegmentIndex`, committing the `init.mp4`.
-3. Only then does `castHls` register the session and call `load(...)`, so the receiver's first
-   `init.mp4` / `segN.m4s` requests are already satisfiable from cache.
+   HLS at a non-zero start time). This is the *expected* first index; the receiver request-ordering
+   trace confirms it before it is relied on (if the receiver instead probes `seg0` first, the
+   one-off builder serves that cleanly).
+2. `prepare(initialSegmentIndex)` runs on a **background worker** (it is heavy transcode work —
+   on-main would ANR), with cancellation and a user-visible "preparing" state, and any
+   already-active HLS session is cancelled/evicted **before** the new one prepares. It runs
+   **resolution selection** (the Auto fallback below) and builds `PREBUFFER` segments from
+   `initialSegmentIndex`, committing the `init.mp4`.
+3. Only then, back on the main thread, does `castHls` register the session and call `load(...)`, so
+   the receiver's first `init.mp4` / `segN.m4s` requests are already satisfiable from cache.
 
 Because the pipeline runs at > 1× real-time (one decode pass, no codec churn), it quickly fills
 its `LEAD` reserve and **stays up to `LEAD` ahead** of the playhead, so steady-state playback
@@ -303,12 +331,15 @@ Lives in Settings (or the Advanced submenu).
 A mid-stream resolution change would change `init.mp4` and corrupt the single-init HLS
 rendition, so in `Auto` the resolution is chosen **during the `prepare()` pre-buffer, before
 `init.mp4`/playlist are served**. It measures the build ratio (`wall_time / content_time`) on
-the first **steady-state** segment — the *second* produced segment — because only the first
-produced segment after a base/seek pays the one-time `SEEK_TO_PREVIOUS_SYNC` pre-roll (the ~1.6×
-decode the new architecture removes from steady state); measuring that pre-roll-inflated segment
-would over-estimate cost and needlessly downscale capable devices (against Goals 1 & 4). It
-**bails early**: if the steady-state segment can't sustain a lead (ratio above ~0.85) it steps
-down one rung (1080p → 720p → 540p) without finishing a full pre-buffer at the doomed resolution.
+the first **steady-state** segment — the *second* produced segment. Because the pipeline decodes
+continuously (no discrete per-segment build), the ratio is defined as the wall time for the
+production **frontier to advance one segment once warm** (excluding the first, pre-roll-inflated
+segment and the initial pipeline fill). Only the first produced segment after a base/seek pays the
+one-time `SEEK_TO_PREVIOUS_SYNC` pre-roll (the ~1.6× decode the new architecture removes from
+steady state); measuring that pre-roll-inflated segment would over-estimate cost and needlessly
+downscale capable devices (against Goals 1 & 4). It **bails early**: if the steady-state segment
+can't sustain a lead (ratio above ~0.85) it steps down one rung (1080p → 720p → 540p) without
+finishing a full pre-buffer at the doomed resolution.
 So the common case (the first resolution sustains) stays within the ~15 s budget, and each
 rejected rung adds only ~two segments of measurement, not a whole pre-buffer. The session then
 commits to the chosen resolution — still automatic and measured, without violating the one-init
@@ -338,8 +369,12 @@ never an in-place resolution change on the live rendition.
 session does not re-cast itself: it publishes a typed `NeedsRecast(reason, startMs, quality)` via
 an `AtomicReference` (or a listener registered at session creation) that `castHls` observes on the
 main thread; the in-flight HTTP request returns **503 with `Retry-After`** so the receiver backs
-off rather than aborting, and `castHls` registers a replacement session and issues the
-`load(...)`. A log line records each decision; an optional brief toast can inform the user.
+off rather than aborting, and `castHls` registers a replacement session and issues the `load(...)`.
+Because registering a new session currently evicts the old one immediately (old-id requests would
+then 404), the old session is kept in a short **draining** state across the swap — it keeps
+returning safe bytes / `503` for its id until the receiver has moved to the new session — rather
+than being hard-evicted mid-transition. A log line records each decision; an optional brief toast
+can inform the user.
 
 ## Alternatives considered
 
@@ -398,8 +433,11 @@ off rather than aborting, and `castHls` registers a replacement session and issu
   gap is the residual risk to watch.
 - **A/V alignment at boundaries.** Audio and video are cut at the same source time; reuse the
   live path's A/V sync handling. Validate first-segment audio/video sample counts.
-- **Regression surface.** The HLS path is opt-in/secondary to the proven live path; gate the
-  rollout behind the existing decision logic and keep the live path untouched.
+- **Regression surface.** The HLS path is the **default route for seekable transcode** (e.g. the
+  reported HEVC-10 + AAC `Penguins` case routes to HLS today), so this change affects the primary
+  path for those titles — not a niche opt-in. It is still walled off from the proven live and
+  direct-play paths; gate the rollout behind the existing decision logic and keep those paths
+  untouched.
 
 ## Testing strategy
 
