@@ -973,7 +973,14 @@ class HlsSegmentPipeline(
     `encoder.configure(EncoderFormatFactory.buildAvcEncoderFormat(committedConfig), null, null, CONFIGURE_FLAG_ENCODE)`.
     Create encoder → input surface → decoder configured with that surface (encoder-before-decoder,
     as `TranscodeStreamer` does).
-  - For each decoded output frame at `ptsUs`: if `HlsTranscodeMath.crossesBoundary(prevPts, ptsUs, nextBoundaryUs)`, call `encoder.setParameters(REQUEST_SYNC_FRAME)` **before** `decoder.releaseOutputBuffer(idx, true)`, then advance `nextBoundaryUs += segDurUs`.
+  - For each decoded output frame at `ptsUs`: **render it only if `ptsUs >= baseIndex * segDurUs`** —
+    frames below the base are `SEEK_TO_PREVIOUS_SYNC` pre-roll, so decode them (to advance the decoder)
+    but call `decoder.releaseOutputBuffer(idx, false)` (do not send to the encoder surface), exactly
+    as the one-off builder's `HlsTranscodeMath.shouldRenderVideoFrame` gate does. The encoder's first
+    real frame is then the base segment's first frame (always an IDR). For a **rendered** frame, if
+    `HlsTranscodeMath.crossesBoundary(prevPts, ptsUs, nextBoundaryUs)`, call
+    `encoder.setParameters(REQUEST_SYNC_FRAME)` **before** `decoder.releaseOutputBuffer(idx, true)`,
+    then advance `nextBoundaryUs += segDurUs`.
   - Accumulate encoded video samples (AVCC via `HlsMp4Builder.ensureAvcc`) and AAC samples into per-segment buckets keyed by `HlsTranscodeMath.segmentIndexForPts(samplePts, segDurUs)`.
   - When `HlsTranscodeMath.segmentDrained(videoMaxPts, audioMaxPts, (segIndex+1)*segDurUs)` for the current `segIndex`, assemble `HlsMp4Builder.buildMediaSegment(sequenceNumber = segIndex + 1, videoSamples, audioSamples, 33_333L, 21_333L)`, capture `videoInit`/`audioInit` on the first segment, set the pipeline's internal `frontier = segIndex` (**advisory only** — the *routing* frontier is owned by the session, which advances it in `putSegment` after the segment is actually cached), and invoke `onSegment(...)`.
   - **Boundary-IDR miss recovery:** when a segment is assembled, verify its first video sample is a keyframe. If not, drop that segment's pipeline bytes (do **not** publish via `onSegment`), call `onSkipped(segIndex)` (so the session routes that index straight to the one-off builder instead of waiting for a segment the pipeline will never produce), log the miss, and continue the pipeline (it re-forces the IDR at the next boundary).
@@ -1040,23 +1047,26 @@ class HlsTranscodeSession(
     @Volatile private var serialSeekMode = false                           // set on a 1+1 codec-limit failure
     private val skipped = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()  // pipeline IDR-miss drops
 ```
-Bump `MAX_CACHED_SEGMENTS` to `10`. Compute `audioCodecAttr` via `HlsTranscodeMath.hlsAudioCodecAttr()` (always `mp4a.40.2`).
+Bump `MAX_CACHED_SEGMENTS` to `10`. Compute `audioCodecAttr` via `HlsTranscodeMath.hlsAudioCodecAttr()` (always `mp4a.40.2`). **Declare the tuning constants in the companion** (from the *Chosen parameter defaults* table): `const val PREBUFFER = 3`, `LEAD = 4`, `READAHEAD = 2`, `WAIT_MARGIN = 2`, `BACK_BUFFER = 2`, `RELOCATE_AFTER = 2`, `RATIO_THRESHOLD = 0.85` (Tasks 9/11 use these unqualified).
 
 - [ ] **Step 3: Add `prepare(initialSegmentIndex)`** — builds the pipeline, primes `PREBUFFER` segments, captures init. (Called from `castHls` on a background thread.)
 
 ```kotlin
+private fun newPipeline(baseIndex: Int) = HlsSegmentPipeline(
+    inputPath, probeResult, selectedAudioTrack,
+    copyAudio = HlsTranscodeMath.effectiveCopyAudio(copyAudio, (selectedAudioTrack ?: probeResult.primaryAudio)?.mime, (selectedAudioTrack ?: probeResult.primaryAudio)?.channelCount ?: 2),
+    committedConfig!!, SEGMENT_DURATION_US, LEAD,
+    onSegment = { putSegment(it) },
+    onSkipped = { idx -> skipped.add(idx) },
+    playhead = { lock.withLock { coordinator?.prevIndex ?: baseIndex } },
+)
+
 fun prepare(initialSegmentIndex: Int) {
     committedConfig = configForQuality(quality)   // single rung here; Task 11b adds the measured loop
     val coord = HlsSegmentCoordinator(initialSegmentIndex, LEAD, READAHEAD, WAIT_MARGIN, BACK_BUFFER, RELOCATE_AFTER)
-    val pipe = HlsSegmentPipeline(
-        inputPath, probeResult, selectedAudioTrack,
-        copyAudio = HlsTranscodeMath.effectiveCopyAudio(copyAudio, (selectedAudioTrack ?: probeResult.primaryAudio)?.mime, (selectedAudioTrack ?: probeResult.primaryAudio)?.channelCount ?: 2),
-        committedConfig!!, SEGMENT_DURATION_US, LEAD,
-        onSegment = { putSegment(it) },
-        onSkipped = { idx -> skipped.add(idx) },
-        playhead = { lock.withLock { coordinator?.prevIndex ?: initialSegmentIndex } },
-    )
-    lock.withLock { coordinator = coord; pipeline = pipe }
+    lock.withLock { coordinator = coord }
+    val pipe = newPipeline(initialSegmentIndex)
+    lock.withLock { pipeline = pipe }
     pipe.start(initialSegmentIndex)
     // wait until PREBUFFER segments from initialSegmentIndex are cached (bounded; cancel on timeout)
     waitForFrontier(initialSegmentIndex + PREBUFFER - 1, timeoutMs = 20_000)
@@ -1095,38 +1105,75 @@ fun segmentBytes(index: Int): ByteArray? {
     }
 }
 ```
-- `buildOneOff(index)` (the single one-off helper, called whether or not the session `lock` is held)
-  has clear phases:
-    1. If the current thread holds `lock`, release it (so other requests aren't blocked during the
-       multi-second build).
-    2. Under `oneOffLock` (serialize one-off builds so parallel NanoHTTPD threads can't allocate
-       several extra codec sessions at once), **coalesce duplicate in-flight builds per index** (a
-       `ConcurrentHashMap<Int, FutureTask<ByteArray>>` keyed by index): if a build for this index is
-       already running, await its result instead of starting another.
-    3. Run the build OFF-lock: `transcoder.transcodeRange(..., committedConfig!!)` then
-       `HlsMp4Builder.buildMediaSegment(...)`. On a `MediaCodec` `configure()`/`start()` failure, take
-       the serial-degrade path below.
-    4. Re-acquire `lock`; validate avcC vs the committed init (raise `NeedsRecast` on mismatch); cache
-       the bytes; advance the routing `frontier = maxOf(frontier, index)`; `produced.signalAll()` (a
-       `Condition` MUST be signaled while holding its lock). Return with `lock` held so `segmentBytes`'
-       `finally` releases it.
+The one-off helper, the serial-degrade fallback, and re-base — shown as real code (this is the
+most concurrency-sensitive part):
+
+```kotlin
+private val inFlight = java.util.concurrent.ConcurrentHashMap<Int, java.util.concurrent.FutureTask<ByteArray>>()
+
+// Called whether or not the caller holds `lock`. Releases it for the multi-second build, then
+// re-acquires it (so segmentBytes' `finally` can unlock). Coalesces duplicate in-flight builds.
+private fun buildOneOff(index: Int): ByteArray {
+    val heldByMe = lock.isHeldByCurrentThread
+    if (heldByMe) lock.unlock()
+    try {
+        val task = inFlight.computeIfAbsent(index) {
+            java.util.concurrent.FutureTask { actuallyBuildOneOff(index) }
+        }
+        try {
+            if (inFlight[index] === task) task.run()   // the creator runs it; concurrent callers just get()
+            return task.get()
+        } finally { inFlight.remove(index, task) }
+    } finally {
+        if (heldByMe) lock.lock()
+    }
+}
+
+private fun actuallyBuildOneOff(index: Int): ByteArray = synchronized(oneOffLock) {  // serialize codec alloc
+    val cfg = committedConfig!!
+    val res = try {
+        transcoder.transcodeRange(inputPath, probeResult, selectedAudioTrack,
+            index * SEGMENT_DURATION_US, (index + 1) * SEGMENT_DURATION_US, copyAudio, cfg)
+    } catch (e: Exception) {                         // 1+1 codec-limit: free the pipeline, retry serially
+        serialSeekMode = true
+        reBase(index)                                // cancels the pipeline (frees its codecs) + rebuilds at index
+        transcoder.transcodeRange(inputPath, probeResult, selectedAudioTrack,
+            index * SEGMENT_DURATION_US, (index + 1) * SEGMENT_DURATION_US, copyAudio, cfg)
+    }
+    val bytes = HlsMp4Builder.buildMediaSegment(index + 1, res.videoSamples, res.audioSamples, 33_333L, 21_333L)
+    lock.withLock {
+        if (videoInit != null && !HlsTranscodeMath.avcConfigsMatch(videoInit!!.avcC, res.video?.avcC)) {
+            onNeedsRecast(NeedsRecast("avcc-mismatch", index.toLong() * SEGMENT_DURATION_US / 1000, quality))
+        }
+        segmentCache[index] = bytes      // cache ONLY -- do NOT advance `frontier` (it tracks pipeline production)
+        produced.signalAll()             // a Condition must be signaled while holding its lock
+    }
+    bytes
+}
+
+// Cancel the old pipeline OUTSIDE the lock (its worker takes `lock` in putSegment/playhead; cancel()
+// joins the worker, so holding `lock` during join would deadlock). Caller holds `lock`.
+private fun reBase(baseIndex: Int) {
+    val old = pipeline; pipeline = null
+    lock.unlock()
+    try {
+        old?.cancel()                                // interrupt + join(2000) with the lock released
+        val pipe = newPipeline(baseIndex)            // same construction as prepare()
+        pipe.start(baseIndex)
+        lock.lock(); pipeline = pipe
+    } catch (t: Throwable) { lock.lock(); throw t }
+}
+```
+- **`frontier` semantics (critical):** the routing `frontier` is advanced **only** in `putSegment`
+  (pipeline-produced, contiguous segments). One-off builds cache bytes (so `isCached(index)` is true)
+  but must **not** advance `frontier` — otherwise a seek-target one-off would make the next adjacent
+  request look like `WaitForProduction` (inside `frontier + WAIT_MARGIN`), resetting the relocation
+  run so the pipeline never follows the seek.
 - **One-off priority for parallel bursts (conditional on the Task 0 trace).** If the Task 0 receiver
-  trace shows segment requests arrive **in parallel** (target + read-ahead at once), add a priority
-  policy: a non-target read-ahead request (`index != coordinator.prevIndex`) that finds a one-off
-  already running returns **`503` + `Retry-After`** (via the `serveHls` 503 path Task 12 adds) instead
-  of queuing behind the build, so the playhead/target request is never serialized behind several
-  builds. If the trace shows strictly sequential requests, coalescing alone suffices and this policy
-  is skipped.
-- **Graceful 1+1 codec-limit handling (serial-degrade):** if the one-off encoder/decoder
-  `configure()`/`start()` throws (a codec-limited device can't run a 2nd session beside the live
-  pipeline), catch it, set `serialSeekMode = true`, `pipeline?.cancel()` to free the pipeline's
-  codecs, retry the one-off, then `reBase(index)` to rebuild the pipeline at the target (cold
-  catch-up is served by the coordinator's bounded `WAIT_MARGIN` waits). This keeps 1+1 seeks working
-  (one rebuffer, accepted) without a separate codec-count preflight. Steady-state (pipeline only,
-  1+1) is unaffected. NOTE: full per-device persistence of `serialSeekMode` is out of scope; the
-  flag is per-session.
-- `reBase(baseIndex)`: `pipeline?.cancel()`, build a new `HlsSegmentPipeline` at `baseIndex` (decode
-  base = `baseIndex`, the first non-cached index the coordinator computed), `start(baseIndex)`.
+  trace shows segment requests arrive **in parallel**, add a priority policy: a non-target read-ahead
+  request (`index != coordinator.prevIndex`) that finds a one-off already running returns **`503` +
+  `Retry-After`** (via the `serveHls` 503 path Task 12 adds) instead of queuing. If requests are
+  strictly sequential, coalescing alone suffices and this is skipped.
 
 - [ ] **Step 5: `initBytes()` returns the committed init (built in `prepare`); `release()` cancels the pipeline**
 
@@ -1139,13 +1186,19 @@ fun release() { pipeline?.cancel(); lock.withLock { segmentCache.clear(); initSe
 
 Run: `.\gradlew.bat assembleDebug --console=plain` then `.\gradlew.bat testDebugUnitTest --console=plain`
 Expected: BUILD SUCCESSFUL. Test updates required:
+- **Rewrite the `HlsTranscodeSessionTest` constructor helper** to the new signature. The current
+  5-arg helper must become, e.g.:
+```kotlin
+private fun session(durationMs: Long, audioMime: String?, copyAudio: Boolean = false, subtitle: ByteArray? = null) =
+    HlsTranscodeSession("/x.mkv", probe(durationMs, audioMime), null, copyAudio, subtitle,
+        quality = CastQuality.AUTO,
+        configForQuality = { CommittedEncoderConfig.derive(1920, 1080, 5_000_000, 24, it) })
+```
 - **Update the two existing Dolby-CODECS tests** in `HlsTranscodeSessionTest.kt`:
   `masterPlaylist_advertisesEac3WhenCopyAudio` and `masterPlaylist_advertisesAc3WhenCopyAudio` now
   emit `CODECS="avc1.640029,mp4a.40.2"` (HLS audio is always AAC; Dolby always routes to LIVE per
   `StreamingDecision`, never copied on HLS). Change both assertions to expect `mp4a.40.2`, or delete
   them (the behavior they tested can no longer occur).
-- **Update constructor calls** in `HlsTranscodeSessionTest.kt` to the new signature
-  (`quality = CastQuality.AUTO, configForQuality = { CommittedEncoderConfig.derive(1920,1080,5_000_000,24,it) }`).
 - Tests that exercised lazy `initBytes()`/`segmentBytes()` building must call `prepare(0)` first, OR
   be narrowed to the pure surface (playlist text, bounds) — codec paths can't run in JVM. Anything
   needing real transcoding in JVM (impossible) should assert the routing contract via
@@ -1165,10 +1218,14 @@ git commit -m "feat(hls): wire HlsTranscodeSession to pipeline + coordinator + o
 Run `prepare()` on a background worker before `remoteMediaClient.load(...)`, build the committed config (incl. resolved profile/level/encoder-name), register a `NeedsRecast` listener, and fix the duration unit bug.
 
 **Files:**
-- Modify: `app/src/main/java/com/storagecast/ui/VideoDetailActivity.kt`
+- Modify: `app/src/main/java/com/storagecast/ui/VideoDetailActivity.kt`,
+  `app/src/main/java/com/storagecast/ui/SettingsActivity.kt` (the `getCastQuality` read helper)
 
 - [ ] **Step 1: Define the `configForQuality` resolver (the single Android codec-resolution owner).**
-  Add a private method that turns a `CastQuality` into a *fully-resolved* `CommittedEncoderConfig` —
+  First add the **read-side** preference helper so this task compiles before Task 11a builds the UI:
+  add a `getCastQuality(context): String` companion to `SettingsActivity` (default `"auto"`) following
+  the existing `getHlsSeeking` / `getRealtimeTranscode` companion pattern. Then add a private method
+  that turns a `CastQuality` into a *fully-resolved* `CommittedEncoderConfig` —
   numeric derivation plus the chosen hardware AVC encoder name and explicit profile/level for the
   derived size. The session calls this per rung; the Activity owns it because it needs `MediaCodecInfo`:
 
