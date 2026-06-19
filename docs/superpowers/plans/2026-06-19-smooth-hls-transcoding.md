@@ -62,6 +62,9 @@
 - `app/src/main/java/com/storagecast/media/EncoderFormatFactory.kt` — the **single** place that turns a
   `CommittedEncoderConfig` into an AVC encoder `MediaFormat` + `MediaCodec`, used verbatim by BOTH
   the one-off builder and the pipeline so their SPS/PPS (avcC) are identical.
+- `app/src/main/java/com/storagecast/media/HlsAudioEncoderFeeder.kt` — the no-PCM-loss, frame-count-
+  timestamped AAC feeder (ported from `TranscodeStreamer.AudioEncoderFeeder`), a **shared top-level**
+  class used by both the one-off builder and the pipeline.
 - `app/src/main/java/com/storagecast/media/HlsSegmentPipeline.kt` — the long-lived decode→encode pipeline.
 
 **Modified files:**
@@ -875,8 +878,9 @@ encoder.setParameters(android.os.Bundle().apply {
   buffers; timestamp encoded output as `basePtsUs + framesSent * 1_000_000L / sampleRate`, where
   `basePtsUs` is the first decoded PCM frame's **absolute source PTS** (so segments are
   audio-interchangeable). Port the `AudioEncoderFeeder` loop from `TranscodeStreamer` (locate the
-  `inner class AudioEncoderFeeder`) into a private helper in `HlsSegmentTranscoder`, replacing the
-  single-buffer `minOf` copy. Keep `KEY_MAX_OUTPUT_CHANNEL_COUNT = 2` on the decoder for downmix.
+  `inner class AudioEncoderFeeder`) into a **new top-level `HlsAudioEncoderFeeder` class** (shared by
+  the one-off builder and the pipeline — it can't be a `private` member of either since both use it),
+  replacing the single-buffer `minOf` copy. Keep `KEY_MAX_OUTPUT_CHANNEL_COUNT = 2` on the decoder for downmix.
   **Gate the enqueue to `[startUs, endUs)`** — enqueue only decoded PCM with `pts >= startUs &&
   pts < endUs` (so `basePtsUs` = the first frame ≥ `startUs`, matching the pipeline's bucket for that
   segment); do **not** queue the `SEEK_TO_PREVIOUS_SYNC` pre-roll. (The shared feeder is
@@ -985,7 +989,7 @@ class HlsSegmentPipeline(
   - When `HlsTranscodeMath.segmentDrained(videoMaxPts, audioMaxPts, (segIndex+1)*segDurUs)` for the current `segIndex`, assemble `HlsMp4Builder.buildMediaSegment(sequenceNumber = segIndex + 1, videoSamples, audioSamples, 33_333L, 21_333L)`, capture `videoInit`/`audioInit` on the first segment, set the pipeline's internal `frontier = segIndex` (**advisory only** — the *routing* frontier is owned by the session, which advances it in `putSegment` after the segment is actually cached), and invoke `onSegment(...)`.
   - **Boundary-IDR miss recovery:** when a segment is assembled, verify its first video sample is a keyframe. If not, drop that segment's pipeline bytes (do **not** publish via `onSegment`), call `onSkipped(segIndex)` (so the session routes that index straight to the one-off builder instead of waiting for a segment the pipeline will never produce), log the miss, and continue the pipeline (it re-forces the IDR at the next boundary).
   - **Back-pressure:** before producing `segIndex`, if `segIndex > playhead() + lead`, park briefly (`Thread.sleep(20)` loop) until the playhead advances or cancelled.
-  - Audio uses the same no-PCM-loss / absolute-source-PTS feeder as Task 7, but the pipeline enqueues PCM **continuously** (no `[startUs,endUs)` gate — it is one continuous stream); per-segment bucketing happens by sample PTS at the cut, as for video. (Same feeder helper as the one-off, different enqueue policy: the one-off gates at enqueue, the pipeline does not.)
+  - Audio uses the shared `HlsAudioEncoderFeeder` (Task 7), but the pipeline enqueues PCM **continuously** (no `[startUs,endUs)` gate — it is one continuous stream); per-segment bucketing happens by sample PTS at the cut, as for video. (Same shared class as the one-off, different enqueue policy: the one-off gates at enqueue, the pipeline does not.)
   - Wrap the whole loop in `try { ... } finally { safe-release all codecs/extractors }`; check `cancelled`/`Thread.interrupted()` at the top of every loop.
 
 - [ ] **Step 3: Confirm it compiles**
@@ -1041,7 +1045,9 @@ class HlsTranscodeSession(
     private var coordinator: HlsSegmentCoordinator? = null
     private var pipeline: HlsSegmentPipeline? = null
     @Volatile private var committedConfig: CommittedEncoderConfig? = null   // chosen in prepare()
-    @Volatile private var frontier: Int = -1                                // highest CACHED index (routing frontier)
+    @Volatile private var frontier: Int = -1                                // highest index the CURRENT pipeline produced
+    @Volatile private var pipelineBase: Int = 0                             // current pipeline's base index
+    @Volatile private var producedSinceRebase = false                      // pipeline warm (produced >= 1 seg)
     @Volatile var draining: Boolean = false                                 // set on NeedsRecast (Task 12)
     private val oneOffLock = Any()                                          // serializes one-off builds
     @Volatile private var serialSeekMode = false                           // set on a 1+1 codec-limit failure
@@ -1063,6 +1069,7 @@ private fun newPipeline(baseIndex: Int) = HlsSegmentPipeline(
 
 fun prepare(initialSegmentIndex: Int) {
     committedConfig = configForQuality(quality)   // single rung here; Task 11b adds the measured loop
+    pipelineBase = initialSegmentIndex; frontier = initialSegmentIndex - 1; producedSinceRebase = false
     val coord = HlsSegmentCoordinator(initialSegmentIndex, LEAD, READAHEAD, WAIT_MARGIN, BACK_BUFFER, RELOCATE_AFTER)
     lock.withLock { coordinator = coord }
     val pipe = newPipeline(initialSegmentIndex)
@@ -1072,7 +1079,7 @@ fun prepare(initialSegmentIndex: Int) {
     waitForFrontier(initialSegmentIndex + PREBUFFER - 1, timeoutMs = 20_000)
 }
 ```
-`putSegment(result)` (under `lock`): cache the bytes, validate `result.videoInit.avcC` against the committed init's avcC via `HlsTranscodeMath.avcConfigsMatch`; on first segment build `initSegment`; on a genuine mismatch, raise `onNeedsRecast(NeedsRecast("avcc-mismatch", ...))` and do NOT publish; **after a successful cache, set `frontier = maxOf(frontier, result.index)`** so the routing frontier only advances once the segment is actually cached (avoids routing a just-announced-but-not-yet-cached index to a one-off); then signal `produced`. (`HlsSegmentPipeline.frontier` stays internal/advisory — the session owns the routing frontier.)
+`putSegment(result)` (under `lock`): if `result.index < pipelineBase`, **ignore it** (a late callback from a just-cancelled pipeline). Validate `result.videoInit.avcC` against the committed init's avcC via `HlsTranscodeMath.avcConfigsMatch`; on the first segment build `initSegment`; on a genuine mismatch raise `onNeedsRecast(NeedsRecast("avcc-mismatch", ...))` and do **not** cache; otherwise cache the bytes, set `frontier = result.index` and `producedSinceRebase = true`, then `produced.signalAll()`. (`HlsSegmentPipeline`'s own `frontier` stays internal/advisory — the session owns the routing frontier.)
 
 - [ ] **Step 4: Rewrite `segmentBytes(index)` to route via the coordinator**
 
@@ -1081,8 +1088,9 @@ fun segmentBytes(index: Int): ByteArray? {
     if (index < 0 || index >= segmentCount) return null
     lock.lock()
     try {
-        val coord = coordinator ?: return buildOneOff(index)   // no pipeline (fallback) -> per-segment
-        val frontier = this.frontier                           // session-owned (highest CACHED index)
+        val coord = coordinator ?: return buildOneOff(index)   // no pipeline (serial/fallback) -> per-segment
+        // while the re-based pipeline is cold, route every not-yet-cached request to one-off (immediate)
+        val frontier = if (producedSinceRebase) this.frontier else Int.MIN_VALUE / 2
         val low = coord.prevIndex - BACK_BUFFER
         when (val d = coord.route(index, frontier, low) { i -> segmentCache.containsKey(i) }) {
             HlsSegmentCoordinator.Decision.ServeCached -> return segmentCache[index]
@@ -1096,7 +1104,7 @@ fun segmentBytes(index: Int): ByteArray? {
             }
             is HlsSegmentCoordinator.Decision.OneOff -> {
                 val bytes = buildOneOff(index)     // build + cache [index] FIRST
-                d.rebaseTo?.let { reBase(it) }     // rebaseTo already excludes [index] (served above)
+                if (coordinator != null) d.rebaseTo?.let { reBase(it) }  // skip if serial-degrade disabled the pipeline
                 return bytes
             }
         }
@@ -1109,11 +1117,13 @@ The one-off helper, the serial-degrade fallback, and re-base — shown as real c
 most concurrency-sensitive part):
 
 ```kotlin
-private val inFlight = java.util.concurrent.ConcurrentHashMap<Int, java.util.concurrent.FutureTask<ByteArray>>()
+private val inFlight = java.util.concurrent.ConcurrentHashMap<Int, java.util.concurrent.FutureTask<ByteArray?>>()
 
 // Called whether or not the caller holds `lock`. Releases it for the multi-second build, then
 // re-acquires it (so segmentBytes' `finally` can unlock). Coalesces duplicate in-flight builds.
-private fun buildOneOff(index: Int): ByteArray {
+// Returns null when the built segment's avcC doesn't match the committed init (NeedsRecast raised) --
+// never serve a mismatched segment under the published init.
+private fun buildOneOff(index: Int): ByteArray? {
     val heldByMe = lock.isHeldByCurrentThread
     if (heldByMe) lock.unlock()
     try {
@@ -1129,46 +1139,64 @@ private fun buildOneOff(index: Int): ByteArray {
     }
 }
 
-private fun actuallyBuildOneOff(index: Int): ByteArray = synchronized(oneOffLock) {  // serialize codec alloc
+private fun runTranscode(index: Int, cfg: CommittedEncoderConfig) =
+    transcoder.transcodeRange(inputPath, probeResult, selectedAudioTrack,
+        index * SEGMENT_DURATION_US, (index + 1) * SEGMENT_DURATION_US, copyAudio, cfg)
+
+// Runs with `lock` NOT held (buildOneOff released it) and `oneOffLock` held (serializes codec alloc).
+private fun actuallyBuildOneOff(index: Int): ByteArray? = synchronized(oneOffLock) {
     val cfg = committedConfig!!
     val res = try {
-        transcoder.transcodeRange(inputPath, probeResult, selectedAudioTrack,
-            index * SEGMENT_DURATION_US, (index + 1) * SEGMENT_DURATION_US, copyAudio, cfg)
-    } catch (e: Exception) {                         // 1+1 codec-limit: free the pipeline, retry serially
+        runTranscode(index, cfg)
+    } catch (e: Exception) {
+        // 1+1 codec-limit: the pipeline + a one-off can't hold 2 codec sessions at once. Detach and
+        // cancel the pipeline (frees its codecs) and DISABLE it for the rest of the run (coordinator
+        // = null), so the session continues in per-segment one-off mode -- today's working-but-
+        // rebuffering behavior, with no codec conflict, no crash, no churn. (A pipeline-preserving 1+1
+        // serial-degrade is a documented follow-up; the target device is verified 2+2 in Task 0/13.)
         serialSeekMode = true
-        reBase(index)                                // cancels the pipeline (frees its codecs) + rebuilds at index
-        transcoder.transcodeRange(inputPath, probeResult, selectedAudioTrack,
-            index * SEGMENT_DURATION_US, (index + 1) * SEGMENT_DURATION_US, copyAudio, cfg)
+        val old = lock.withLock { val p = pipeline; pipeline = null; coordinator = null; p }
+        old?.cancel()                                  // lock NOT held here -> safe worker join
+        runTranscode(index, cfg)                       // retry with the single codec slot free
     }
     val bytes = HlsMp4Builder.buildMediaSegment(index + 1, res.videoSamples, res.audioSamples, 33_333L, 21_333L)
     lock.withLock {
         if (videoInit != null && !HlsTranscodeMath.avcConfigsMatch(videoInit!!.avcC, res.video?.avcC)) {
             onNeedsRecast(NeedsRecast("avcc-mismatch", index.toLong() * SEGMENT_DURATION_US / 1000, quality))
+            return@withLock null                       // do NOT cache/serve a mismatched segment
         }
-        segmentCache[index] = bytes      // cache ONLY -- do NOT advance `frontier` (it tracks pipeline production)
-        produced.signalAll()             // a Condition must be signaled while holding its lock
+        segmentCache[index] = bytes                    // cache ONLY -- never advance `frontier` here
+        produced.signalAll()                           // a Condition must be signaled while holding its lock
+        bytes
     }
-    bytes
 }
 
 // Cancel the old pipeline OUTSIDE the lock (its worker takes `lock` in putSegment/playhead; cancel()
 // joins the worker, so holding `lock` during join would deadlock). Caller holds `lock`.
 private fun reBase(baseIndex: Int) {
     val old = pipeline; pipeline = null
+    pipelineBase = baseIndex; frontier = baseIndex - 1; producedSinceRebase = false  // new (cold) generation
     lock.unlock()
     try {
-        old?.cancel()                                // interrupt + join(2000) with the lock released
-        val pipe = newPipeline(baseIndex)            // same construction as prepare()
+        old?.cancel()                                  // interrupt + join(2000) with the lock released
+        val pipe = newPipeline(baseIndex)
         pipe.start(baseIndex)
         lock.lock(); pipeline = pipe
     } catch (t: Throwable) { lock.lock(); throw t }
 }
 ```
-- **`frontier` semantics (critical):** the routing `frontier` is advanced **only** in `putSegment`
-  (pipeline-produced, contiguous segments). One-off builds cache bytes (so `isCached(index)` is true)
-  but must **not** advance `frontier` — otherwise a seek-target one-off would make the next adjacent
-  request look like `WaitForProduction` (inside `frontier + WAIT_MARGIN`), resetting the relocation
-  run so the pipeline never follows the seek.
+- **`frontier` semantics (critical).** `frontier` is the highest index the **current** pipeline has
+  produced. `putSegment` sets `frontier = result.index` only for `result.index >= pipelineBase` (so a
+  late callback from a just-cancelled pipeline is ignored) and sets `producedSinceRebase = true`.
+  `reBase` resets `frontier = baseIndex - 1`, `pipelineBase = baseIndex`, `producedSinceRebase = false`.
+  One-off builds cache bytes but **never** touch `frontier`. This fixes both forward and backward
+  re-base: a stale high frontier (after a backward seek) would otherwise route the new pipeline's own
+  segments to one-off forever.
+- **Cold-catch-up routing.** While the re-based pipeline is cold (`!producedSinceRebase`), `segmentBytes`
+  passes a sentinel-low frontier so every not-yet-cached request is served one-off (immediate) instead
+  of waiting on a pipeline still paying pre-roll: in Step 4 use
+  `val frontier = if (producedSinceRebase) this.frontier else Int.MIN_VALUE / 2`. Once the pipeline
+  produces its first warm segment, routing uses the real frontier (short `WaitForProduction` waits).
 - **One-off priority for parallel bursts (conditional on the Task 0 trace).** If the Task 0 receiver
   trace shows segment requests arrive **in parallel**, add a priority policy: a non-target read-ahead
   request (`index != coordinator.prevIndex`) that finds a one-off already running returns **`503` +
