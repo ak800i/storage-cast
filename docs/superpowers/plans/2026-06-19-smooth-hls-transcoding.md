@@ -47,6 +47,11 @@
   honest (a hard-evict would 404 stragglers). The primary `NeedsRecast` trigger is an avcC mismatch
   (rare, since both builders share the committed config); mid-stream thermal collapse reuses the
   same listener. (A simple evict-and-recast is NOT used — it would 404 old-id requests mid-swap.)
+- **1+1 codec devices (v1 scope):** the target device is verified **2+2** (Task 0/13). On a
+  **1+1-only** device, after the first seek (which needs a 2nd codec session beside the pipeline) the
+  one-off `configure()` fails; the session then **disables the pipeline and falls back to the current
+  per-segment path** (works, rebuffers) for the rest of the run — a documented v1 limitation, not a
+  crash. The full pipeline-preserving serial-degrade (tear down → one-off → rebuild) is a follow-up.
 
 ---
 
@@ -989,7 +994,13 @@ class HlsSegmentPipeline(
   - When `HlsTranscodeMath.segmentDrained(videoMaxPts, audioMaxPts, (segIndex+1)*segDurUs)` for the current `segIndex`, assemble `HlsMp4Builder.buildMediaSegment(sequenceNumber = segIndex + 1, videoSamples, audioSamples, 33_333L, 21_333L)`, capture `videoInit`/`audioInit` on the first segment, set the pipeline's internal `frontier = segIndex` (**advisory only** — the *routing* frontier is owned by the session, which advances it in `putSegment` after the segment is actually cached), and invoke `onSegment(...)`.
   - **Boundary-IDR miss recovery:** when a segment is assembled, verify its first video sample is a keyframe. If not, drop that segment's pipeline bytes (do **not** publish via `onSegment`), call `onSkipped(segIndex)` (so the session routes that index straight to the one-off builder instead of waiting for a segment the pipeline will never produce), log the miss, and continue the pipeline (it re-forces the IDR at the next boundary).
   - **Back-pressure:** before producing `segIndex`, if `segIndex > playhead() + lead`, park briefly (`Thread.sleep(20)` loop) until the playhead advances or cancelled.
-  - Audio uses the shared `HlsAudioEncoderFeeder` (Task 7), but the pipeline enqueues PCM **continuously** (no `[startUs,endUs)` gate — it is one continuous stream); per-segment bucketing happens by sample PTS at the cut, as for video. (Same shared class as the one-off, different enqueue policy: the one-off gates at enqueue, the pipeline does not.)
+  - **Audio (branches on `copyAudio`, matching the one-off so segments are interchangeable):** when
+    `copyAudio` is true (effective AAC mono/stereo), **demux source AAC packets** in order and bucket
+    them by source PTS — capturing the source ASC as the audio init — exactly like the one-off's
+    `passthroughAudioRange`; do **not** re-encode. When false, decode→re-encode via the shared
+    `HlsAudioEncoderFeeder`, enqueuing PCM **continuously** and bucketing by sample PTS. The session
+    passes one `effectiveCopyAudio` to both builders (Task 9), so they always agree, and the
+    committed audio init comes from whichever path is active.
   - Wrap the whole loop in `try { ... } finally { safe-release all codecs/extractors }`; check `cancelled`/`Thread.interrupted()` at the top of every loop.
 
 - [ ] **Step 3: Confirm it compiles**
@@ -1048,6 +1059,8 @@ class HlsTranscodeSession(
     @Volatile private var frontier: Int = -1                                // highest index the CURRENT pipeline produced
     @Volatile private var pipelineBase: Int = 0                             // current pipeline's base index
     @Volatile private var producedSinceRebase = false                      // pipeline warm (produced >= 1 seg)
+    @Volatile private var effectiveCopyAudio = false                       // computed once in prepare(); both builders use it
+    @Volatile private var generation = 0                                   // pipeline generation (stale-callback guard)
     @Volatile var draining: Boolean = false                                 // set on NeedsRecast (Task 12)
     private val oneOffLock = Any()                                          // serializes one-off builds
     @Volatile private var serialSeekMode = false                           // set on a 1+1 codec-limit failure
@@ -1058,17 +1071,23 @@ Bump `MAX_CACHED_SEGMENTS` to `10`. Compute `audioCodecAttr` via `HlsTranscodeMa
 - [ ] **Step 3: Add `prepare(initialSegmentIndex)`** — builds the pipeline, primes `PREBUFFER` segments, captures init. (Called from `castHls` on a background thread.)
 
 ```kotlin
-private fun newPipeline(baseIndex: Int) = HlsSegmentPipeline(
-    inputPath, probeResult, selectedAudioTrack,
-    copyAudio = HlsTranscodeMath.effectiveCopyAudio(copyAudio, (selectedAudioTrack ?: probeResult.primaryAudio)?.mime, (selectedAudioTrack ?: probeResult.primaryAudio)?.channelCount ?: 2),
-    committedConfig!!, SEGMENT_DURATION_US, LEAD,
-    onSegment = { putSegment(it) },
-    onSkipped = { idx -> skipped.add(idx) },
-    playhead = { lock.withLock { coordinator?.prevIndex ?: baseIndex } },
-)
+private fun newPipeline(baseIndex: Int): HlsSegmentPipeline {
+    val gen = generation
+    return HlsSegmentPipeline(
+        inputPath, probeResult, selectedAudioTrack, effectiveCopyAudio,
+        committedConfig!!, SEGMENT_DURATION_US, LEAD,
+        onSegment = { putSegment(gen, it) },
+        onSkipped = { idx -> skipped.add(idx) },
+        playhead = { lock.withLock { coordinator?.prevIndex ?: baseIndex } },
+    )
+}
 
 fun prepare(initialSegmentIndex: Int) {
     committedConfig = configForQuality(quality)   // single rung here; Task 11b adds the measured loop
+    effectiveCopyAudio = HlsTranscodeMath.effectiveCopyAudio(copyAudio,
+        (selectedAudioTrack ?: probeResult.primaryAudio)?.mime,
+        (selectedAudioTrack ?: probeResult.primaryAudio)?.channelCount ?: 2)
+    generation++
     pipelineBase = initialSegmentIndex; frontier = initialSegmentIndex - 1; producedSinceRebase = false
     val coord = HlsSegmentCoordinator(initialSegmentIndex, LEAD, READAHEAD, WAIT_MARGIN, BACK_BUFFER, RELOCATE_AFTER)
     lock.withLock { coordinator = coord }
@@ -1079,7 +1098,13 @@ fun prepare(initialSegmentIndex: Int) {
     waitForFrontier(initialSegmentIndex + PREBUFFER - 1, timeoutMs = 20_000)
 }
 ```
-`putSegment(result)` (under `lock`): if `result.index < pipelineBase`, **ignore it** (a late callback from a just-cancelled pipeline). Validate `result.videoInit.avcC` against the committed init's avcC via `HlsTranscodeMath.avcConfigsMatch`; on the first segment build `initSegment`; on a genuine mismatch raise `onNeedsRecast(NeedsRecast("avcc-mismatch", ...))` and do **not** cache; otherwise cache the bytes, set `frontier = result.index` and `producedSinceRebase = true`, then `produced.signalAll()`. (`HlsSegmentPipeline`'s own `frontier` stays internal/advisory — the session owns the routing frontier.)
+`waitForFrontier(targetIndex, timeoutMs)` blocks under `lock` (via `produced.await`) until
+`frontier >= targetIndex` or the timeout, then returns regardless (on timeout the receiver's first
+requests simply fall to the one-off builder — correct by fallback). The **final segment** may be
+shorter than 6 s, so `segmentDrained` won't trip at a full boundary; on decoder EOS flush whatever
+video+audio remain as the last segment, or let the session serve the last index via the one-off
+builder (also correct by fallback).
+`putSegment(gen, result)` (under `lock`): if `gen != generation` **or** `result.index < pipelineBase`, **ignore it** (a late callback from a superseded pipeline generation). Validate `result.videoInit.avcC` against the committed init's avcC via `HlsTranscodeMath.avcConfigsMatch` (and, once captured, the audio init); on the first segment build `initSegment` and capture `videoInit`/`audioInit`; on a genuine mismatch raise `onNeedsRecast(NeedsRecast("init-mismatch", ...))` and do **not** cache; otherwise cache the bytes, set `frontier = result.index` and `producedSinceRebase = true`, then `produced.signalAll()`. (`HlsSegmentPipeline`'s own `frontier` stays internal/advisory — the session owns the routing frontier.)
 
 - [ ] **Step 4: Rewrite `segmentBytes(index)` to route via the coordinator**
 
@@ -1141,7 +1166,7 @@ private fun buildOneOff(index: Int): ByteArray? {
 
 private fun runTranscode(index: Int, cfg: CommittedEncoderConfig) =
     transcoder.transcodeRange(inputPath, probeResult, selectedAudioTrack,
-        index * SEGMENT_DURATION_US, (index + 1) * SEGMENT_DURATION_US, copyAudio, cfg)
+        index * SEGMENT_DURATION_US, (index + 1) * SEGMENT_DURATION_US, effectiveCopyAudio, cfg)
 
 // Runs with `lock` NOT held (buildOneOff released it) and `oneOffLock` held (serializes codec alloc).
 private fun actuallyBuildOneOff(index: Int): ByteArray? = synchronized(oneOffLock) {
@@ -1161,8 +1186,13 @@ private fun actuallyBuildOneOff(index: Int): ByteArray? = synchronized(oneOffLoc
     }
     val bytes = HlsMp4Builder.buildMediaSegment(index + 1, res.videoSamples, res.audioSamples, 33_333L, 21_333L)
     lock.withLock {
-        if (videoInit != null && !HlsTranscodeMath.avcConfigsMatch(videoInit!!.avcC, res.video?.avcC)) {
-            onNeedsRecast(NeedsRecast("avcc-mismatch", index.toLong() * SEGMENT_DURATION_US / 1000, quality))
+        val videoBad = videoInit != null && !HlsTranscodeMath.avcConfigsMatch(videoInit!!.avcC, res.video?.avcC)
+        val audioBad = audioInit != null && res.audio != null &&
+            (audioInit!!.codec != res.audio!!.codec || !audioInit!!.codecData.contentEquals(res.audio!!.codecData) ||
+             audioInit!!.sampleRate != res.audio!!.sampleRate || audioInit!!.channels != res.audio!!.channels)
+        if (videoBad || audioBad) {
+            draining = true                            // synchronous @Volatile write so serveHls returns 503, not 404
+            onNeedsRecast(NeedsRecast("init-mismatch", index.toLong() * SEGMENT_DURATION_US / 1000, quality))
             return@withLock null                       // do NOT cache/serve a mismatched segment
         }
         segmentCache[index] = bytes                    // cache ONLY -- never advance `frontier` here
@@ -1175,6 +1205,7 @@ private fun actuallyBuildOneOff(index: Int): ByteArray? = synchronized(oneOffLoc
 // joins the worker, so holding `lock` during join would deadlock). Caller holds `lock`.
 private fun reBase(baseIndex: Int) {
     val old = pipeline; pipeline = null
+    generation++
     pipelineBase = baseIndex; frontier = baseIndex - 1; producedSinceRebase = false  // new (cold) generation
     lock.unlock()
     try {
@@ -1413,7 +1444,9 @@ $env:ANDROID_HOME="D:\AndroidVMs\SDK"; $env:ANDROID_SDK_ROOT="D:\AndroidVMs\SDK"
 - [ ] **Step 3: Seeks** — a mid-range forward seek and a backward seek both resume promptly (within the receiver fetch timeout); the one-off serves the target, the pipeline re-bases and catches up.
 - [ ] **Step 4: A/V sync** — validate sync over a multi-minute session **and across a re-base** (listen specifically at the one-off↔pipeline handoff segment after a seek for the ≤1–2 AAC-frame seam).
 - [ ] **Step 5: Init compatibility** — confirm re-based and one-off segments decode cleanly against the committed `init.mp4` (no `avcConfigsMatch` warnings / no `NeedsRecast` on routine seeks).
-- [ ] **Step 6: 2+2 codecs** — confirm two hardware codec sessions coexist during a seek (pipeline + one-off); if the device is 1+1-only, confirm the serial-degrade seek path works (one rebuffer after the target, then catches up).
+- [ ] **Step 6: 2+2 codecs** — confirm two hardware codec sessions coexist during a seek (pipeline +
+  one-off). If the device is 1+1-only, confirm it **falls back to per-segment gracefully** (no crash;
+  steady-state still works, seeks rebuffer) — the documented v1 limitation, not the full serial-degrade.
 - [ ] **Step 7: Duration** — confirm the receiver seek bar shows the correct duration (the `setStreamDuration` fix).
 - [ ] **Step 8: 4K fallback stress** — cast a 4K Tigole HEVC source; confirm the AUTO fallback steps the resolution down at startup (e.g. 1080p→720p) and improves throughput (mechanism works; not that every 4K source is perfectly smooth).
 - [ ] **Step 9:** Record results; if Step 2 fails the build-ratio target on this encoder, revisit the Task 0 frame-exact-IDR result (the pipeline path may not be viable here → per-segment fallback).
