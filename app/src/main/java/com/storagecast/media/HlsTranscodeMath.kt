@@ -71,4 +71,22 @@ object HlsTranscodeMath {
         a == null || b == null -> false
         else -> a.contentEquals(b)
     }
+
+    /** Floor PTS to its segment index. */
+    fun segmentIndexForPts(ptsUs: Long, segDurUs: Long): Int = (ptsUs / segDurUs).toInt()
+
+    /**
+     * True when consecutive frames straddle [boundaryUs]: the previous frame is strictly below
+     * and the current frame is at/above. The pipeline requests a sync frame before rendering the
+     * current (crossing) frame so it becomes the segment's first (IDR) frame.
+     */
+    fun crossesBoundary(prevPtsUs: Long, ptsUs: Long, boundaryUs: Long): Boolean =
+        prevPtsUs < boundaryUs && ptsUs >= boundaryUs
+
+    /**
+     * A segment ending at [endUs] may be flushed only once BOTH encoders have produced a sample
+     * with PTS >= endUs, so independent codec output latency never truncates boundary audio.
+     */
+    fun segmentDrained(videoMaxPtsUs: Long, audioMaxPtsUs: Long, endUs: Long): Boolean =
+        videoMaxPtsUs >= endUs && audioMaxPtsUs >= endUs
 }

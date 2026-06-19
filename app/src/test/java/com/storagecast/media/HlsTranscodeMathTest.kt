@@ -186,4 +186,26 @@ class HlsTranscodeMathTest {
         assertFalse("one null differs", HlsTranscodeMath.avcConfigsMatch(byteArrayOf(1), null))
         assertFalse("other null differs", HlsTranscodeMath.avcConfigsMatch(null, byteArrayOf(1)))
     }
+
+    @Test fun segmentIndexForPts_floorsToSegment() {
+        assertEquals(0, HlsTranscodeMath.segmentIndexForPts(0L, 6_000_000L))
+        assertEquals(0, HlsTranscodeMath.segmentIndexForPts(5_999_999L, 6_000_000L))
+        assertEquals(1, HlsTranscodeMath.segmentIndexForPts(6_000_000L, 6_000_000L))
+        assertEquals(2, HlsTranscodeMath.segmentIndexForPts(12_500_000L, 6_000_000L))
+    }
+
+    @Test fun crossesBoundary_trueOnlyWhenPrevBelowAndCurrentAtOrAbove() {
+        // boundary at 6s; frame at 5.96s -> 6.00s crosses it
+        assertTrue(HlsTranscodeMath.crossesBoundary(5_960_000L, 6_000_000L, 6_000_000L))
+        // both below
+        assertFalse(HlsTranscodeMath.crossesBoundary(5_900_000L, 5_960_000L, 6_000_000L))
+        // both at/above (already crossed earlier)
+        assertFalse(HlsTranscodeMath.crossesBoundary(6_000_000L, 6_040_000L, 6_000_000L))
+    }
+
+    @Test fun segmentDrained_requiresBothTracksPastEnd() {
+        assertTrue(HlsTranscodeMath.segmentDrained(6_000_000L, 6_010_000L, 6_000_000L))
+        assertFalse(HlsTranscodeMath.segmentDrained(6_000_000L, 5_990_000L, 6_000_000L)) // audio short
+        assertFalse(HlsTranscodeMath.segmentDrained(5_990_000L, 6_010_000L, 6_000_000L)) // video short
+    }
 }
