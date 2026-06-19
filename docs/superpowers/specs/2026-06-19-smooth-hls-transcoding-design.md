@@ -1,7 +1,7 @@
 # Smooth HLS transcoding — sequential pipeline + principled downscaling
 
 Date: 2026-06-19
-Status: Draft for review (rev 10 — incorporates spec-review findings)
+Status: Draft for review (rev 11 — incorporates spec-review findings)
 
 ## Problem
 
@@ -123,8 +123,9 @@ isolated transcode.
   monotonic and gapless), so audio is interchangeable at any index. A unit test locks the
   selected-vs-primary copy/`CODECS` contract.
 - **Segment cutting** — the committed config includes `KEY_I_FRAME_INTERVAL ≈ 6 s` (shared by both
-  builders, so the one-off builder must drop its current all-IDR `KEY_I_FRAME_INTERVAL = 1` and
-  force an IDR only at its first frame — otherwise junction bitrate/quality jumps); additionally,
+  builders, so the one-off builder must drop its current frequent-IDR `KEY_I_FRAME_INTERVAL = 1`
+  (1 s cadence) and force an IDR only at its first frame — otherwise junction bitrate/quality
+  jumps); additionally,
   when a *decoded* frame's PTS crosses an `N·6 s` boundary the pipeline calls
   `encoder.setParameters(PARAMETER_KEY_REQUEST_SYNC_FRAME)` **before rendering that frame to the
   encoder input surface**, so that frame is encoded as an IDR. Encoded video + AAC samples
@@ -294,14 +295,14 @@ request index — re-base needs a monotonic-adjacent run, so an interleaved or f
 probe breaks the run rather than advancing it. **One-off builds are serialized** (one at a time,
 the lock released during the build) so concurrent NanoHTTPD threads can't allocate several extra
 codec sessions at once; results are cached so a repeated request hits the cache. Serving a one-off
-while the pipeline is alive transiently uses a **second hardware codec session**: 2+2 hardware
-codecs is a **hard device gate** for the pipeline path. Android exposes no max-concurrent-instance
-count, so the limit is detected by catching the `configure()`/`start()` failure (handling both "new
-codec refused" and "existing pipeline codec killed"); on a device that can't sustain 2+2, the seek
-path uses a defined teardown→serve→re-base sequence instead — cancel/release the pipeline's codecs,
-serve the one-off, then re-base/recreate the pipeline from the new base — never an undefined "park."
-The device request trace captures **parallelism**, not just ordering, since it sizes both `LEAD`
-and this rule.
+while the pipeline is alive (a seek *and* the subsequent cold catch-up) uses a **second hardware
+codec session**, so **2+2 hardware codecs is a hard device gate** for the pipeline path. Android
+exposes no max-concurrent-instance count, so the limit is detected by catching a
+`configure()` / `start()` failure (handling both "new codec refused" and "existing pipeline codec
+killed"). A device that can't sustain 2+2 falls back **wholesale to the current per-segment path**
+(no pipeline) — the same all-or-nothing fallback as the frame-exact-IDR and avcC-mismatch gates —
+rather than running a half-pipeline. The device request trace captures **parallelism**, not just
+ordering, since it sizes both `LEAD` and this rule.
 
 ### Startup: prepare-before-load (uses the 15 s budget)
 
@@ -392,9 +393,10 @@ never an in-place resolution change on the live rendition.
 
 **Re-cast ownership.** `segmentBytes` runs on a NanoHTTPD request thread and cannot call
 `remoteMediaClient.load(...)`; only `VideoDetailActivity.castHls` owns the Cast client. So the
-session does not re-cast itself: it publishes a typed `NeedsRecast(reason, startMs, quality)` via
-an `AtomicReference` (or a listener registered at session creation) that `castHls` observes on the
-main thread, registers a replacement session, and issues the `load(...)`. The two replacement
+session does not re-cast itself: it publishes a typed `NeedsRecast(reason, startMs, quality)` to a
+**listener the activity registers at session creation** (since `castHls` is one-shot and would not
+poll an `AtomicReference`); the listener posts to the main thread, registers a replacement session,
+and issues the `load(...)`. The two replacement
 lifecycles are distinct:
 
 - **User-initiated fresh cast** (a new title) — the previous HLS session is cancelled/evicted
@@ -435,12 +437,11 @@ A log line records each decision; an optional brief toast can inform the user.
   (interrupt the worker, release codecs in `finally`) before starting a new one, mirroring the
   live path's teardown. The pipeline owns one codec session; a one-off build during a seek
   transiently adds a second (bounded 2+2), handled below.
-- **Concurrent codec limits.** Serving a one-off build while the pipeline is alive allocates a
-  second decoder+encoder. The target device must sustain 2+2 hardware codecs (device-verification
-  gate, detected by catching a `configure()` / `start()` failure); on a codec-limited device the
-  seek path uses the defined **teardown→serve→re-base** sequence (cancel/release the pipeline, serve
-  the one-off, re-base) rather than an undefined "park" — consistent with *Production & request
-  coordination*.
+- **Concurrent codec limits.** Serving a one-off while the pipeline is alive (a seek and the
+  subsequent cold catch-up) needs 2+2 hardware codecs. This is a **hard device gate** (detected by
+  catching a `configure()` / `start()` failure); a device that can't sustain 2+2 falls back
+  **wholesale to the current per-segment path**, like the other device gates (see *Production &
+  request coordination*).
 - **Boundary IDRs are best-effort.** Android's `REQUEST_SYNC_FRAME` is advisory and
   `KEY_I_FRAME_INTERVAL` is a cadence hint, so the pipeline cuts on the **observed** keyframe; if a
   boundary frame is not an IDR, that index is served by the one-off builder (guaranteed IDR), not a
