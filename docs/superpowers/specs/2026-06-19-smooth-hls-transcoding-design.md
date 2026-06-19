@@ -1,7 +1,7 @@
 # Smooth HLS transcoding — sequential pipeline + principled downscaling
 
 Date: 2026-06-19
-Status: Draft for review
+Status: Draft for review (rev 2 — incorporates spec-review findings)
 
 ## Problem
 
@@ -50,7 +50,12 @@ prefetch + reduced keyframes confirmed this — it did not keep up and regressed
 
 - Changing the direct-play or live (progressive-fMP4) paths.
 - Supporting per-title adaptive bitrate ladders / multiple renditions.
-- Audio re-architecture (existing AAC transcode / passthrough is reused as-is).
+- A from-scratch audio re-architecture — the pipeline **reuses the live path's** audio
+  decode→AAC / passthrough semantics (see Components); it does not invent a new audio path.
+- Refactoring the live path (`TranscodeStreamer` / `Fmp4Writer` / `HlsMp4Builder`) into a
+  shared core. The codebase deliberately keeps the HLS path self-contained so it can never
+  regress live streaming; the new pipeline is an **independent adaptation**, not a unified
+  branchy module.
 
 ## Decisions captured from review
 
@@ -65,15 +70,19 @@ prefetch + reduced keyframes confirmed this — it did not keep up and regressed
 
 Run **one** long-lived decode→encode pipeline per playback run instead of a fresh transcode
 per segment. The pipeline decodes the source sequentially from a base position; the encoder
-is told to emit an IDR at each segment boundary so the continuous encoded stream can be
-**cut into independently-decodable HLS fMP4 segments**. Each frame is decoded exactly once,
-codecs are created once per run, and all segments share one SPS/PPS (one encoder), which also
-removes the existing "segment avcC differs from init" corruption risk.
+is **asked to emit an IDR near each segment boundary** so the continuous encoded stream can
+be **cut into independently-decodable HLS fMP4 segments**. Each frame is decoded exactly
+once, codecs are created once per run, and — because one encoder runs at **one fixed
+resolution for the whole session** — all segments share one SPS/PPS, which removes the
+existing "segment avcC differs from init" corruption risk.
 
-This is essentially the proven **live path** (`TranscodeStreamer` + `Fmp4Writer`: sequential
-decode→encode→fMP4) with two additions: (a) cut the output into segments at IDR boundaries,
-and (b) restart ("re-base") the pipeline on a seek. We reuse `HlsMp4Builder` for fMP4
-assembly and `HlsTranscodeMath` for the pure helpers.
+The pipeline is an **independent adaptation modeled on the proven live path**
+(`TranscodeStreamer` + `Fmp4Writer`: single-threaded sequential decode→encode→fMP4 with the
+non-blocking audio interleave, surface-based 10-bit tone-map, and clean `cancel()`/`finally`
+teardown). It does **not** refactor those classes into a shared core — it reuses their
+*patterns* and the existing `HlsMp4Builder` (fMP4 assembly) and `HlsTranscodeMath` (pure
+helpers), keeping the live path untouched. Its two genuinely new pieces are (a) cutting the
+output into segments at IDR boundaries and (b) restarting ("re-base") on a seek.
 
 ### The HLS VOD contract stays the same
 
@@ -135,8 +144,8 @@ grows, so steady-state playback does not underrun.
 
 - **No pre-roll re-decode** — sequential decode touches each frame once.
 - **No per-segment codec init** — codecs live for the whole run.
-- **One consistent SPS/PPS** for all segments — removes the avcC-divergence corruption risk
-  and simplifies the shared init segment.
+- **One consistent SPS/PPS** for all segments (one encoder at one fixed resolution per
+  session) — removes the avcC-divergence corruption risk and simplifies the shared init.
 
 ## Principled downscaling (both mechanisms)
 
@@ -145,19 +154,26 @@ Resolution reduction is never an arbitrary cap; it is either chosen or measured.
 ### 1. Explicit quality setting
 
 A "Cast quality" setting: **Auto (default) / 1080p / 720p / 540p**. Plumbed into the encode
-output size (`HlsTranscodeMath.outputSize` max dimensions). `Auto` = start at the source
-resolution capped at 1080p and rely on the automatic fallback below. A manual choice fixes
-the cap and disables the automatic fallback. Lives in Settings (or the Advanced submenu).
+output size (`HlsTranscodeMath.outputSize` max dimensions). `Auto` lets the measured fallback
+below choose; a manual choice fixes the resolution for the session and skips measurement.
+Lives in Settings (or the Advanced submenu).
 
-### 2. Automatic measured fallback
+### 2. Automatic measured fallback — decided up front, not mid-stream
 
-The pipeline tracks a rolling **build ratio** = `wall_time_to_build_segment / segment_duration`
-over the last few segments. If the ratio stays above a threshold (e.g. > ~0.85, meaning it
-cannot maintain a lead) while in `Auto`, it steps the resolution down one rung
-(1080p → 720p → 540p) and re-bases. This triggers **only on measured inability to keep up**,
-so capable devices keep full resolution and weak devices/4K sources degrade gracefully
-instead of buffering. A log line records each downshift; an optional brief toast can inform
-the user.
+A mid-stream resolution change would change `init.mp4` and corrupt the single-init HLS
+rendition, so in `Auto` the resolution is chosen **during the startup pre-buffer, before
+`init.mp4`/playlist are served**. The pipeline measures the build ratio
+(`wall_time / content_time`) on the opening segments at the candidate resolution; if it can't
+sustain a lead (ratio above ~0.85), it steps down one rung (1080p → 720p → 540p) and
+re-measures. The session then commits to that one resolution — still automatic and measured,
+but without violating the one-init invariant. Capable devices keep full resolution; weak
+devices / 4K sources start at a sustainable one.
+
+A mid-stream collapse (e.g. sustained thermal throttling) is rare; because it would change
+the init, it is handled as a **full re-cast** — a new HLS session id → new playlist → new
+`init.mp4` → `remoteMediaClient.load(...)` (reusing the existing session-eviction path) —
+never an in-place resolution change on the live rendition. A log line records each decision;
+an optional brief toast can inform the user.
 
 ## Alternatives considered
 
@@ -176,16 +192,21 @@ the user.
 
 ## Risks & mitigations
 
-- **Seek-restart latency.** Mitigated by the pre-buffer fill being only a few seconds and the
-  product decision that occasional longer seeks are acceptable. A backward seek into recently
-  played content may still be cached (keep an LRU of built segments across a re-base where
-  the timeline overlaps).
+- **Seek-restart latency.** Mitigated by the pre-buffer fill being only a few seconds, by
+  app-initiated seeks pre-empting the re-base, and by the product decision that occasional
+  longer seeks are acceptable. A backward seek into recently played content is served from the
+  retained-window cache without a re-base.
 - **Pipeline liveness / cancellation.** A re-base must cleanly cancel the old pipeline
   (interrupt the worker, release codecs in `finally`) before starting a new one, mirroring the
   live path's teardown. Single-worker ownership avoids two hardware codec sessions at once.
-- **Boundary-accurate IDRs.** If `REQUEST_SYNC_FRAME` is honored late, a segment could start
-  on a non-IDR. Mitigation: verify the first sample of each cut is a keyframe; if not, extend
-  the previous segment to the next IDR (variable but always seekable) and log.
+- **Boundary-accurate IDRs.** `REQUEST_SYNC_FRAME` is a hint and may land an IDR ~1 frame
+  late; `KEY_I_FRAME_INTERVAL ≈ segment duration` is the backstop. The cut is taken at the
+  real IDR nearest the boundary, so segment lengths jitter by ≤ ~1 frame around the nominal
+  6 s — bounded and non-cumulative (every cut targets absolute PTS), so no variable-boundary
+  playlist is needed.
+- **Re-base thrash.** Avoided by the retained-window cache + hysteresis (see Production &
+  request coordination): only a clear out-of-window jump re-bases; cached/back-buffer fetches
+  do not.
 - **A/V alignment at boundaries.** Audio and video are cut at the same source time; reuse the
   live path's A/V sync handling. Validate first-segment audio/video sample counts.
 - **Regression surface.** The HLS path is opt-in/secondary to the proven live path; gate the
@@ -200,25 +221,29 @@ the user.
 - **On-device verification** (Snapdragon "parrot" → Mi TV) with `Penguins` (1080p HEVC10 +
   AAC 7.1): confirm sustained `PLAYING` with no rebuffering over several minutes, capture the
   per-segment build ratio (< 1.0), and verify a forward seek + a backward seek both resume.
-- **Stress**: a 4K Tigole HEVC source to confirm the automatic fallback engages (1080p→720p)
-  instead of buffering.
+- **Stress**: a 4K Tigole HEVC source to confirm the automatic fallback selects a lower
+  resolution at startup (e.g. 1080p→720p) instead of buffering.
 
 ## Implementation phases (for the later plan)
 
-1. Extract the reusable sequential decode→encode core (shared with / modeled on the live
-   path) into a segment-cutting pipeline that emits fMP4 segments via `HlsMp4Builder`.
-2. Wire `HlsTranscodeSession` to the pipeline (production frontier, request coordination,
-   pre-buffer, init capture).
-3. Seek re-base + cross-rebase segment LRU.
-4. Explicit quality setting (Settings) → output-size plumbing.
-5. Automatic measured fallback (build-ratio state machine + re-base at lower res).
+1. Build `HlsSegmentPipeline` — an **independent adaptation** of the live decode→encode loop
+   (not a refactor of `TranscodeStreamer`/`Fmp4Writer`) that cuts IDR-aligned fMP4 segments
+   via `HlsMp4Builder` and adopts the live path's robust audio decode→AAC semantics. Live
+   path stays untouched.
+2. Wire `HlsTranscodeSession` to the pipeline: production frontier, `lastRequestedIndex`,
+   back-pressure, retained-window cache, fine-grained waits, init capture.
+3. Seek re-base (with app-seek pre-empt) + hysteresis.
+4. Explicit quality setting → `HlsTranscodeMath.outputSize` plumbing.
+5. Automatic measured fallback during the pre-buffer (build-ratio → resolution chosen before
+   serving init); rare mid-stream collapse → full re-cast.
 6. Device verification + the 4K fallback stress test.
 
 ## Open questions for review
 
-1. `PREBUFFER` / `LEAD` segment counts (default 3 / steady lead ~3) and the fallback build-ratio
-   threshold (~0.85) — tune during device verification, or fix now?
+1. `PREBUFFER` / `LEAD` / `BACK_BUFFER` segment counts (defaults ~3 / ~3 / ~2) and the
+   fallback build-ratio threshold (~0.85) — tune during device verification, or fix now?
 2. Quality-setting location — Settings screen vs the existing per-video **Advanced** overflow
    submenu?
-3. Should the automatic fallback ever step **back up** (e.g. it downshifted during a busy
-   moment) or stay down for the rest of the session for stability?
+3. Mid-stream collapse handling — is the full re-cast worth building now, or should a rare
+   sustained collapse just tolerate buffering until the user re-casts (resolution is already
+   chosen up front, so this should be uncommon)?
