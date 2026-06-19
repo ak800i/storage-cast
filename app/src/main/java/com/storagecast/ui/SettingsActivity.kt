@@ -20,8 +20,6 @@ class SettingsActivity : AppCompatActivity() {
         const val DEFAULT_MIN_DURATION_MINUTES = 18
         const val KEY_REALTIME_TRANSCODE = "realtime_transcode"
         const val DEFAULT_REALTIME_TRANSCODE = false
-        const val KEY_COPY_AUDIO = "copy_audio"
-        const val DEFAULT_COPY_AUDIO = false
         const val KEY_HLS_SEEKING = "hls_seeking"
         // Off by default: the live progressive-fMP4 transcode path is the proven-working
         // one on real hardware (incl. first-gen Chromecast, which plays it but failed on
@@ -46,17 +44,6 @@ class SettingsActivity : AppCompatActivity() {
         fun setRealtimeTranscode(context: Context, enabled: Boolean) {
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
                 .putBoolean(KEY_REALTIME_TRANSCODE, enabled)
-                .apply()
-        }
-
-        fun getCopyAudio(context: Context): Boolean {
-            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            return prefs.getBoolean(KEY_COPY_AUDIO, DEFAULT_COPY_AUDIO)
-        }
-
-        fun setCopyAudio(context: Context, enabled: Boolean) {
-            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
-                .putBoolean(KEY_COPY_AUDIO, enabled)
                 .apply()
         }
 

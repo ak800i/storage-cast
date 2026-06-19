@@ -6,24 +6,27 @@
         app:actionProviderClass="androidx.mediarouter.app.MediaRouteActionProvider"
         app:showAsAction="always" />
     <item
-        android:id="@+id/action_realtime_transcode"
-        android:title="@string/realtime_transcode"
-        android:checkable="true"
-        app:showAsAction="never" />
-    <item
-        android:id="@+id/action_copy_audio"
-        android:title="@string/copy_audio"
-        android:checkable="true"
-        app:showAsAction="never" />
-    <item
-        android:id="@+id/action_hls_seeking"
-        android:title="@string/hls_seeking"
-        android:checkable="true"
-        app:showAsAction="never" />
-    <item
         android:id="@+id/action_save_subtitle"
         android:title="@string/save_subtitle"
         app:showAsAction="never" />
+    <item
+        android:id="@+id/action_advanced"
+        android:title="@string/advanced"
+        app:showAsAction="never">
+        <menu>
+            <item
+                android:id="@+id/action_realtime_transcode"
+                android:title="@string/realtime_transcode"
+                android:checkable="true" />
+            <item
+                android:id="@+id/action_hls_seeking"
+                android:title="@string/hls_seeking"
+                android:checkable="true" />
+            <item
+                android:id="@+id/action_reset_receiver_learning"
+                android:title="@string/reset_receiver_learning" />
+        </menu>
+    </item>
     <item
         android:id="@+id/action_settings"
         android:title="@string/settings"

@@ -125,6 +125,42 @@ class StreamingDecisionTest {
         assertFalse("Dolby transcoded to AAC for HLS", p.copyAudio)
     }
 
+    // ── Reactive receiver capability hints ────────────────────────────────────
+
+    @Test
+    fun learnedUnsupportedVideo_forcesTranscode() {
+        // A receiver that previously failed to direct-play AV1 should now transcode it,
+        // even though AV1 is in the optimistic baseline.
+        val hints = StreamingDecision.ReceiverHints(unsupportedDirect = setOf("video/av01"))
+        val p = StreamingDecision.decide(
+            probe(video("video/av01"), audio("audio/mp4a-latm")), hints = hints
+        )
+        assertEquals(StreamingDecision.Path.HLS, p.path)
+        assertTrue(p.transcodeVideo)
+        assertTrue("AAC still copied over HLS", p.copyAudio)
+    }
+
+    @Test
+    fun learnedUnsupportedDolbyAudio_routesToHls() {
+        // If a receiver can't direct-play E-AC-3, the audio is no longer "supported"; with a
+        // supported video that means HLS with the audio transcoded to AAC.
+        val hints = StreamingDecision.ReceiverHints(unsupportedDirect = setOf("audio/eac3"))
+        val p = StreamingDecision.decide(
+            probe(video("video/avc"), audio("audio/eac3", ch = 6)), hints = hints
+        )
+        assertEquals(StreamingDecision.Path.HLS, p.path)
+        assertFalse("unsupported Dolby transcoded to AAC", p.copyAudio)
+    }
+
+    @Test
+    fun emptyHints_unchangedFromDefault() {
+        val p = StreamingDecision.decide(
+            probe(video("video/avc"), audio("audio/mp4a-latm")),
+            hints = StreamingDecision.ReceiverHints()
+        )
+        assertEquals(StreamingDecision.Path.DIRECT, p.path)
+    }
+
     // ── Edge cases ────────────────────────────────────────────────────────────
 
     @Test

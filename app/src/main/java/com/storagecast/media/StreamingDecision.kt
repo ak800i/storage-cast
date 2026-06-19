@@ -17,6 +17,17 @@ object StreamingDecision {
 
     enum class Path { DIRECT, HLS, LIVE }
 
+    /**
+     * Capability learned about a specific receiver at runtime. The Cast SDK exposes no
+     * codec list, so [unsupportedDirect] starts empty and grows reactively: when a direct
+     * play errors on the receiver, the caller records the source's MIME(s) here so future
+     * casts of those codecs skip straight to transcoding.
+     */
+    data class ReceiverHints(
+        /** Lower-case MIME types this receiver has failed to direct-play. */
+        val unsupportedDirect: Set<String> = emptySet()
+    )
+
     data class Plan(
         val path: Path,
         /** Whether the video stream is re-encoded (false only for DIRECT). */
@@ -44,11 +55,14 @@ object StreamingDecision {
      * @param forceTranscode user/advanced override: never direct-play (always transcode).
      * @param preferHls user/advanced override: prefer seekable HLS even for Dolby audio,
      *   accepting an audio transcode to AAC (loses 5.1) instead of falling back to live.
+     * @param hints learned per-receiver capability; codecs in [ReceiverHints.unsupportedDirect]
+     *   are treated as not directly playable (forces transcode) even if in the optimistic baseline.
      */
     fun decide(
         probe: MediaProbeResult,
         forceTranscode: Boolean = false,
-        preferHls: Boolean = false
+        preferHls: Boolean = false,
+        hints: ReceiverHints = ReceiverHints()
     ): Plan {
         val v = probe.primaryVideo
         val a = probe.primaryAudio
@@ -56,8 +70,10 @@ object StreamingDecision {
         val aMime = (a?.mime ?: "").lowercase()
 
         val tenBit = v != null && (v.profile == "Main 10" || v.profile == "High 10")
-        val videoSupported = v == null || (vMime in DIRECT_VIDEO && !tenBit)
-        val audioSupported = a == null || aMime in DIRECT_AUDIO
+        val videoSupported = v == null ||
+            (vMime in DIRECT_VIDEO && !tenBit && vMime !in hints.unsupportedDirect)
+        val audioSupported = a == null ||
+            (aMime in DIRECT_AUDIO && aMime !in hints.unsupportedDirect)
         val audioHlsFriendly = a == null || aMime in HLS_FRIENDLY_AUDIO
         val audioDolby = aMime.contains("ac3") || aMime.contains("ac-3") ||
             aMime.contains("eac3") || aMime.contains("ec3")

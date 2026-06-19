@@ -52,6 +52,7 @@ import com.storagecast.media.AudioTrackInfo
 import com.storagecast.media.CastCompatibility
 import com.storagecast.media.MediaProbeResult
 import com.storagecast.media.StreamingDecision
+import com.storagecast.media.ReceiverCapabilityStore
 import com.storagecast.media.MediaProber
 import com.storagecast.media.HlsTranscodeSession
 import com.storagecast.media.TranscodeStreamer
@@ -106,6 +107,21 @@ class VideoDetailActivity : AppCompatActivity() {
     private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var selectedAudioTrack: AudioTrackInfo? = null
     private var cachedProbeResult: MediaProbeResult? = null
+
+    // ── Reactive receiver capability learning ──
+    // The Cast SDK can't tell us up front which codecs a receiver decodes, so we learn it:
+    // when a direct play errors before it ever reaches PLAYING, we record the source codecs
+    // as unsupported for that receiver and automatically re-cast as a transcode. pendingDirect
+    // holds the in-flight direct attempt awaiting confirmation that it actually plays.
+    private val receiverCaps by lazy { ReceiverCapabilityStore(this) }
+    private data class DirectAttempt(
+        val deviceId: String?,
+        val video: VideoItem,
+        val probe: MediaProbeResult,
+        val videoMime: String,
+        val audioMime: String
+    )
+    private var pendingDirectAttempt: DirectAttempt? = null
 
     private val subtitleFilePicker = registerForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -192,6 +208,10 @@ class VideoDetailActivity : AppCompatActivity() {
                 AppLogger.info(TAG, "  receiver customData: $customData")
             }
             updateProgressTracking(playerState)
+            if (playerState == MediaStatus.PLAYER_STATE_PLAYING && pendingDirectAttempt != null) {
+                AppLogger.info(TAG, "Direct play confirmed playing; no capability escalation needed")
+                pendingDirectAttempt = null
+            }
             if (playerState == MediaStatus.PLAYER_STATE_IDLE) {
                 when (status.idleReason) {
                     MediaStatus.IDLE_REASON_ERROR -> {
@@ -227,6 +247,7 @@ class VideoDetailActivity : AppCompatActivity() {
                         } catch (e: Exception) {
                             AppLogger.warn(TAG, "  Failed to parse MediaStatus JSON: ${e.message}")
                         }
+                        maybeLearnAndEscalate(streamType)
                     }
                     MediaStatus.IDLE_REASON_CANCELED ->
                         AppLogger.warn(TAG, "Cast playback canceled")
@@ -1568,18 +1589,54 @@ class VideoDetailActivity : AppCompatActivity() {
             // Single auto-decision: direct-play when the receiver supports both streams,
             // otherwise transcode only what's needed (see StreamingDecision). The legacy
             // toggles act as overrides: realtime = force transcode, HLS seeking = prefer
-            // seekable HLS even for Dolby (accepting an audio transcode).
+            // seekable HLS even for Dolby (accepting an audio transcode). Learned per-receiver
+            // capability steers known-bad codecs straight to transcoding.
+            val deviceId = castSession?.castDevice?.deviceId
             val plan = StreamingDecision.decide(
                 probeResult,
                 forceTranscode = SettingsActivity.getRealtimeTranscode(this@VideoDetailActivity),
-                preferHls = SettingsActivity.getHlsSeeking(this@VideoDetailActivity)
+                preferHls = SettingsActivity.getHlsSeeking(this@VideoDetailActivity),
+                hints = receiverCaps.hints(deviceId)
             )
             AppLogger.info(TAG, "Streaming plan: ${plan.path} — ${plan.reason}")
             if (plan.path == StreamingDecision.Path.DIRECT) {
+                // Remember this attempt so a receiver error (codec it actually can't decode)
+                // can be learned and escalated to a transcode automatically.
+                pendingDirectAttempt = DirectAttempt(
+                    deviceId, video, probeResult,
+                    videoMime = (probeResult.primaryVideo?.mime ?: "").lowercase(),
+                    audioMime = (probeResult.primaryAudio?.mime ?: "").lowercase()
+                )
                 directStreamOrRemux(video)
             } else {
+                pendingDirectAttempt = null
                 startTranscoding(video, probeResult, pendingSeekPositionMs)
             }
+        }
+    }
+
+    /**
+     * Reactive capability learning. A receiver error on a buffered (direct-play) stream that
+     * never reached PLAYING means the receiver couldn't decode the source. Record the source
+     * codecs as unsupported for this receiver and automatically re-cast as a transcode, so the
+     * next attempt for these codecs skips direct play. No-op once playback has started.
+     */
+    private fun maybeLearnAndEscalate(streamType: Int) {
+        val attempt = pendingDirectAttempt ?: return
+        // Only a buffered (direct) stream failure indicates a direct-play capability gap; the
+        // transcode/remux paths are STREAM_TYPE_LIVE and have their own error handling.
+        if (streamType != MediaInfo.STREAM_TYPE_BUFFERED) return
+        pendingDirectAttempt = null
+        val mimes = listOf(attempt.videoMime, attempt.audioMime).filter { it.isNotBlank() }
+        val learned = receiverCaps.recordUnsupported(attempt.deviceId, mimes)
+        AppLogger.warn(
+            TAG,
+            "Direct play failed on receiver (deviceId=${attempt.deviceId}); learned " +
+                "unsupported=$mimes (new=$learned). Escalating to transcode."
+        )
+        runOnUiThread {
+            Toast.makeText(this, R.string.direct_play_failed_transcoding, Toast.LENGTH_SHORT).show()
+            startTranscoding(attempt.video, attempt.probe, pendingSeekPositionMs)
         }
     }
 
@@ -2147,8 +2204,6 @@ class VideoDetailActivity : AppCompatActivity() {
         menu.findItem(R.id.action_save_subtitle)?.isVisible = downloadedSubtitleFile != null
         menu.findItem(R.id.action_realtime_transcode)?.isChecked =
             SettingsActivity.getRealtimeTranscode(this)
-        menu.findItem(R.id.action_copy_audio)?.isChecked =
-            SettingsActivity.getCopyAudio(this)
         menu.findItem(R.id.action_hls_seeking)?.isChecked =
             SettingsActivity.getHlsSeeking(this)
         return super.onPrepareOptionsMenu(menu)
@@ -2189,16 +2244,11 @@ class VideoDetailActivity : AppCompatActivity() {
                 AppLogger.info(TAG, "Realtime transcoding toggled: $enabled")
                 true
             }
-            R.id.action_copy_audio -> {
-                val enabled = !item.isChecked
-                item.isChecked = enabled
-                SettingsActivity.setCopyAudio(this, enabled)
-                Toast.makeText(
-                    this,
-                    if (enabled) R.string.copy_audio_on else R.string.copy_audio_off,
-                    Toast.LENGTH_SHORT
-                ).show()
-                AppLogger.info(TAG, "Copy audio toggled: $enabled")
+            R.id.action_reset_receiver_learning -> {
+                val deviceId = castSession?.castDevice?.deviceId
+                receiverCaps.reset(deviceId)
+                Toast.makeText(this, R.string.reset_receiver_learning_done, Toast.LENGTH_SHORT).show()
+                AppLogger.info(TAG, "Reset receiver learning for deviceId=$deviceId")
                 true
             }
             R.id.action_hls_seeking -> {
