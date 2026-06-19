@@ -1,7 +1,7 @@
 # Smooth HLS transcoding — sequential pipeline + principled downscaling
 
 Date: 2026-06-19
-Status: Draft for review (rev 6 — incorporates spec-review findings)
+Status: Draft for review (rev 7 — incorporates spec-review findings)
 
 ## Problem
 
@@ -143,13 +143,17 @@ first sample's absolute PTS, so:
   tolerates the sub-frame `#EXTINF` approximation;
 - it is **non-cumulative** — every boundary targets the absolute `N·6 s`.
 
-Android's sync-frame request is best-effort, so the pipeline **cuts on the observed encoded
-keyframe** and checks that the boundary frame actually came out as an IDR. If it did not (the
-encoder ignored the hint), that one index is served by the **one-off builder** instead (its fresh
-encoder guarantees the IDR) — the architecture's own recovery, needing no variable-length
-segments, variable-boundary playlist, or IDR-derived `#EXTINF` map. Device traces verify the
-target encoders honor the cadence before the pipeline path is relied on. This keeps
-`#EXTINF:6.000` and `#EXT-X-TARGETDURATION:6` honest.
+For both builders to agree on the *exact* first frame of segment `i`, the pipeline needs the
+encoder to emit the IDR on the **precise requested frame** (the sync request is issued before that
+frame is rendered to the input surface). This is a **binary device-verification gate**: the device
+trace must confirm *frame-exact* IDR placement, not merely a ≈ 6 s cadence. An encoder that
+systematically emits the IDR a frame late is a no-go for the pipeline path on that device (it would
+fall back to the per-segment one-off path wholesale) — so frame-exactness is verified up front, not
+assumed. Given a frame-exact encoder, a *rare* individual miss (a single boundary that came out
+non-IDR — the pipeline checks the observed boundary frame, so a miss is detected) is served by the
+one-off builder for that one index — a recovery for the occasional miss, **not** a systematic
+fallback. No variable-length segments, variable-boundary playlist, or IDR-derived `#EXTINF` map is
+introduced; `#EXTINF:6.000` and `#EXT-X-TARGETDURATION:6` stay honest.
 
 ### Invariants
 
@@ -163,15 +167,22 @@ target encoders honor the cadence before the pipeline path is relied on. This ke
   stays as a guard; the **only** cause of a genuine avcC mismatch is an actual config/resolution
   change, handled by a **full re-cast** (new session id → new init → `load(...)`), never by serving
   a mismatched segment. Routine seeks do not change config, so they never re-cast.
-- **Builder interchangeability.** The steady-state pipeline and the one-off `HlsSegmentTranscoder`
-  are two implementations of *one* segment contract: identical committed config (above), the same
-  boundary cut rule (segment `i` starts at the first frame with PTS ≥ `i·6 s`, forced to an IDR),
-  and the same absolute-source-time → audio-PTS mapping. So **any segment index is
-  byte-interchangeable regardless of which builder produced it** — a seek/stray served by the
-  one-off builder sits seamlessly next to pipeline segments, and if the pipeline ever fails to make
-  a boundary frame an IDR, that index is simply served by the one-off builder. This requires the
-  one-off builder to be **parameterized from the committed config** (today it is hardwired to
-  1080p / 8 Mbps / 30 fps — a real change, not a pure reuse).
+- **Builder interchangeability (scoped).** The steady-state pipeline and the one-off
+  `HlsSegmentTranscoder` are two implementations of *one* segment contract: identical committed
+  config, the same boundary cut rule (see *Segment-boundary timing*), and the same
+  absolute-source-time → audio mapping.
+  Both must therefore be brought to the committed config **and the same audio transcode semantics**
+  (the live path's no-PCM-loss, frame-count-timestamped AAC) — today the one-off builder fixes its
+  own output size/bitrate/fps and uses an older lossy AAC path, so this is a real change, not a
+  pure reuse. Interchangeability is then:
+    - **exact** for video and for *copy* audio (both builders read identical source frames at
+      identical PTS) — a seek/stray segment from the one-off builder splices seamlessly next to
+      pipeline segments;
+    - **within ≤ 1 AAC frame (~21 ms)** for *transcoded* AAC at a one-off↔pipeline *junction*,
+      because two independent encoders anchor their 1024-sample grid differently. This is accepted:
+      junctions occur only at seeks / re-base / the rare IDR-recovery — already non-seamless moments
+      — and the IDR-recovery case can keep pipeline audio to avoid even that. It is **not** a
+      steady-state seam.
 - **Absolute PTS across re-base.** Segment `i` always carries source-absolute PTS for
   `[i·6 s, …)` regardless of the pipeline's base, so a re-based pipeline produces
   byte-compatible segments at the same indices.
@@ -195,49 +206,53 @@ segment build, well inside the receiver's segment-fetch timeout. The pipeline th
   short rewinds (~12 s ≈ 2 segments; same memory bound).
 
 ```
-state: lastRequestedIndex (init = initialSegmentIndex), outOfWindowRun = 0
+state: lastRequestedIndex (init = initialSegmentIndex), relocRun = 0, relocAnchor = none
 
 segmentBytes(index):
     if cached(index): return it                       # already in the producible window
     inWindow = (lastRequestedIndex - BACK_BUFFER) <= index <= (lastRequestedIndex + LEAD)
     if inWindow:
-        outOfWindowRun = 0
+        relocRun = 0                                  # back to steady state
         lastRequestedIndex = max(lastRequestedIndex, index)
         return waitForProduction(index)               # the pipeline is heading here
 
     # out of window: a seek or a stray probe — serve it NOW, don't yank the pipeline
     bytes = oneOffBuild(index)
-    outOfWindowRun += 1
-    if outOfWindowRun >= RELOCATE_AFTER:               # a sustained relocation, not a stray
-        reBase(pipeline, baseIndex = index)
-        lastRequestedIndex = index                    # reset the cursor to the new base
-        outOfWindowRun = 0
+    if index continues a monotonic adjacent out-of-window run (prevOoW+1):
+        relocRun += 1
+    else:
+        relocRun = 1; relocAnchor = index            # new/isolated out-of-window index
+    if relocRun >= RELOCATE_AFTER:                    # a real relocation, not a lone probe
+        reBase(pipeline, baseIndex = relocAnchor)
+        lastRequestedIndex = relocAnchor             # reset the cursor to the new base
+        relocRun = 0
     return bytes
 ```
 
 - **Normal forward read-ahead / steady playback** (within `lastRequestedIndex + LEAD`) is served
   from cache or a short wait; the pipeline is already producing toward it.
 - **Short backward rewind** (within `BACK_BUFFER`) is served from cache.
-- **Seek** (forward or backward, out of window) is served immediately by the one-off builder; if
-  out-of-window requests persist (`RELOCATE_AFTER` consecutive) the pipeline re-bases to the new
-  location and **resets its cursor**, so post-seek playback near the new base is never mis-read as
-  another discontinuity.
+- **Seek** (forward or backward, out of window) is served immediately by the one-off builder; the
+  pipeline re-bases only once `RELOCATE_AFTER` out-of-window requests form a **monotonic adjacent
+  run** (a real playhead relocation), anchored at the run's start, then **resets its cursor** so
+  post-seek playback near the new base is never mis-read as another discontinuity.
 - **Stray / isolated probe** (e.g. a lone `seg0` duration probe while based far ahead) is served
-  by the one-off builder and, never reaching `RELOCATE_AFTER`, does not move the base.
+  by the one-off builder and, being isolated (not part of an adjacent run), never moves the base.
 
 The pipeline is the steady-state optimizer; the one-off builder is the universal immediate-serve
 path. (The receiver's actual request ordering — expected monotonic / playhead-local for fMP4 VOD,
 including a non-zero start — is verified on device before the plan commits to this heuristic.)
 
 **Concurrency & resources.** `segmentBytes` is called on NanoHTTPD worker threads, so the
-cursor/cache state (`lastRequestedIndex`, `outOfWindowRun`, the cache) is guarded by a lock that
-is **released while waiting for production** (a wait must not serialize every request behind one
-build), and `outOfWindowRun` only advances on genuinely out-of-window *playback* reads so an
-interleaved parallel probe can't spuriously trip `RELOCATE_AFTER`. Serving a one-off while the
+cursor/relocation/cache state (`lastRequestedIndex`, `relocRun`, `relocAnchor`, the cache) is
+mutated only under a lock that is **released while waiting for production** (a wait must not
+serialize every request behind one build). The relocation rule uses only the observable request
+index — re-base needs a *monotonic adjacent run*, so an interleaved or far-flung parallel probe
+breaks the run rather than advancing it toward `RELOCATE_AFTER`. Serving a one-off while the
 pipeline is alive transiently uses a **second hardware codec session** (a bounded 2+2 window):
 this is a device-verification gate (the target Snapdragon handles 2+2), and on a codec-limited
 device the pipeline's codecs are parked for the one-off's duration. The device request trace
-captures **parallelism**, not just ordering, since it sizes both `LEAD` and this heuristic.
+captures **parallelism**, not just ordering, since it sizes both `LEAD` and this rule.
 
 ### Startup: prepare-before-load (uses the 15 s budget)
 
@@ -390,10 +405,12 @@ off rather than aborting, and `castHls` registers a replacement session and issu
 
 - **Pure-JVM unit tests** for the new pure pieces: segment-boundary cutting math (PTS →
   segment index, first-frame-≥-boundary IDR selection, observed-non-IDR → one-off recovery),
-  builder interchangeability (pipeline vs one-off segment at the same index are byte-comparable /
-  junction-clean, including audio PTS), the request routing + cursor logic (in-window vs
-  out-of-window, one-off vs pipeline, `RELOCATE_AFTER` re-base, cursor reset on re-base / non-zero
-  start, parallel-probe robustness), the build-ratio fallback state machine (steady-state segment,
+  builder interchangeability at the *contract* level (same committed init/config, first sample
+  IDR, `tfdt`/PTS/durations tile cleanly, audio PTS continuity) — byte-for-byte equality is
+  asserted only in pure `HlsMp4Builder` tests with identical mock sample inputs, never across two
+  real encoder sessions — the request routing + cursor logic (in-window vs out-of-window, one-off
+  vs pipeline, monotonic-run `RELOCATE_AFTER` re-base, cursor reset on re-base / non-zero start,
+  parallel-probe robustness), the build-ratio fallback state machine (steady-state segment,
   early-bail per candidate), the selected-vs-primary audio-track contract, and quality →
   output-size mapping. (Consistent with the existing `HlsTranscodeMath` / `StreamingDecision` test
   style — no device or Robolectric.)
@@ -401,8 +418,10 @@ off rather than aborting, and `castHls` registers a replacement session and issu
   AAC 7.1): confirm sustained `PLAYING` with no rebuffering over several minutes, capture the
   per-segment build ratio (< 1.0), verify a mid-range forward seek + a backward seek both resume
   promptly, validate A/V sync over a multi-minute session **and across a re-base**, confirm
-  re-based and one-off segments decode cleanly against the committed `init.mp4`, and confirm 2+2
-  concurrent hardware codecs during a seek.
+  re-based and one-off segments decode cleanly against the committed `init.mp4`, confirm
+  **frame-exact IDR placement** at boundaries, and confirm 2+2 concurrent hardware codecs during a
+  seek. (If the re-cast path is built, also confirm the receiver backs off on an HTTP 503 +
+  `Retry-After` rather than aborting.)
 - **Receiver request-ordering trace** (prerequisite for the coordination heuristic): capture the
   receiver's actual segment-request pattern for an fMP4 VOD that starts at a non-zero time, plus
   a forward and a backward seek, to confirm requests are monotonic / playhead-local and to
