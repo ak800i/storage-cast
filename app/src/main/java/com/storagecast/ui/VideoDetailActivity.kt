@@ -617,11 +617,18 @@ class VideoDetailActivity : AppCompatActivity() {
      * Returns the effective subtitle file for casting, applying the current
      * sync offset if non-zero.
      */
-    private fun getEffectiveSubtitleFile(): File? {
+    /**
+     * The subtitle to send, with timestamps shifted by the manual sync offset plus
+     * [extraOffsetMs]. For the live transcode, [extraOffsetMs] is `-transcodeBaseMs` so the
+     * 0-based stream (which starts at the seek position) lines up with the absolute-timed
+     * subtitle; cues before the start collapse to 0 and don't display.
+     */
+    private fun getEffectiveSubtitleFile(extraOffsetMs: Long = 0L): File? {
         val base = selectedSubtitleFile ?: return null
-        if (subtitleSyncOffsetMs == 0L) return base
+        val totalOffsetMs = subtitleSyncOffsetMs + extraOffsetMs
+        if (totalOffsetMs == 0L) return base
         val outputFile = File(cacheDir, "subtitles/offset_subtitle.vtt")
-        return subtitleConverter.applySubtitleOffset(base, subtitleSyncOffsetMs, outputFile) ?: base
+        return subtitleConverter.applySubtitleOffset(base, totalOffsetMs, outputFile) ?: base
     }
 
     private fun updateSubtitleSyncUi() {
@@ -1606,7 +1613,7 @@ class VideoDetailActivity : AppCompatActivity() {
         val inputPath = video.path
         val audioTrack = selectedAudioTrack
 
-        castStreamingSource(video, "video/mp4") {
+        castStreamingSource(video, "video/mp4", transcodeBaseMs) {
             streamer.createTranscodeStream(inputPath, probeResult, audioTrack, copyAudio, transcodeBaseMs,
                 object : TranscodeStreamer.ProgressListener {
                     override fun onProgress(percent: Int) {
@@ -1658,7 +1665,12 @@ class VideoDetailActivity : AppCompatActivity() {
      * The factory lambda creates a fresh InputStream each time the Cast device requests data.
      * Streaming starts immediately — no need to wait for the full transcode/remux to complete.
      */
-    private fun castStreamingSource(video: VideoItem, contentType: String, factory: () -> InputStream) {
+    private fun castStreamingSource(
+        video: VideoItem,
+        contentType: String,
+        sourceOffsetMs: Long = 0L,
+        factory: () -> InputStream
+    ) {
         val service = mediaServerService
         if (service == null) {
             AppLogger.error(TAG, "castStreamingSource: media server service is null")
@@ -1689,7 +1701,9 @@ class VideoDetailActivity : AppCompatActivity() {
 
         val mediaTracks = mutableListOf<MediaTrack>()
 
-        val effectiveSubtitle = getEffectiveSubtitleFile()
+        // Shift the (absolute-timed) subtitle back by the stream's source start so it lines
+        // up with the 0-based live stream after a seek-by-restart.
+        val effectiveSubtitle = getEffectiveSubtitleFile(-sourceOffsetMs)
         if (effectiveSubtitle != null) {
             val subtitlePath = service.registerSubtitle(effectiveSubtitle)
             val subtitleUrl = "http://$serverIp:$serverPort$subtitlePath"
