@@ -56,6 +56,7 @@
     <string name="transcode_failed">Transcoding failed: %s</string>
     <string name="advanced">Advanced</string>
     <string name="direct_play_failed_transcoding">Receiver couldn\'t play this directly — transcoding</string>
+    <string name="direct_play_failed_no_fallback">Receiver couldn\'t play this file, and its audio can\'t be transcoded on this device</string>
     <string name="realtime_transcode">Force transcode</string>
     <string name="realtime_transcode_on">Force transcode on — always transcoding</string>
     <string name="realtime_transcode_off">Force transcode off — auto-deciding</string>

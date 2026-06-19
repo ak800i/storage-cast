@@ -81,11 +81,15 @@ class MediaProber {
 
             // Fallback: some devices' MediaExtractor doesn't report audio tracks
             // for certain codecs (e.g. AC-3 on Xiaomi). Parse MKV at EBML level.
+            var audioPlatformDemuxable = true
             if (audioTracks.isEmpty() && isMkvContainer(container)) {
                 AppLogger.info(TAG, "MediaExtractor found no audio tracks in MKV, trying EBML fallback")
                 val ebmlAudioTracks = probeMkvAudioTracks(videoPath)
                 if (ebmlAudioTracks.isNotEmpty()) {
                     audioTracks.addAll(ebmlAudioTracks)
+                    // These tracks aren't visible to MediaExtractor, so the transcoder can't
+                    // read them — only direct play can deliver this audio to the receiver.
+                    audioPlatformDemuxable = false
                     AppLogger.info(TAG, "EBML fallback found ${ebmlAudioTracks.size} audio track(s)")
                 }
             }
@@ -104,7 +108,8 @@ class MediaProber {
                 videoTracks = videoTracks,
                 audioTracks = audioTracks,
                 durationMs = durationUs / 1000,
-                fileSize = file.length()
+                fileSize = file.length(),
+                audioPlatformDemuxable = audioPlatformDemuxable
             )
 
             AppLogger.info(TAG, "Probed: container=$container, " +

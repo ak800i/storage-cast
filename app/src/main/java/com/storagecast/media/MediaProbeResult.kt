@@ -5,7 +5,14 @@ data class MediaProbeResult(
     val videoTracks: List<VideoTrackInfo>,
     val audioTracks: List<AudioTrackInfo>,
     val durationMs: Long,
-    val fileSize: Long
+    val fileSize: Long,
+    /**
+     * Whether the platform's MediaExtractor can demux the audio. False when the audio was
+     * only recovered via the EBML fallback (e.g. AC-3/E-AC-3 in MKV on Xiaomi), meaning the
+     * transcoder cannot read/decode it — so the audio can only reach the receiver via direct
+     * play.
+     */
+    val audioPlatformDemuxable: Boolean = true
 ) {
     val primaryVideo: VideoTrackInfo? get() = videoTracks.firstOrNull()
     val primaryAudio: AudioTrackInfo? get() = audioTracks.firstOrNull()

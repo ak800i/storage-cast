@@ -78,6 +78,17 @@ object StreamingDecision {
         val audioDolby = aMime.contains("ac3") || aMime.contains("ac-3") ||
             aMime.contains("eac3") || aMime.contains("ec3")
 
+        // If the platform can't demux the audio (e.g. AC-3/E-AC-3 in MKV on some Xiaomi
+        // devices, recovered only via the EBML fallback), the transcoder can't read or
+        // re-encode it — direct play is the only way to deliver this audio to the receiver,
+        // so it wins even over the force-transcode / prefer-HLS overrides.
+        if (a != null && !probe.audioPlatformDemuxable) {
+            return Plan(
+                Path.DIRECT, transcodeVideo = false, copyAudio = true,
+                reason = "audio ($aMime) not demuxable on this device; only the receiver can decode it"
+            )
+        }
+
         if (!forceTranscode && videoSupported && audioSupported) {
             return Plan(
                 Path.DIRECT, transcodeVideo = false, copyAudio = true,

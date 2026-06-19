@@ -161,6 +161,29 @@ class StreamingDecisionTest {
         assertEquals(StreamingDecision.Path.DIRECT, p.path)
     }
 
+    // ── Audio not demuxable by the platform (e.g. E-AC-3 in MKV on Xiaomi) ─────
+
+    private fun undemuxable(v: VideoTrackInfo?, a: AudioTrackInfo?) =
+        MediaProbeResult("mkv", listOfNotNull(v), listOfNotNull(a), 1_200_000L, 1_000_000L, audioPlatformDemuxable = false)
+
+    @Test
+    fun undemuxableAudio_forcesDirectEvenForHevc() {
+        // 10-bit HEVC + E-AC-3 would normally be LIVE, but if the device can't demux the
+        // audio the transcoder can't carry it, so direct play is the only option.
+        val p = StreamingDecision.decide(undemuxable(video("video/hevc", "Main 10"), audio("audio/eac3", ch = 6)))
+        assertEquals(StreamingDecision.Path.DIRECT, p.path)
+        assertFalse(p.transcodeVideo)
+    }
+
+    @Test
+    fun undemuxableAudio_beatsForceTranscodeAndPreferHls() {
+        val p = StreamingDecision.decide(
+            undemuxable(video("video/hevc", "Main 10"), audio("audio/eac3", ch = 6)),
+            forceTranscode = true, preferHls = true
+        )
+        assertEquals(StreamingDecision.Path.DIRECT, p.path)
+    }
+
     // ── Edge cases ────────────────────────────────────────────────────────────
 
     @Test

@@ -1632,8 +1632,19 @@ class VideoDetailActivity : AppCompatActivity() {
         AppLogger.warn(
             TAG,
             "Direct play failed on receiver (deviceId=${attempt.deviceId}); learned " +
-                "unsupported=$mimes (new=$learned). Escalating to transcode."
+                "unsupported=$mimes (new=$learned)."
         )
+        // When the audio isn't demuxable by this device's MediaExtractor, the transcoder
+        // can't read it — escalating would just crash. Direct play was the only option, so
+        // surface the failure instead of looping into a broken transcode.
+        if (!attempt.probe.audioPlatformDemuxable) {
+            AppLogger.warn(TAG, "No transcode fallback: audio not demuxable on this device.")
+            runOnUiThread {
+                Toast.makeText(this, R.string.direct_play_failed_no_fallback, Toast.LENGTH_LONG).show()
+            }
+            return
+        }
+        AppLogger.warn(TAG, "Escalating to transcode.")
         runOnUiThread {
             Toast.makeText(this, R.string.direct_play_failed_transcoding, Toast.LENGTH_SHORT).show()
             startTranscoding(attempt.video, attempt.probe, pendingSeekPositionMs)
