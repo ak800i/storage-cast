@@ -1,7 +1,7 @@
 # Smooth HLS transcoding — sequential pipeline + principled downscaling
 
 Date: 2026-06-19
-Status: Draft for review (rev 5 — incorporates spec-review findings)
+Status: Draft for review (rev 6 — incorporates spec-review findings)
 
 ## Problem
 
@@ -107,7 +107,12 @@ isolated transcode.
   (down)mixed to stereo AAC. (This carries forward existing behavior: `passthroughAudioRange`
   already returns `null` for `audio/mpeg` and falls back to AAC transcode, even though
   `StreamingDecision` lists `audio/mpeg` as HLS-friendly.) It never passes Dolby / E-AC-3 or
-  multichannel through on HLS. A unit test locks this contract.
+  multichannel through on HLS. Copy eligibility **and** the master-playlist `CODECS` value are
+  keyed off the **effective (user-selected) audio track / committed `AudioInit`**, not
+  `probe.primaryAudio` (today the decision uses `primaryAudio` while the builder uses
+  `selectedAudioTrack ?: primaryAudio` — they must agree). Both builders timestamp audio with
+  **absolute source PTS**, so audio is interchangeable at any index. A unit test locks this
+  contract.
 - **Segment cutting** — the encoder is configured with `KEY_I_FRAME_INTERVAL ≈ 6 s`;
   additionally, when a *decoded* frame's PTS crosses an `N·6 s` boundary the pipeline calls
   `encoder.setParameters(PARAMETER_KEY_REQUEST_SYNC_FRAME)` **before rendering that frame to the
@@ -119,45 +124,54 @@ isolated transcode.
   pipeline (below) instead of building in isolation. `initBytes()` is captured once from the
   pipeline's encoder config at start.
 - **`MediaServerService.serveHls` (unchanged interface)** — still serves
-  `playlist.m3u8 / init.mp4 / segN.m4s`; `segmentBytes` now blocks on pipeline production or
-  triggers a re-base.
+  `playlist.m3u8 / init.mp4 / segN.m4s`; `segmentBytes` now serves from the pipeline's window or
+  the one-off builder, and may trigger a re-base or re-cast.
 
 ### Segment-boundary timing (one authority: nominal 6 s)
 
 The playlist is the single timing authority: each `#EXTINF` is nominal **6.000 s** and segment
-`i` is the content cut for `[i·6 s, (i+1)·6 s)`. The encoder is *asked* for an IDR at each
-boundary; the cut is taken at the **real IDR nearest the boundary**, which on a hardware
-encoder lands within ≤ ~1 frame. The fMP4 `tfdt` anchors to each segment's first sample PTS
-(absolute), so:
+`i` is the content cut for `[i·6 s, (i+1)·6 s)`. The cut rule (identical for both builders) is:
+**segment `i` starts at the first frame whose PTS ≥ `i·6 s`, and that frame is an IDR.** The
+pipeline forces it by requesting a sync frame (`PARAMETER_KEY_REQUEST_SYNC_FRAME`, best-effort)
+before rendering that frame, backed by `KEY_I_FRAME_INTERVAL ≈ 6 s`; the one-off builder gets it
+for free (a fresh encoder always starts its segment with an IDR). The fMP4 `tfdt` anchors to that
+first sample's absolute PTS, so:
 
-- per-segment length jitters by ≤ ~1 frame around 6 s — the receiver tolerates this `#EXTINF`
-  approximation (well under its sub-second tolerance);
-- the jitter is **non-cumulative** — every boundary targets the absolute `N·6 s`, so errors do
-  not accumulate across the run.
+- segment lengths vary by < 1 frame purely from **frame quantization** — 6 s is not an integer
+  number of frames (≈ 143.86 at 23.976 fps), so the boundary lands mid-frame and the cut takes the
+  first frame past it. This is deterministic and identical for both builders, and the receiver
+  tolerates the sub-frame `#EXTINF` approximation;
+- it is **non-cumulative** — every boundary targets the absolute `N·6 s`.
 
-The `KEY_I_FRAME_INTERVAL ≈ 6 s` backstop means the encoder emits an IDR at the ~6 s cadence
-*regardless* of the per-boundary hint, so a boundary IDR is always present within ≤ ~1 frame.
-The design therefore keeps **one** timing authority — the fixed nominal 6 s playlist — and does
-**not** introduce variable-length segments, a variable-boundary playlist, or an IDR-derived
-`#EXTINF` map. A boundary IDR going genuinely missing would be an encoder fault, not a normal
-case; it is treated as a **production failure** for that segment (surfaced as an error / re-cast),
-never as a silently stretched segment that would mis-describe its `#EXTINF`. This keeps
+Android's sync-frame request is best-effort, so the pipeline **cuts on the observed encoded
+keyframe** and checks that the boundary frame actually came out as an IDR. If it did not (the
+encoder ignored the hint), that one index is served by the **one-off builder** instead (its fresh
+encoder guarantees the IDR) — the architecture's own recovery, needing no variable-length
+segments, variable-boundary playlist, or IDR-derived `#EXTINF` map. Device traces verify the
+target encoders honor the cadence before the pipeline path is relied on. This keeps
 `#EXTINF:6.000` and `#EXT-X-TARGETDURATION:6` honest.
 
 ### Invariants
 
-- **One init for the whole rendition.** One encoder at one fixed resolution per session ⇒ one
-  SPS/PPS ⇒ one `init.mp4`; every segment decodes against it.
-- **The committed `init.mp4` stays authoritative for every segment.** Re-based segments and
-  one-off builds use a *fresh* encoder configured **identically** to the committed init (same
-  resolution / profile / level). The current per-segment HLS path already serves every segment
-  from a fresh same-config encoder under one shared init and works, so same-config output is
-  compatible in practice; the existing `avcConfigsMatch` check stays as a guard, and device
-  verification confirms it for re-based and one-off segments. On a genuine mismatch the **only**
-  correct recovery is a **full re-cast** (new session id → new init → `load(...)`) — a freshly
-  encoded bitstream cannot be retro-fitted to a different published `avcC`. Full re-cast is
-  otherwise reserved for an actual resolution change (the mid-stream collapse / quality-change
-  case below), not routine seeks.
+- **One committed config for the whole rendition.** One fixed encoder config per session ⇒ one
+  SPS/PPS ⇒ one `init.mp4`; every segment (pipeline or one-off) decodes against it.
+- **The committed `init.mp4` is authoritative; only a config change re-casts.** The pipeline and
+  the one-off builder both encode with the **same committed config** (resolution / profile / level
+  / bitrate / frame-rate), so their output is compatible with one published `init.mp4` — the
+  current per-segment path already serves every segment from a fresh same-config encoder under one
+  shared init and works, which is exactly this case at equal config. The `avcConfigsMatch` check
+  stays as a guard; the **only** cause of a genuine avcC mismatch is an actual config/resolution
+  change, handled by a **full re-cast** (new session id → new init → `load(...)`), never by serving
+  a mismatched segment. Routine seeks do not change config, so they never re-cast.
+- **Builder interchangeability.** The steady-state pipeline and the one-off `HlsSegmentTranscoder`
+  are two implementations of *one* segment contract: identical committed config (above), the same
+  boundary cut rule (segment `i` starts at the first frame with PTS ≥ `i·6 s`, forced to an IDR),
+  and the same absolute-source-time → audio-PTS mapping. So **any segment index is
+  byte-interchangeable regardless of which builder produced it** — a seek/stray served by the
+  one-off builder sits seamlessly next to pipeline segments, and if the pipeline ever fails to make
+  a boundary frame an IDR, that index is simply served by the one-off builder. This requires the
+  one-off builder to be **parameterized from the committed config** (today it is hardwired to
+  1080p / 8 Mbps / 30 fps — a real change, not a pure reuse).
 - **Absolute PTS across re-base.** Segment `i` always carries source-absolute PTS for
   `[i·6 s, …)` regardless of the pipeline's base, so a re-based pipeline produces
   byte-compatible segments at the same indices.
@@ -166,8 +180,8 @@ never as a silently stretched segment that would mis-describe its `#EXTINF`. Thi
 
 The hot pipeline produces forward from its base for the **steady-state** stream; anything it
 can't satisfy from its producible window — a seek, a stray probe, or the first segments right
-after a re-base — is served **immediately** by the retained `HlsSegmentTranscoder` (the existing
-per-segment transcode, kept as the *one-off builder*). That path has the same bounded latency as
+after a re-base — is served **immediately** by the `HlsSegmentTranscoder` (the existing
+per-segment transcode, **parameterized from the committed config** as the *one-off builder*). That path has the same bounded latency as
 today's working-but-rebuffering path, so a seek never blocks longer than a single isolated
 segment build, well inside the receiver's segment-fetch timeout. The pipeline then re-bases to
 *follow* a sustained relocation and takes over subsequent requests. Two parameters:
@@ -214,6 +228,16 @@ segmentBytes(index):
 The pipeline is the steady-state optimizer; the one-off builder is the universal immediate-serve
 path. (The receiver's actual request ordering — expected monotonic / playhead-local for fMP4 VOD,
 including a non-zero start — is verified on device before the plan commits to this heuristic.)
+
+**Concurrency & resources.** `segmentBytes` is called on NanoHTTPD worker threads, so the
+cursor/cache state (`lastRequestedIndex`, `outOfWindowRun`, the cache) is guarded by a lock that
+is **released while waiting for production** (a wait must not serialize every request behind one
+build), and `outOfWindowRun` only advances on genuinely out-of-window *playback* reads so an
+interleaved parallel probe can't spuriously trip `RELOCATE_AFTER`. Serving a one-off while the
+pipeline is alive transiently uses a **second hardware codec session** (a bounded 2+2 window):
+this is a device-verification gate (the target Snapdragon handles 2+2), and on a codec-limited
+device the pipeline's codecs are parked for the one-off's duration. The device request trace
+captures **parallelism**, not just ordering, since it sizes both `LEAD` and this heuristic.
 
 ### Startup: prepare-before-load (uses the 15 s budget)
 
@@ -271,15 +295,14 @@ would over-estimate cost and needlessly downscale capable devices (against Goals
 **bails early**: if the steady-state segment can't sustain a lead (ratio above ~0.85) it steps
 down one rung (1080p → 720p → 540p) without finishing a full pre-buffer at the doomed resolution.
 So the common case (the first resolution sustains) stays within the ~15 s budget, and each
-rejected rung adds only ~two segments of measurement, not a whole pre-buffer.
+rejected rung adds only ~two segments of measurement, not a whole pre-buffer. The session then
+commits to the chosen resolution — still automatic and measured, without violating the one-init
+invariant. Capable devices keep full resolution; weak devices start at a sustainable one.
 
 On a weak device that needs multiple step-downs, the *first* cast's `prepare()` can still exceed
 the ~15 s budget (each rejected rung measures at sub-real-time speed); this is accepted, and the
 implementation may remember the chosen resolution per device so repeat casts skip measurement and
 start fast.
-The session then commits to the chosen resolution — still automatic and measured, without
-violating the one-init invariant. Capable devices keep full resolution; weak devices start at a
-sustainable one.
 
 **Decode floor.** Downscaling reduces *encode* (and surface-scale) cost; the decoder always
 runs at the source resolution, so a genuinely *decode-bound* source (e.g. heavy 4K HEVC-10 on a
@@ -295,12 +318,13 @@ would change the init, it is handled as a **full re-cast** — a new HLS session
 → new `init.mp4` → `remoteMediaClient.load(...)` (reusing the existing session-eviction path) —
 never an in-place resolution change on the live rendition.
 
-**Re-cast ownership.** `segmentBytes` runs inside an `MediaServerService` HTTP request and
-cannot call `remoteMediaClient.load(...)`; only `VideoDetailActivity.castHls` owns the Cast
-client. So a re-cast is not performed by the session itself: `HlsTranscodeSession` raises a typed
-`NeedsRecast(reason, startMs, quality)` signal, the in-flight request fails fast, and `castHls`
-(the owner) registers a replacement session and issues the `load(...)`. A log line records each
-decision; an optional brief toast can inform the user.
+**Re-cast ownership.** `segmentBytes` runs on a NanoHTTPD request thread and cannot call
+`remoteMediaClient.load(...)`; only `VideoDetailActivity.castHls` owns the Cast client. So the
+session does not re-cast itself: it publishes a typed `NeedsRecast(reason, startMs, quality)` via
+an `AtomicReference` (or a listener registered at session creation) that `castHls` observes on the
+main thread; the in-flight HTTP request returns **503 with `Retry-After`** so the receiver backs
+off rather than aborting, and `castHls` registers a replacement session and issues the
+`load(...)`. A log line records each decision; an optional brief toast can inform the user.
 
 ## Alternatives considered
 
@@ -328,16 +352,22 @@ decision; an optional brief toast can inform the user.
   the retained-window cache.
 - **Pipeline liveness / cancellation.** A re-base must cleanly cancel the old pipeline
   (interrupt the worker, release codecs in `finally`) before starting a new one, mirroring the
-  live path's teardown. Single-worker ownership avoids two hardware codec sessions at once.
-- **Boundary-accurate IDRs.** `REQUEST_SYNC_FRAME` is a hint backed by the
-  `KEY_I_FRAME_INTERVAL ≈ 6 s` fallback, so a boundary IDR is always present within ≤ ~1 frame. A
-  genuinely missing boundary IDR is a **production failure** for that segment (error / re-cast),
-  not a stretched segment — keeping `#EXTINF:6.000` honest (see *Segment-boundary timing*).
-- **Re-base init compatibility.** A re-base builds a fresh, identically-configured encoder; the
-  committed `init.mp4` stays authoritative. Byte-identical avcC is *not assumed* — device
-  verification confirms re-based segments decode against the committed init (the
-  `avcConfigsMatch` check is the diagnostic); full re-cast is reserved for resolution changes,
-  not routine seeks (see *Invariants*).
+  live path's teardown. The pipeline owns one codec session; a one-off build during a seek
+  transiently adds a second (bounded 2+2), handled below.
+- **Concurrent codec limits.** Serving a one-off build while the pipeline is alive allocates a
+  second decoder+encoder. The target device must sustain 2+2 hardware codecs (device-verification
+  gate); on a codec-limited device, park the pipeline's codecs for the one-off's duration (added
+  latency, still bounded) rather than fail `configure()`.
+- **Boundary IDRs are best-effort.** Android's `REQUEST_SYNC_FRAME` is advisory and
+  `KEY_I_FRAME_INTERVAL` is a cadence hint, so the pipeline cuts on the **observed** keyframe; if a
+  boundary frame is not an IDR, that index is served by the one-off builder (guaranteed IDR), not a
+  stretched segment (see *Segment-boundary timing*). Device traces confirm the cadence on the
+  target encoders before the pipeline path is relied on.
+- **Init compatibility across builders.** Both builders encode with the same committed config, so
+  their `avcC` matches the published init by construction (the current equal-config per-segment
+  path already proves this); the `avcConfigsMatch` check guards it, and the one-off builder must be
+  **parameterized from the committed config** (it is hardwired today). A genuine avcC mismatch can
+  only come from a config change → full re-cast (see *Invariants*).
 - **Decode-bound sources.** Resolution fallback cannot help a source whose *decode* (not
   encode) saturates the device; the session commits to the lowest rung and accepts buffering
   with a message (see *Principled downscaling*).
@@ -346,11 +376,11 @@ decision; an optional brief toast can inform the user.
   then **resetting the request cursor to the new base** (see *Production & request coordination*).
   So an isolated probe never moves the base, and post-seek playback near the new base is not
   mis-read as another discontinuity.
-- **Long-session A/V drift.** The continuous audio path carries a running frame-count clock
-  (live-path `AudioEncoderFeeder`: `basePtsUs + framesSent·1e6/sampleRate`) while video carries
-  source PTS, replacing the current per-segment audio re-anchor. The plan must pin down the
-  source-time → audio-PTS mapping, how a re-base re-anchors audio, and validate A/V drift over a
-  multi-minute session and across a re-base (not just first-segment sample counts).
+- **Long-session A/V drift & audio interchangeability.** Both builders must anchor audio to the
+  **same absolute-source-time → audio-PTS mapping** (independent of the pipeline's base), so any
+  index is audio-interchangeable and a re-base re-anchors cleanly. Validate A/V drift over a
+  multi-minute session and across a re-base (not just first-segment sample counts); a source-audio
+  gap is the residual risk to watch.
 - **A/V alignment at boundaries.** Audio and video are cut at the same source time; reuse the
   live path's A/V sync handling. Validate first-segment audio/video sample counts.
 - **Regression surface.** The HLS path is opt-in/secondary to the proven live path; gate the
@@ -359,17 +389,20 @@ decision; an optional brief toast can inform the user.
 ## Testing strategy
 
 - **Pure-JVM unit tests** for the new pure pieces: segment-boundary cutting math (PTS →
-  segment index, IDR-at-boundary selection, missing-boundary-IDR → production-failure signal),
-  the request routing + cursor logic (in-window vs out-of-window, one-off vs pipeline,
-  `RELOCATE_AFTER` sustained-relocation re-base, cursor reset on re-base / non-zero start), the
-  build-ratio fallback state machine (steady-state segment, early-bail per candidate), and
-  quality → output-size mapping. (Consistent with the existing `HlsTranscodeMath` /
-  `StreamingDecision` test style — no device or Robolectric.)
+  segment index, first-frame-≥-boundary IDR selection, observed-non-IDR → one-off recovery),
+  builder interchangeability (pipeline vs one-off segment at the same index are byte-comparable /
+  junction-clean, including audio PTS), the request routing + cursor logic (in-window vs
+  out-of-window, one-off vs pipeline, `RELOCATE_AFTER` re-base, cursor reset on re-base / non-zero
+  start, parallel-probe robustness), the build-ratio fallback state machine (steady-state segment,
+  early-bail per candidate), the selected-vs-primary audio-track contract, and quality →
+  output-size mapping. (Consistent with the existing `HlsTranscodeMath` / `StreamingDecision` test
+  style — no device or Robolectric.)
 - **On-device verification** (Snapdragon "parrot" → Mi TV) with `Penguins` (1080p HEVC10 +
   AAC 7.1): confirm sustained `PLAYING` with no rebuffering over several minutes, capture the
   per-segment build ratio (< 1.0), verify a mid-range forward seek + a backward seek both resume
-  promptly, validate A/V sync over a multi-minute session **and across a re-base**, and confirm
-  re-based segments decode cleanly against the committed `init.mp4`.
+  promptly, validate A/V sync over a multi-minute session **and across a re-base**, confirm
+  re-based and one-off segments decode cleanly against the committed `init.mp4`, and confirm 2+2
+  concurrent hardware codecs during a seek.
 - **Receiver request-ordering trace** (prerequisite for the coordination heuristic): capture the
   receiver's actual segment-request pattern for an fMP4 VOD that starts at a non-zero time, plus
   a forward and a backward seek, to confirm requests are monotonic / playhead-local and to
@@ -382,22 +415,25 @@ decision; an optional brief toast can inform the user.
 
 1. Build `HlsSegmentPipeline` — an **independent adaptation** of the live decode→encode loop
    (not a refactor of `TranscodeStreamer`/`Fmp4Writer`) that cuts IDR-aligned fMP4 segments
-   via `HlsMp4Builder` and adopts the live path's robust audio semantics, constrained to
-   `Plan.copyAudio`. Live path stays untouched.
-2. Wire `HlsTranscodeSession` to the pipeline: production frontier, `lastRequestedIndex`
-   (init = `initialSegmentIndex`), back-pressure (`LEAD` ≥ measured read-ahead, sized for a
-   steady-state reserve), retained-window cache, fine-grained waits, init capture; keep
-   `HlsSegmentTranscoder` as the one-off / immediate-serve builder for every out-of-window request.
-3. Seek / relocation: serve out-of-window requests via the one-off builder, re-base the pipeline
-   after `RELOCATE_AFTER` consecutive out-of-window requests and reset the cursor; `NeedsRecast`
-   signal → `castHls` for resolution-change / init-mismatch re-casts.
+   via `HlsMp4Builder` using the shared boundary cut rule, and adopts the live path's audio
+   semantics with absolute-source PTS, constrained to `Plan.copyAudio`. Live path stays untouched.
+2. Parameterize `HlsSegmentTranscoder` from the committed encoder config and keep it as the
+   one-off / immediate-serve builder (byte-interchangeable segments). Wire `HlsTranscodeSession`
+   to the pipeline: production frontier, `lastRequestedIndex` (init = `initialSegmentIndex`),
+   back-pressure (`LEAD` ≥ measured read-ahead, sized for a steady-state reserve), retained-window
+   cache, the lock-released-during-waits concurrency model, init capture.
+3. Seek / relocation: serve out-of-window requests via the one-off builder, re-base after
+   `RELOCATE_AFTER` consecutive out-of-window reads and reset the cursor; `NeedsRecast` via
+   `AtomicReference` → `castHls` (HTTP 503 + `Retry-After`) for config-change / init-mismatch
+   re-casts.
 4. Prepare-before-load: `castHls` computes `initialSegmentIndex` from `pendingSeekPositionMs`
    and runs `prepare()` (resolution select + `PREBUFFER`) before `remoteMediaClient.load(...)`.
 5. Explicit quality setting → `HlsTranscodeMath.outputSize` plumbing.
 6. Automatic measured fallback inside `prepare()` (steady-state build ratio → resolution chosen
    before serving init, early-bail per candidate); rare mid-stream collapse → full re-cast.
-7. Device verification: receiver request-ordering trace, sustained playback, seeks, A/V drift
-   across a re-base, re-based-init compatibility, and the 4K fallback stress test.
+7. Device verification: receiver request-ordering/parallelism trace, sustained playback, seeks,
+   A/V drift across a re-base, builder-interchangeable / re-based init compatibility, 2+2 codec
+   concurrency, and the 4K fallback stress test.
 
 ## Open questions for review
 
