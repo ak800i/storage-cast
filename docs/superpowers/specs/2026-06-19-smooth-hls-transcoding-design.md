@@ -1,7 +1,7 @@
 # Smooth HLS transcoding — sequential pipeline + principled downscaling
 
 Date: 2026-06-19
-Status: Draft for review (rev 13 — incorporates spec-review findings)
+Status: Draft for review (rev 14 — incorporates spec-review findings)
 
 ## Problem
 
@@ -77,7 +77,9 @@ be **cut into independently-decodable HLS fMP4 segments**. In steady-state forwa
 frame is decoded exactly once, codecs are created once per run, and — because one encoder runs at
 **one fixed resolution for the whole session** — all segments share one SPS/PPS, which removes the
 existing "segment avcC differs from init" corruption risk. (One-off builds for seeks/recovery are
-cached, so the re-based pipeline skips indices already in the cache rather than re-encoding them.)
+cached; on re-base the pipeline's **decode base is the first non-cached index** in the confirmed
+relocation run — it serves the already-cached one-off segments for the earlier indices rather than
+re-encoding them, since a continuous encoder can't skip a middle index.)
 
 The pipeline is an **independent adaptation modeled on the proven live path**
 (`TranscodeStreamer` + `Fmp4Writer`: single-threaded sequential decode→encode→fMP4 with the
@@ -182,8 +184,10 @@ is introduced; `#EXTINF:6.000` and `#EXT-X-TARGETDURATION:6` stay honest.
   config" means the **complete encoder `MediaFormat`** captured once at `prepare()` — every key that
   influences the SPS/PPS (dimensions, profile/level, `KEY_I_FRAME_INTERVAL`, `KEY_MAX_B_FRAMES = 0`,
   `KEY_LATENCY`, `KEY_COLOR_FORMAT`, bitrate + bitrate mode, frame rate) — applied **verbatim** to
-  both builders, not just a resolution/profile/level/bitrate/frame-rate summary, so their avcC
-  matches and the avcC guard never fires on a routine seek.
+  both builders, **plus the selected encoder name** (so both create the same codec implementation)
+  and **explicit `KEY_PROFILE` / `KEY_LEVEL`** (the current code leaves these to encoder defaults,
+  which can differ between sessions) — not just a resolution/profile/level/bitrate/frame-rate
+  summary, so their avcC matches and the avcC guard never fires on a routine seek.
 - **The committed `init.mp4` is authoritative; only a config change re-casts.** The pipeline and
   the one-off builder both encode with the **same committed config** (resolution / profile / level
   / bitrate / frame-rate), so their output is compatible with one published `init.mp4` — the
@@ -208,7 +212,8 @@ is introduced; `#EXTINF:6.000` and `#EXT-X-TARGETDURATION:6` stay honest.
     - **exact** for video and for *copy* audio (both builders read identical source frames at
       identical PTS) — a seek/stray segment from the one-off builder splices seamlessly next to
       pipeline segments;
-    - **within ≤ 1 AAC frame (~21 ms)** for *transcoded* AAC at a one-off↔(one-off or pipeline)
+      **within ≤ 1–2 AAC frames (~20–45 ms, including encoder priming)** for *transcoded* AAC at a
+      one-off↔(one-off or pipeline)
       junction, because independent encoders anchor their 1024-sample grid differently (6 s is not
       an integer number of AAC frames, so the grids cannot be made to align). These junctions occur
       during a seek's catch-up — the first `RELOCATE_AFTER`-ish segments after a seek are one-off,
@@ -299,7 +304,11 @@ must not serialize every request behind one build). The relocation rule uses onl
 request index — re-base needs a monotonic-adjacent run, so an interleaved or far-flung parallel
 probe breaks the run rather than advancing it. **One-off builds are serialized** (one at a time,
 the lock released during the build) so concurrent NanoHTTPD threads can't allocate several extra
-codec sessions at once; results are cached so a repeated request hits the cache. Serving a one-off
+codec sessions at once; results are cached so a repeated request hits the cache. Builds are
+prioritized for the **target / playhead** index and **coalesced per index** (duplicate in-flight
+requests share one build); a read-ahead miss that would otherwise queue behind a serial one-off
+instead waits for the pipeline frontier or returns `503` + `Retry-After`, so a parallel request
+burst never serializes the playhead request behind several builds. Serving a one-off
 while the pipeline is alive (a seek *and* the subsequent cold catch-up) uses a **second hardware
 codec session**, so 2+2 concurrent codecs is a **fast-seek capability**, not a pipeline-eligibility
 gate. It is detected **reactively at the first concurrent one-off** (the first mid-session seek —
@@ -311,7 +320,9 @@ pipeline re-bases behind it. On a **1+1-only** device, seeks **degrade serially*
 pipeline, serve the seek via the one-off, rebuild the pipeline at the target, and serve the cold
 catch-up by bounded `WAIT_MARGIN` waits (a brief rebuffer), never a concurrent one-off — so the
 steady-state benefit (pipeline only, 1+1) is kept and only seeks are slower (accepted per the
-product decision). Wholesale fallback to the current per-segment path is reserved for the
+product decision). A 1+1 seek also costs **one rebuffer**: the freshly-rebuilt cold pipeline pays
+the seek pre-roll before it can produce the segment *after* the target, so the receiver may stall
+once after the target's 6 s before the pipeline (> 1× in steady state) catches up. Wholesale fallback to the current per-segment path is reserved for the
 frame-exact-IDR and avcC-mismatch gates (where the pipeline can't produce a correct stream), not
 for codec count. The device request trace captures **parallelism**, not just ordering, since it
 sizes both `LEAD` and this rule.
@@ -521,6 +532,11 @@ A log line records each decision; an optional brief toast can inform the user.
 
 ## Implementation phases (for the later plan)
 
+0. **Device spike (go/no-go), before building the pipeline:** validate on the target encoder +
+   receiver (a) **frame-exact forced-IDR** at `N·6 s` boundaries (`PARAMETER_KEY_REQUEST_SYNC_FRAME`
+   before the boundary surface frame) and (b) the **receiver request-ordering / parallelism trace**
+   that sizes `LEAD` and validates the relocation heuristic. A failure here means the pipeline path
+   isn't viable on that device (stay on the per-segment path) — caught *before* building Phases 1–6.
 1. Build `HlsSegmentPipeline` — an **independent adaptation** of the live decode→encode loop
    (not a refactor of `TranscodeStreamer`/`Fmp4Writer`) that cuts IDR-aligned fMP4 segments
    via `HlsMp4Builder` using the shared boundary cut rule, and adopts the live path's audio
