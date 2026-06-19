@@ -1,7 +1,7 @@
 # Smooth HLS transcoding — sequential pipeline + principled downscaling
 
 Date: 2026-06-19
-Status: Draft for review (rev 12 — incorporates spec-review findings)
+Status: Draft for review (rev 13 — incorporates spec-review findings)
 
 ## Problem
 
@@ -178,7 +178,12 @@ is introduced; `#EXTINF:6.000` and `#EXT-X-TARGETDURATION:6` stay honest.
 ### Invariants
 
 - **One committed config for the whole rendition.** One fixed encoder config per session ⇒ one
-  SPS/PPS ⇒ one `init.mp4`; every segment (pipeline or one-off) decodes against it.
+  SPS/PPS ⇒ one `init.mp4`; every segment (pipeline or one-off) decodes against it. "Committed
+  config" means the **complete encoder `MediaFormat`** captured once at `prepare()` — every key that
+  influences the SPS/PPS (dimensions, profile/level, `KEY_I_FRAME_INTERVAL`, `KEY_MAX_B_FRAMES = 0`,
+  `KEY_LATENCY`, `KEY_COLOR_FORMAT`, bitrate + bitrate mode, frame rate) — applied **verbatim** to
+  both builders, not just a resolution/profile/level/bitrate/frame-rate summary, so their avcC
+  matches and the avcC guard never fires on a routine seek.
 - **The committed `init.mp4` is authoritative; only a config change re-casts.** The pipeline and
   the one-off builder both encode with the **same committed config** (resolution / profile / level
   / bitrate / frame-rate), so their output is compatible with one published `init.mp4` — the
@@ -398,8 +403,9 @@ can't — the unavoidable edge.) Resolution fallback therefore targets the commo
 
 A mid-stream collapse (e.g. sustained thermal throttling) is rare; because changing resolution
 would change the init, it is handled as a **full re-cast** — a new HLS session id → new playlist
-→ new `init.mp4` → `remoteMediaClient.load(...)` (reusing the existing session-eviction path) —
-never an in-place resolution change on the live rendition.
+→ new `init.mp4` → `remoteMediaClient.load(...)` (via the in-session re-cast lifecycle below —
+register-without-evict + draining, **not** the hard-evict path) — never an in-place resolution
+change on the live rendition.
 
 **Re-cast ownership.** `segmentBytes` runs on a NanoHTTPD request thread and cannot call
 `remoteMediaClient.load(...)`; only `VideoDetailActivity.castHls` owns the Cast client. So the
@@ -533,7 +539,10 @@ A log line records each decision; an optional brief toast can inform the user.
    activity registers at session creation → `castHls` (posts to main; HTTP 503 + `Retry-After`) for
    config-change / init-mismatch re-casts.
 4. Prepare-before-load: `castHls` computes `initialSegmentIndex` from `pendingSeekPositionMs`
-   and runs `prepare()` (resolution select + `PREBUFFER`) before `remoteMediaClient.load(...)`.
+   and runs `prepare()` (resolution select + `PREBUFFER`) on a background worker before
+   `remoteMediaClient.load(...)`; also fix the existing `setStreamDuration` unit bug (it passes
+   `durationMs * 1000` while the SDK expects milliseconds, so the VOD seek bar is currently 1000×
+   too long) and verify the receiver-reported duration in the request-ordering trace.
 5. Explicit quality setting → `HlsTranscodeMath.outputSize` plumbing.
 6. Automatic measured fallback inside `prepare()` (steady-state build ratio → resolution chosen
    before serving init, early-bail per candidate); rare mid-stream collapse → full re-cast.
