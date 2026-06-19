@@ -112,7 +112,12 @@ class SubtitleExtractor {
                 val bytes = ByteArray(size)
                 buffer.rewind()
                 buffer.get(bytes, 0, size)
-                val text = String(bytes, Charsets.UTF_8).trim()
+                // SubRip samples from MKV are NUL-terminated and may carry stray control
+                // bytes; trim() leaves a trailing NUL (U+0000), which the Cast receiver
+                // renders as a "�" glyph. Drop control chars but keep line breaks/tabs.
+                val text = String(bytes, Charsets.UTF_8)
+                    .filter { it == '\n' || it == '\r' || it == '\t' || it.code >= 0x20 }
+                    .trim()
 
                 if (text.isNotEmpty()) {
                     starts.add(timeUs)
