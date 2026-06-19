@@ -114,6 +114,17 @@ class StreamingDecisionTest {
         )
     }
 
+    @Test
+    fun preferHls_overrideRoutesDolbyToHlsAac() {
+        // The preferHls override trades 5.1 for native seeking: Dolby+10bit -> HLS, audio->AAC.
+        val p = StreamingDecision.decide(
+            probe(video("video/hevc", "Main 10"), audio("audio/eac3", ch = 6)),
+            preferHls = true
+        )
+        assertEquals(StreamingDecision.Path.HLS, p.path)
+        assertFalse("Dolby transcoded to AAC for HLS", p.copyAudio)
+    }
+
     // ── Edge cases ────────────────────────────────────────────────────────────
 
     @Test

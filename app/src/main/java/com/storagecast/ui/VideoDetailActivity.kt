@@ -51,6 +51,7 @@ import com.storagecast.log.AppLogger
 import com.storagecast.media.AudioTrackInfo
 import com.storagecast.media.CastCompatibility
 import com.storagecast.media.MediaProbeResult
+import com.storagecast.media.StreamingDecision
 import com.storagecast.media.MediaProber
 import com.storagecast.media.HlsTranscodeSession
 import com.storagecast.media.TranscodeStreamer
@@ -1564,41 +1565,35 @@ class VideoDetailActivity : AppCompatActivity() {
             }
             cachedProbeResult = probeResult
 
-            if (SettingsActivity.getRealtimeTranscode(this@VideoDetailActivity)) {
-                AppLogger.info(TAG, "Realtime transcoding enabled, forcing transcode")
-                startTranscoding(video, probeResult, pendingSeekPositionMs)
-                return@launch
-            }
-
-            val result = castCompatibility.checkCompatibility(probeResult)
-            if (result.isFullyCompatible) {
-                AppLogger.info(TAG, "All codecs compatible, casting directly")
+            // Single auto-decision: direct-play when the receiver supports both streams,
+            // otherwise transcode only what's needed (see StreamingDecision). The legacy
+            // toggles act as overrides: realtime = force transcode, HLS seeking = prefer
+            // seekable HLS even for Dolby (accepting an audio transcode).
+            val plan = StreamingDecision.decide(
+                probeResult,
+                forceTranscode = SettingsActivity.getRealtimeTranscode(this@VideoDetailActivity),
+                preferHls = SettingsActivity.getHlsSeeking(this@VideoDetailActivity)
+            )
+            AppLogger.info(TAG, "Streaming plan: ${plan.path} — ${plan.reason}")
+            if (plan.path == StreamingDecision.Path.DIRECT) {
                 directStreamOrRemux(video)
             } else {
-                // An incompatible result means the receiver can't decode a codec in the file
-                // (e.g. 10-bit HEVC), so a direct cast would fail. Transcode automatically via
-                // the active path (live by default, HLS if opted in) — no prompt needed; a
-                // direct cast was never a viable choice here.
-                AppLogger.warn(TAG, "Incompatible codecs, transcoding automatically: ${result.summary}")
-                AppLogger.info(TAG, result.detailedInfo)
                 startTranscoding(video, probeResult, pendingSeekPositionMs)
             }
         }
     }
 
     private fun startTranscoding(video: VideoItem, probeResult: MediaProbeResult, startPositionMs: Long = 0L) {
-        // Serve the transcode as seekable HLS VOD when enabled — except for a Dolby
-        // passthrough. Cast receivers reject AC-3/E-AC-3 in HLS fMP4 (the receiver answers
-        // "Invalid Request" and goes IDLE/ERROR right after the master playlist), even
-        // though they play those codecs fine on the progressive live stream. So copy-audio
-        // of a Dolby source stays on the live path (seek-by-restart) to keep 5.1 intact;
-        // HLS still serves everything else (transcoded to AAC), giving native seeking.
-        val audioMime = (selectedAudioTrack?.mime ?: probeResult.primaryAudio?.mime ?: "").lowercase()
-        val dolbyPassthrough = SettingsActivity.getCopyAudio(this) &&
-            (audioMime.contains("ac3") || audioMime.contains("ac-3") ||
-                audioMime.contains("eac3") || audioMime.contains("ec3"))
-        if (SettingsActivity.getHlsSeeking(this) && !dolbyPassthrough) {
-            castHls(video, probeResult)
+        // Re-derive the plan (this entry is only reached when transcoding) to pick HLS vs
+        // live and whether to copy or transcode the audio. HLS is seekable; live is used
+        // only when Dolby audio must be preserved (receivers reject AC-3/E-AC-3 over HLS).
+        val plan = StreamingDecision.decide(
+            probeResult,
+            forceTranscode = true,
+            preferHls = SettingsActivity.getHlsSeeking(this)
+        )
+        if (plan.path == StreamingDecision.Path.HLS) {
+            castHls(video, probeResult, plan.copyAudio)
             return
         }
 
@@ -1615,7 +1610,7 @@ class VideoDetailActivity : AppCompatActivity() {
         transcodeVideo = video
         transcodeProbe = probeResult
 
-        val copyAudio = SettingsActivity.getCopyAudio(this)
+        val copyAudio = plan.copyAudio
         AppLogger.info(TAG, "Starting streaming transcode to fragmented MP4 (copyAudio=$copyAudio, startPosition=${formatDuration(transcodeBaseMs)})")
 
         val inputPath = video.path
@@ -1787,7 +1782,7 @@ class VideoDetailActivity : AppCompatActivity() {
      * server transcodes fMP4 segments on demand; the playlist's #EXT-X-ENDLIST makes
      * the receiver treat it as VOD, so seeking is native (no live mode, no crash).
      */
-    private fun castHls(video: VideoItem, probeResult: MediaProbeResult) {
+    private fun castHls(video: VideoItem, probeResult: MediaProbeResult, copyAudio: Boolean) {
         val service = mediaServerService
         if (service == null) {
             AppLogger.error(TAG, "castHls: media server service is null")
@@ -1811,7 +1806,6 @@ class VideoDetailActivity : AppCompatActivity() {
         isLiveStreamSession = false
         isTranscodeSession = false
 
-        val copyAudio = SettingsActivity.getCopyAudio(this)
         val serverIp = getDeviceIpAddress()
         val serverPort = service.getServerPort()
 

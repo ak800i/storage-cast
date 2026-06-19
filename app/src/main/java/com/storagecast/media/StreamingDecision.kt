@@ -42,12 +42,13 @@ object StreamingDecision {
 
     /**
      * @param forceTranscode user/advanced override: never direct-play (always transcode).
-     * @param keepOriginalAudio advanced override: prefer passing audio through even when
-     *   that forces the live path for Dolby (vs. the default which already keeps Dolby 5.1).
+     * @param preferHls user/advanced override: prefer seekable HLS even for Dolby audio,
+     *   accepting an audio transcode to AAC (loses 5.1) instead of falling back to live.
      */
     fun decide(
         probe: MediaProbeResult,
-        forceTranscode: Boolean = false
+        forceTranscode: Boolean = false,
+        preferHls: Boolean = false
     ): Plan {
         val v = probe.primaryVideo
         val a = probe.primaryAudio
@@ -68,9 +69,10 @@ object StreamingDecision {
             )
         }
 
-        // Dolby audio that must accompany a transcoded video: HLS would reject the codec,
-        // so keep it on the live path to preserve 5.1 (the single live case).
-        if (audioDolby && !videoSupported) {
+        // Dolby audio that must accompany a transcoded video: HLS would reject the codec.
+        // By default keep it on the live path to preserve 5.1; the preferHls override trades
+        // 5.1 for native seeking by transcoding the audio to AAC over HLS instead.
+        if (audioDolby && !videoSupported && !preferHls) {
             return Plan(
                 Path.LIVE, transcodeVideo = true, copyAudio = true,
                 reason = "incompatible video + Dolby audio: live preserves 5.1 (receiver rejects $aMime over HLS)"

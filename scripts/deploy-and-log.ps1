@@ -7,6 +7,9 @@
 #   pwsh -File scripts/deploy-and-log.ps1            # wait for device, deploy, tail logs
 #   pwsh -File scripts/deploy-and-log.ps1 -NoWait    # deploy now (device already connected)
 #
+# Active debug device: Samsung SM-A715F (Galaxy A71), USB ADB, serial R58N66RVD7Z.
+# It is the single connected device, so commands target it by default (no -s needed).
+#
 # Wireless ADB (Android 11+): on the phone enable Developer options ->
 # Wireless debugging, then either:
 #   adb pair <ip>:<pairPort> <code>   (one-time)
