@@ -296,24 +296,24 @@ import org.junit.Test
 class CommittedEncoderConfigTest {
     @Test fun derive_capsResolutionToQuality_noUpscale_evenDims() {
         // 1080p source, AUTO cap (1920x1080) -> unchanged
-        val c = CommittedEncoderConfig.derive(1920, 1080, srcBitrate = 12_000_000, srcFps = 24, CastQuality.AUTO)
+        val c = CommittedEncoderConfig.derive(1920, 1080, 12_000_000, 24, CastQuality.AUTO)
         assertEquals(1920, c.width); assertEquals(1080, c.height)
     }
 
     @Test fun derive_p720_stepsDown1080Source() {
-        val c = CommittedEncoderConfig.derive(1920, 1080, srcBitrate = 12_000_000, srcFps = 24, CastQuality.P720)
+        val c = CommittedEncoderConfig.derive(1920, 1080, 12_000_000, 24, CastQuality.P720)
         assertEquals(1280, c.width); assertEquals(720, c.height)
     }
 
     @Test fun derive_clampsBitrateAndFps_andSetsSixSecondIdr() {
-        val c = CommittedEncoderConfig.derive(1920, 1080, srcBitrate = 50_000_000, srcFps = 60, CastQuality.AUTO)
+        val c = CommittedEncoderConfig.derive(1920, 1080, 50_000_000, 60, CastQuality.AUTO)
         assertEquals(8_000_000, c.bitrate)      // clamped to 8 Mb/s
         assertEquals(30, c.frameRate)           // clamped to 30
         assertEquals(6, c.iFrameIntervalSec)    // 6s GOP (vs the old 1s all-IDR)
     }
 
     @Test fun derive_keepsLowerSourceBitrateAndFps() {
-        val c = CommittedEncoderConfig.derive(1280, 720, srcBitrate = 3_000_000, srcFps = 24, CastQuality.AUTO)
+        val c = CommittedEncoderConfig.derive(1280, 720, 3_000_000, 24, CastQuality.AUTO)
         assertEquals(3_000_000, c.bitrate)
         assertEquals(24, c.frameRate)
     }
@@ -911,7 +911,7 @@ Expected: BUILD SUCCESSFUL; all existing tests PASS (the temporary call site in 
 - [ ] **Step 9: Commit**
 
 ```bash
-git add app/src/main/java/com/storagecast/media/EncoderFormatFactory.kt app/src/main/java/com/storagecast/media/HlsSegmentTranscoder.kt app/src/main/java/com/storagecast/media/HlsTranscodeSession.kt
+git add app/src/main/java/com/storagecast/media/EncoderFormatFactory.kt app/src/main/java/com/storagecast/media/HlsAudioEncoderFeeder.kt app/src/main/java/com/storagecast/media/HlsSegmentTranscoder.kt app/src/main/java/com/storagecast/media/HlsTranscodeSession.kt
 git commit -m "feat(hls): EncoderFormatFactory + parameterize one-off builder; no-PCM-loss AAC"
 ```
 
@@ -1099,8 +1099,12 @@ fun prepare(initialSegmentIndex: Int) {
 }
 ```
 `waitForFrontier(targetIndex, timeoutMs)` blocks under `lock` (via `produced.await`) until
-`frontier >= targetIndex` or the timeout, then returns regardless (on timeout the receiver's first
-requests simply fall to the one-off builder — correct by fallback). The **final segment** may be
+`frontier >= targetIndex` or the timeout. **`prepare()` must not return without a committed
+`init.mp4`:** the init is captured from the first available segment, so if the pipeline hasn't
+produced its first segment by the timeout, `prepare()` builds the initial segment via the one-off
+builder (`buildOneOff(initialSegmentIndex)` — same committed config ⇒ same init) to capture
+`videoInit`/`audioInit`/`initSegment` before returning. Otherwise the receiver's first `init.mp4`
+request (it precedes any `segN.m4s`) would fail. The **final segment** may be
 shorter than 6 s, so `segmentDrained` won't trip at a full boundary; on decoder EOS flush whatever
 video+audio remain as the last segment, or let the session serve the last index via the one-off
 builder (also correct by fallback).
@@ -1389,8 +1393,9 @@ git commit -m "feat(hls): prepare-before-load on background worker; fix setStrea
     `committedConfig = configForQuality(fallback.current)`, rebuild the pipeline, re-measure.
   - On commit, continue priming `PREBUFFER` segments and capture init.
   - If a viability gate disables the pipeline (avcC mismatch), choose the rung from a cold
-    per-segment ratio or a conservative default (P720). (`getMaxSupportedInstances() < 2` is *not* a
-    disable — codec count only degrades seeks, per Task 9's serial-degrade.)
+    per-segment ratio or a conservative default (P720). (Codec count is **not** a `prepare()`-time
+    resolution gate — it is handled by Task 9: a 2+2 device gets fast seeks; a 1+1 device disables
+    the pipeline on the first seek and falls back to per-segment, the documented v1 limitation.)
   - A manual quality uses `ResolutionFallback(listOf(thatRung))` (always commits, skips measurement).
 - [ ] **Step 2:** `.\gradlew.bat assembleDebug --console=plain` then `.\gradlew.bat testDebugUnitTest --console=plain` → all PASS.
 - [ ] **Step 3:** Commit `feat(hls): measured resolution fallback in prepare()`.
