@@ -1963,6 +1963,13 @@ class VideoDetailActivity : AppCompatActivity() {
 
     private fun showPreparingUi() {
         binding.progressBar.visibility = View.VISIBLE
+        // The thin top progress line is easy to miss, and nothing is loaded on the receiver yet
+        // during prepare(); surface a clear "preparing" state in the bottom cast bar + a toast so
+        // the user knows the (possibly multi-second) transcode warm-up is in progress.
+        binding.castStatusBar.visibility = View.VISIBLE
+        val deviceName = castSession?.castDevice?.friendlyName ?: "device"
+        binding.castStatusText.text = getString(R.string.preparing_to_cast, deviceName)
+        Toast.makeText(this, R.string.preparing_to_cast_toast, Toast.LENGTH_SHORT).show()
     }
 
     private fun hidePreparingUi() {
