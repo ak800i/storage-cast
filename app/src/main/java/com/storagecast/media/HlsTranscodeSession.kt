@@ -1,6 +1,12 @@
 package com.storagecast.media
 
 import com.storagecast.log.AppLogger
+import java.util.concurrent.FutureTask
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
+
+data class NeedsRecast(val reason: String, val startMs: Long, val quality: CastQuality)
 
 /**
  * Orchestrates an HLS VOD presentation for a single source file transcoded on demand.
@@ -21,12 +27,31 @@ class HlsTranscodeSession(
     /** When true, mux source audio untouched (5.1 passthrough) instead of AAC transcode. */
     private val copyAudio: Boolean = false,
     /** Raw WebVTT bytes for the selected subtitle, or null. Served as an in-manifest rendition. */
-    private val subtitleVtt: ByteArray? = null
+    private val subtitleVtt: ByteArray? = null,
+    private val quality: CastQuality = CastQuality.AUTO,
+    private val configForQuality: (CastQuality) -> CommittedEncoderConfig = { selectedQuality ->
+        val video = probeResult.primaryVideo ?: error("HLS transcode requires a video track")
+        CommittedEncoderConfig.derive(
+            video.width,
+            video.height,
+            video.bitrate,
+            video.frameRate.toInt(),
+            selectedQuality,
+        )
+    },
+    private val onNeedsRecast: (NeedsRecast) -> Unit = {},
 ) {
     companion object {
         private const val TAG = "HlsTranscodeSession"
         const val SEGMENT_DURATION_US = 6_000_000L
-        private const val MAX_CACHED_SEGMENTS = 4
+        private const val MAX_CACHED_SEGMENTS = 10
+        const val PREBUFFER = 3
+        const val LEAD = 4
+        const val READAHEAD = 2
+        const val WAIT_MARGIN = 2
+        const val BACK_BUFFER = 2
+        const val RELOCATE_AFTER = 2
+        const val RATIO_THRESHOLD = 0.85
     }
 
     val hasSubtitles: Boolean = subtitleVtt != null && subtitleVtt.isNotEmpty()
@@ -37,31 +62,32 @@ class HlsTranscodeSession(
         if (durationUs <= 0) 1
         else ((durationUs + SEGMENT_DURATION_US - 1) / SEGMENT_DURATION_US).toInt().coerceAtLeast(1)
 
-    /**
-     * HLS CODECS attribute audio component. With copy-audio on, reflect the source
-     * codec so the receiver sets up the correct decoder (AAC/AC-3/E-AC-3); otherwise
-     * we transcode to AAC-LC. Falls back to AAC if the source codec isn't muxable.
-     */
-    private val audioCodecAttr: String = run {
-        val mime = (probeResult.primaryAudio?.mime ?: "").lowercase()
-        if (!copyAudio) "mp4a.40.2"
-        else when {
-            mime.contains("eac3") || mime.contains("ec3") || mime.contains("ec-3") -> "ec-3"
-            mime.contains("ac3") || mime.contains("ac-3") -> "ac-3"
-            else -> "mp4a.40.2"
-        }
-    }
+    private val audioCodecAttr: String = HlsTranscodeMath.hlsAudioCodecAttr()
 
     @Volatile
     private var initSegment: ByteArray? = null
     private var videoInit: HlsMp4Builder.VideoInit? = null
     private var audioInit: HlsMp4Builder.AudioInit? = null
 
+    private val lock = ReentrantLock()
+    private val produced = lock.newCondition()
     private val segmentCache = object : LinkedHashMap<Int, ByteArray>(8, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, ByteArray>?): Boolean =
             size > MAX_CACHED_SEGMENTS
     }
-    private val lock = Any()
+    private var coordinator: HlsSegmentCoordinator? = null
+    private var pipeline: HlsSegmentPipeline? = null
+    @Volatile private var committedConfig: CommittedEncoderConfig? = null
+    @Volatile private var frontier: Int = -1
+    @Volatile private var pipelineBase: Int = 0
+    @Volatile private var producedSinceRebase = false
+    @Volatile private var effectiveCopyAudio = false
+    @Volatile private var generation = 0
+    @Volatile var draining: Boolean = false
+    private val oneOffLock = Any()
+    @Volatile private var serialSeekMode = false
+    private val skipped = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
+    private val inFlight = java.util.concurrent.ConcurrentHashMap<Int, FutureTask<ByteArray?>>()
 
     /** Source time range [startUs, endUs) for segment [index]. */
     private fun rangeFor(index: Int): Pair<Long, Long> {
@@ -159,75 +185,193 @@ class HlsTranscodeSession(
         return out.toByteArray(Charsets.UTF_8)
     }
 
-    fun initBytes(): ByteArray {
-        initSegment?.let { return it }
-        synchronized(lock) {
-            initSegment?.let { return it }
-            // Build segment 0 to capture the codec configs, then the init segment.
-            buildAndCacheSegment(0)
-            val init = HlsMp4Builder.buildInitSegment(videoInit, audioInit)
-            initSegment = init
-            AppLogger.info(TAG, "Built init segment (${init.size} bytes, video=${videoInit != null}, audio=${audioInit != null})")
-            return init
+    private fun newPipeline(baseIndex: Int): HlsSegmentPipeline {
+        val gen = generation
+        return HlsSegmentPipeline(
+            inputPath, probeResult, selectedAudioTrack, effectiveCopyAudio,
+            committedConfig!!, SEGMENT_DURATION_US, LEAD,
+            onSegment = { putSegment(gen, it) },
+            onSkipped = { idx -> skipped.add(idx) },
+            playhead = { lock.withLock { coordinator?.prevIndex ?: baseIndex } },
+        )
+    }
+
+    fun prepare(initialSegmentIndex: Int) {
+        committedConfig = configForQuality(quality)
+        effectiveCopyAudio = HlsTranscodeMath.effectiveCopyAudio(
+            copyAudio,
+            (selectedAudioTrack ?: probeResult.primaryAudio)?.mime,
+            (selectedAudioTrack ?: probeResult.primaryAudio)?.channelCount ?: 2
+        )
+        generation++
+        pipelineBase = initialSegmentIndex
+        frontier = initialSegmentIndex - 1
+        producedSinceRebase = false
+        val coord = HlsSegmentCoordinator(initialSegmentIndex, LEAD, READAHEAD, WAIT_MARGIN, BACK_BUFFER, RELOCATE_AFTER)
+        lock.withLock { coordinator = coord }
+        val pipe = newPipeline(initialSegmentIndex)
+        lock.withLock { pipeline = pipe }
+        pipe.start(initialSegmentIndex)
+        waitForFrontier(initialSegmentIndex + PREBUFFER - 1, timeoutMs = 20_000)
+    }
+
+    private fun waitForFrontier(targetIndex: Int, timeoutMs: Long) {
+        val target = targetIndex.coerceAtMost(segmentCount - 1)
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
+        lock.lock()
+        try {
+            while (frontier < target && System.nanoTime() < deadline) {
+                val remaining = deadline - System.nanoTime()
+                if (remaining <= 0) break
+                produced.await(remaining.coerceAtMost(TimeUnit.MILLISECONDS.toNanos(250)), TimeUnit.NANOSECONDS)
+            }
+        } finally {
+            lock.unlock()
+        }
+        if (lock.withLock { initSegment == null }) {
+            buildOneOff(pipelineBase)
+        }
+        lock.withLock { initSegment ?: error("init not ready after prepare") }
+    }
+
+    private fun putSegment(gen: Int, result: HlsSegmentPipeline.SegmentResult) {
+        lock.withLock {
+            if (gen != generation || result.index < pipelineBase) return
+            if (videoInit == null) {
+                videoInit = result.videoInit; audioInit = result.audioInit
+                initSegment = HlsMp4Builder.buildInitSegment(result.videoInit, result.audioInit)
+            }
+            val videoBad = !HlsTranscodeMath.avcConfigsMatch(videoInit!!.avcC, result.videoInit.avcC)
+            val ai = audioInit; val rai = result.audioInit
+            val audioBad = ai != null && rai != null &&
+                (ai.codec != rai.codec || !ai.codecData.contentEquals(rai.codecData) ||
+                 ai.sampleRate != rai.sampleRate || ai.channels != rai.channels)
+            if (videoBad || audioBad) {
+                draining = true
+                onNeedsRecast(NeedsRecast("init-mismatch", result.index.toLong() * SEGMENT_DURATION_US / 1000, quality))
+                return
+            }
+            segmentCache[result.index] = result.bytes
+            frontier = result.index
+            producedSinceRebase = true
+            produced.signalAll()
         }
     }
 
     /** Returns the fMP4 media segment for [index] (cached). */
     fun segmentBytes(index: Int): ByteArray? {
         if (index < 0 || index >= segmentCount) return null
-        synchronized(lock) {
-            segmentCache[index]?.let { return it }
-            return buildAndCacheSegment(index)
+        lock.lock()
+        try {
+            val coord = coordinator ?: return buildOneOff(index)
+            val frontier = if (producedSinceRebase) this.frontier else Int.MIN_VALUE / 2
+            val low = coord.prevIndex - BACK_BUFFER
+            when (val d = coord.route(index, frontier, low) { i -> segmentCache.containsKey(i) }) {
+                HlsSegmentCoordinator.Decision.ServeCached -> return segmentCache[index]
+                is HlsSegmentCoordinator.Decision.WaitForProduction -> {
+                    if (index in skipped) return buildOneOff(index)
+                    val deadline = System.nanoTime() + 5_000_000_000L
+                    while (!segmentCache.containsKey(index) && index !in skipped && System.nanoTime() < deadline) {
+                        produced.await(250, TimeUnit.MILLISECONDS)
+                    }
+                    return segmentCache[index] ?: buildOneOff(index)
+                }
+                is HlsSegmentCoordinator.Decision.OneOff -> {
+                    val bytes = buildOneOff(index)
+                    if (coordinator != null) d.rebaseTo?.let { reBase(it) }
+                    return bytes
+                }
+            }
+        } finally {
+            if (lock.isHeldByCurrentThread) lock.unlock()
         }
     }
 
-    private fun buildAndCacheSegment(index: Int): ByteArray {
-        val (startUs, endUs) = rangeFor(index)
-        val video = probeResult.primaryVideo!!
-        val tmpConfig = CommittedEncoderConfig.derive(
-            video.width, video.height, video.bitrate, video.frameRate.toInt(), CastQuality.AUTO,
-        )
-        val result = transcoder.transcodeRange(
-            inputPath, probeResult, selectedAudioTrack, startUs, endUs, copyAudio, tmpConfig
-        )
-        // Capture configs from the first segment we build (used for the shared init).
-        if (videoInit == null) videoInit = result.video
-        if (audioInit == null) audioInit = result.audio
-        // All segments share one init segment, so each must decode against the same
-        // SPS/PPS. Warn if a later segment's avcC diverges (would corrupt on the receiver).
-        val establishedAvcC = videoInit?.avcC
-        val segmentAvcC = result.video?.avcC
-        if (segmentAvcC != null && !HlsTranscodeMath.avcConfigsMatch(establishedAvcC, segmentAvcC)) {
-            AppLogger.warn(TAG, "Segment $index avcC differs from init segment avcC; receiver may corrupt this segment")
+    private fun buildOneOff(index: Int): ByteArray? {
+        val heldByMe = lock.isHeldByCurrentThread
+        if (heldByMe) lock.unlock()
+        try {
+            val task = inFlight.computeIfAbsent(index) {
+                FutureTask { actuallyBuildOneOff(index) }
+            }
+            try {
+                if (inFlight[index] === task) task.run()
+                return task.get()
+            } finally {
+                inFlight.remove(index, task)
+            }
+        } finally {
+            if (heldByMe) lock.lock()
         }
-        // Likewise the audio codec must match the shared init. passthroughAudioRange decides
-        // passthrough-vs-AAC-fallback per segment, so a later segment that fell back to AAC
-        // while the init declares AC-3/E-AC-3 (or vice versa) would be decoded with the wrong
-        // codec. This shouldn't happen for sync-word-aligned Dolby frames, but warn if it does.
-        val establishedAudioCodec = audioInit?.codec
-        val segmentAudioCodec = result.audio?.codec
-        if (segmentAudioCodec != null && establishedAudioCodec != null &&
-            segmentAudioCodec != establishedAudioCodec
-        ) {
-            AppLogger.warn(TAG, "Segment $index audio codec ($segmentAudioCodec) differs from init ($establishedAudioCodec); receiver may corrupt this segment's audio")
-        }
-        val bytes = HlsMp4Builder.buildMediaSegment(
-            sequenceNumber = index + 1,
-            videoSamples = result.videoSamples,
-            audioSamples = result.audioSamples,
-            defaultVideoDurUs = 33_333L,
-            defaultAudioDurUs = 21_333L
-        )
-        segmentCache[index] = bytes
-        AppLogger.info(TAG, "Built segment $index (${bytes.size} bytes, v=${result.videoSamples.size} a=${result.audioSamples.size})")
-        return bytes
     }
+
+    private fun runTranscode(index: Int, cfg: CommittedEncoderConfig) =
+        transcoder.transcodeRange(
+            inputPath, probeResult, selectedAudioTrack,
+            index * SEGMENT_DURATION_US, (index + 1) * SEGMENT_DURATION_US, effectiveCopyAudio, cfg
+        )
+
+    private fun actuallyBuildOneOff(index: Int): ByteArray? = synchronized(oneOffLock) {
+        val cfg = committedConfig!!
+        val res = try {
+            runTranscode(index, cfg)
+        } catch (e: Exception) {
+            serialSeekMode = true
+            val old = lock.withLock { val p = pipeline; pipeline = null; coordinator = null; p }
+            old?.cancel()
+            runTranscode(index, cfg)
+        }
+        val bytes = HlsMp4Builder.buildMediaSegment(index + 1, res.videoSamples, res.audioSamples, 33_333L, 21_333L)
+        lock.withLock {
+            if (videoInit == null) {
+                videoInit = res.video; audioInit = res.audio
+                initSegment = HlsMp4Builder.buildInitSegment(res.video, res.audio)
+            }
+            val videoBad = !HlsTranscodeMath.avcConfigsMatch(videoInit!!.avcC, res.video?.avcC)
+            val audioBad = audioInit != null && res.audio != null &&
+                (audioInit!!.codec != res.audio!!.codec || !audioInit!!.codecData.contentEquals(res.audio!!.codecData) ||
+                 audioInit!!.sampleRate != res.audio!!.sampleRate || audioInit!!.channels != res.audio!!.channels)
+            if (videoBad || audioBad) {
+                draining = true
+                onNeedsRecast(NeedsRecast("init-mismatch", index.toLong() * SEGMENT_DURATION_US / 1000, quality))
+                return@withLock null
+            }
+            segmentCache[index] = bytes
+            produced.signalAll()
+            bytes
+        }
+    }
+
+    private fun reBase(baseIndex: Int) {
+        val old = pipeline
+        pipeline = null
+        generation++
+        pipelineBase = baseIndex
+        frontier = baseIndex - 1
+        producedSinceRebase = false
+        lock.unlock()
+        try {
+            old?.cancel()
+            val pipe = newPipeline(baseIndex)
+            pipe.start(baseIndex)
+            lock.lock()
+            pipeline = pipe
+        } catch (t: Throwable) {
+            lock.lock()
+            throw t
+        }
+    }
+
+    fun initBytes(): ByteArray = lock.withLock { initSegment ?: error("init not ready; prepare() must run first") }
 
     /** Frees cached transcoded segments. Safe to call when the session is no longer cast. */
     fun release() {
-        synchronized(lock) {
+        pipeline?.cancel()
+        lock.withLock {
             segmentCache.clear()
             initSegment = null
+            coordinator = null
+            pipeline = null
         }
     }
 }

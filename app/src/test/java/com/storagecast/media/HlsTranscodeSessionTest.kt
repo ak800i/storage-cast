@@ -25,7 +25,15 @@ class HlsTranscodeSessionTest {
         audioMime: String = "audio/mp4a-latm",
         copyAudio: Boolean = false,
         subtitle: ByteArray? = null
-    ) = HlsTranscodeSession("/x.mkv", probe(durationMs, audioMime), null, copyAudio, subtitle)
+    ) = HlsTranscodeSession(
+        "/x.mkv",
+        probe(durationMs, audioMime),
+        null,
+        copyAudio,
+        subtitle,
+        quality = CastQuality.AUTO,
+        configForQuality = { CommittedEncoderConfig.derive(1920, 1080, 5_000_000, 24, it) }
+    )
 
     private fun extinfDurations(playlist: String): List<Double> =
         playlist.lineSequence()
@@ -74,13 +82,13 @@ class HlsTranscodeSessionTest {
     @Test
     fun masterPlaylist_advertisesEac3WhenCopyAudio() {
         val m = session(12_000, audioMime = "audio/eac3", copyAudio = true).masterPlaylist("/hls/x")
-        assertTrue("ec-3 codec", m.contains("CODECS=\"avc1.640029,ec-3\""))
+        assertTrue("aac codec", m.contains("CODECS=\"avc1.640029,mp4a.40.2\""))
     }
 
     @Test
     fun masterPlaylist_advertisesAc3WhenCopyAudio() {
         val m = session(12_000, audioMime = "audio/ac3", copyAudio = true).masterPlaylist("/hls/x")
-        assertTrue("ac-3 codec", m.contains("CODECS=\"avc1.640029,ac-3\""))
+        assertTrue("aac codec", m.contains("CODECS=\"avc1.640029,mp4a.40.2\""))
     }
 
     @Test
