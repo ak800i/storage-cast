@@ -315,9 +315,12 @@ class HlsTranscodeSession(
             }
             val videoBad = !HlsTranscodeMath.avcConfigsMatch(videoInit!!.avcC, result.videoInit.avcC)
             val ai = audioInit; val rai = result.audioInit
-            val audioBad = ai != null && rai != null &&
-                (ai.codec != rai.codec || !ai.codecData.contentEquals(rai.codecData) ||
-                 ai.sampleRate != rai.sampleRate || ai.channels != rai.channels)
+            // A video-only committed init must not accept a later segment that carries audio (the
+            // receiver would get undecodable audio under a video-only init.mp4). Plus codec/field drift.
+            val audioBad = (ai == null && rai != null) ||
+                (ai != null && rai != null &&
+                 (ai.codec != rai.codec || !ai.codecData.contentEquals(rai.codecData) ||
+                  ai.sampleRate != rai.sampleRate || ai.channels != rai.channels))
             if (videoBad || audioBad) {
                 if (!draining) {   // fire the recast once; later mismatches on this session are no-ops
                     draining = true
@@ -408,9 +411,11 @@ class HlsTranscodeSession(
                 initSegment = HlsMp4Builder.buildInitSegment(res.video, res.audio)
             }
             val videoBad = !HlsTranscodeMath.avcConfigsMatch(videoInit!!.avcC, res.video?.avcC)
-            val audioBad = audioInit != null && res.audio != null &&
-                (audioInit!!.codec != res.audio!!.codec || !audioInit!!.codecData.contentEquals(res.audio!!.codecData) ||
-                 audioInit!!.sampleRate != res.audio!!.sampleRate || audioInit!!.channels != res.audio!!.channels)
+            val cai = audioInit; val rai = res.audio
+            val audioBad = (cai == null && rai != null) ||
+                (cai != null && rai != null &&
+                 (cai.codec != rai.codec || !cai.codecData.contentEquals(rai.codecData) ||
+                  cai.sampleRate != rai.sampleRate || cai.channels != rai.channels))
             if (videoBad || audioBad) {
                 if (!draining) {
                     draining = true

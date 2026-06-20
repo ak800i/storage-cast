@@ -387,6 +387,9 @@ class VideoDetailActivity : AppCompatActivity() {
             session.remoteMediaClient?.unregisterCallback(remoteMediaClientCallback)
             session.removeCastListener(castListener)
             castSession = null
+            activeHlsSession?.release()   // cast ended: free the HLS pipeline (no receiver to serve)
+            activeHlsSession = null
+            activeHlsBasePath = null
             updateCastStatus()
             stopProgressUpdates()
             resetSeekBarToLocal()
@@ -2034,6 +2037,8 @@ class VideoDetailActivity : AppCompatActivity() {
                 AppLogger.error(TAG, "castHls: load FAILED - statusCode=${status.statusCode}, statusMessage=${status.statusMessage}")
                 result.mediaError?.let { logMediaError(it) }
                 runOnUiThread {
+                    hlsSession?.release()   // load failed: free the prepared HLS pipeline's codecs
+                    if (activeHlsSession === hlsSession) { activeHlsSession = null; activeHlsBasePath = null }
                     Toast.makeText(this, getString(R.string.cast_load_failed, status.statusMessage ?: "Unknown error"), Toast.LENGTH_LONG).show()
                 }
             }
@@ -2071,7 +2076,13 @@ class VideoDetailActivity : AppCompatActivity() {
         activityScope.launch {
             try {
                 val initialSegmentIndex = (recast.startMs / (HlsTranscodeSession.SEGMENT_DURATION_US / 1000)).toInt()
-                withContext(Dispatchers.IO) { replacement.prepare(initialSegmentIndex) }
+                withContext(Dispatchers.IO) {
+                    // Free the OLD pipeline's codecs BEFORE preparing the replacement so the new
+                    // pipeline has codec headroom on the (2+2) target device. The old session stays
+                    // registered + draining (503s stragglers) until the TTL evict unregisters it.
+                    oldSession?.release()
+                    replacement.prepare(initialSegmentIndex)
+                }
                 hidePreparingUi()
                 val basePath = service.registerHlsSessionWithoutEvict(video.title, replacement)
                 activeHlsSession = replacement
@@ -2085,7 +2096,6 @@ class VideoDetailActivity : AppCompatActivity() {
             } catch (t: Throwable) {
                 hidePreparingUi()
                 replacement.release()
-                oldSession?.draining = false   // recast failed before swap: let the old session keep serving
                 AppLogger.error(TAG, "handleNeedsRecast: re-cast failed: ${t.message}")
             }
         }
@@ -2598,6 +2608,8 @@ class VideoDetailActivity : AppCompatActivity() {
         stopProgressUpdates()
         videoTranscoder?.cancel()
         transcodeStreamer?.cancel()
+        activeHlsSession?.release()   // free the long-lived HLS pipeline's codecs/thread on teardown
+        activeHlsSession = null
         activityScope.cancel()
         transcodedFile?.delete()
         if (serviceBound) {
