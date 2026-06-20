@@ -1,6 +1,5 @@
 package com.storagecast.media
 
-import com.storagecast.log.AppLogger
 import java.util.concurrent.FutureTask
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantLock
@@ -39,6 +38,11 @@ class HlsTranscodeSession(
             selectedQuality,
         )
     },
+    /**
+     * Invoked (while the session lock is held) when a produced segment's avcC/audio init can't match
+     * the committed init. The callback MUST be non-blocking and MUST NOT re-enter this session
+     * (e.g. call release()/segmentBytes()); the production wiring posts to the UI thread.
+     */
     private val onNeedsRecast: (NeedsRecast) -> Unit = {},
 ) {
     companion object {
@@ -84,17 +88,10 @@ class HlsTranscodeSession(
     @Volatile private var effectiveCopyAudio = false
     @Volatile private var generation = 0
     @Volatile var draining: Boolean = false
+    @Volatile private var released = false
     private val oneOffLock = Any()
-    @Volatile private var serialSeekMode = false
     private val skipped = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
     private val inFlight = java.util.concurrent.ConcurrentHashMap<Int, FutureTask<ByteArray?>>()
-
-    /** Source time range [startUs, endUs) for segment [index]. */
-    private fun rangeFor(index: Int): Pair<Long, Long> {
-        val start = index * SEGMENT_DURATION_US
-        val end = if (index == segmentCount - 1) Long.MAX_VALUE else (index + 1) * SEGMENT_DURATION_US
-        return start to end
-    }
 
     /** Builds the VOD media playlist. */
     fun playlist(basePath: String): String {
@@ -191,7 +188,7 @@ class HlsTranscodeSession(
             inputPath, probeResult, selectedAudioTrack, effectiveCopyAudio,
             committedConfig!!, SEGMENT_DURATION_US, LEAD,
             onSegment = { putSegment(gen, it) },
-            onSkipped = { idx -> skipped.add(idx) },
+            onSkipped = { idx -> lock.withLock { if (gen == generation) { skipped.add(idx); produced.signalAll() } } },
             playhead = { lock.withLock { coordinator?.prevIndex ?: baseIndex } },
         )
     }
@@ -207,6 +204,7 @@ class HlsTranscodeSession(
         pipelineBase = initialSegmentIndex
         frontier = initialSegmentIndex - 1
         producedSinceRebase = false
+        skipped.clear()
         val coord = HlsSegmentCoordinator(initialSegmentIndex, LEAD, READAHEAD, WAIT_MARGIN, BACK_BUFFER, RELOCATE_AFTER)
         lock.withLock { coordinator = coord }
         val pipe = newPipeline(initialSegmentIndex)
@@ -316,8 +314,10 @@ class HlsTranscodeSession(
         val res = try {
             runTranscode(index, cfg)
         } catch (e: Exception) {
-            serialSeekMode = true
-            val old = lock.withLock { val p = pipeline; pipeline = null; coordinator = null; p }
+            // 1+1 codec-limit: free the pipeline's codecs and fall back to per-segment one-off mode.
+            // Bump generation so any callback already blocked entering putSegment/onSkipped from the
+            // now-cancelled pipeline is dropped by the stale-callback guard.
+            val old = lock.withLock { generation++; val p = pipeline; pipeline = null; coordinator = null; p }
             old?.cancel()
             runTranscode(index, cfg)
         }
@@ -349,13 +349,23 @@ class HlsTranscodeSession(
         pipelineBase = baseIndex
         frontier = baseIndex - 1
         producedSinceRebase = false
+        skipped.clear()
         lock.unlock()
         try {
             old?.cancel()
             val pipe = newPipeline(baseIndex)
             pipe.start(baseIndex)
             lock.lock()
-            pipeline = pipe
+            if (released) {
+                // The session was released during this unlocked window; do not publish the new
+                // pipeline. Cancel it with the lock NOT held (cancel() joins the worker, which takes
+                // the lock), then re-acquire so the caller's `finally` can unlock as it expects.
+                lock.unlock()
+                pipe.cancel()
+                lock.lock()
+            } else {
+                pipeline = pipe
+            }
         } catch (t: Throwable) {
             lock.lock()
             throw t
@@ -366,12 +376,19 @@ class HlsTranscodeSession(
 
     /** Frees cached transcoded segments. Safe to call when the session is no longer cast. */
     fun release() {
-        pipeline?.cancel()
-        lock.withLock {
+        // Capture the pipeline and mark released UNDER the lock so a concurrent reBase (which nulls
+        // `pipeline` during its unlocked window and republishes afterward) observes `released` and
+        // discards its new pipeline instead of orphaning it. Cancel OUTSIDE the lock (cancel() joins
+        // the producer thread, which itself takes the lock).
+        val old = lock.withLock {
+            released = true
+            val p = pipeline
+            pipeline = null
+            coordinator = null
             segmentCache.clear()
             initSegment = null
-            coordinator = null
-            pipeline = null
+            p
         }
+        old?.cancel()
     }
 }
