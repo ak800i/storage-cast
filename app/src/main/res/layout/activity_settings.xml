@@ -92,6 +92,43 @@
                 android:background="@color/divider_dark"
                 android:layout_marginBottom="16dp" />
 
+            <!-- Casting section -->
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/settings_section_casting"
+                android:textColor="@color/accent_light"
+                android:textSize="14sp"
+                android:textStyle="bold"
+                android:layout_marginBottom="8dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="16dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/cast_quality_title"
+                    android:textSize="16sp" />
+
+                <Spinner
+                    android:id="@+id/castQualitySpinner"
+                    android:layout_width="140dp"
+                    android:layout_height="wrap_content"
+                    android:entries="@array/cast_quality_entries" />
+            </LinearLayout>
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:background="@color/divider_dark"
+                android:layout_marginBottom="16dp" />
+
             <!-- OpenSubtitles section -->
             <TextView
                 android:layout_width="wrap_content"

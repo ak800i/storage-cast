@@ -3,6 +3,8 @@ package com.storagecast.ui
 import android.content.Context
 import android.content.SharedPreferences
 import android.os.Bundle
+import android.view.View
+import android.widget.AdapterView
 import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
@@ -29,6 +31,7 @@ class SettingsActivity : AppCompatActivity() {
         const val DEFAULT_HLS_SEEKING = false
 
         private const val OPENSUBTITLES_PREFS = "opensubtitles"
+        private val CAST_QUALITY_VALUES = arrayOf("auto", "1080", "720", "540")
 
         fun getMinDurationMs(context: Context): Long {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -87,6 +90,8 @@ class SettingsActivity : AppCompatActivity() {
         binding.minDurationInput.setText(
             prefs.getInt(KEY_MIN_DURATION_MINUTES, DEFAULT_MIN_DURATION_MINUTES).toString()
         )
+        val castQualityIndex = CAST_QUALITY_VALUES.indexOf(getCastQuality(this)).takeIf { it >= 0 } ?: 0
+        binding.castQualitySpinner.setSelection(castQualityIndex)
         updateMinDurationEnabled()
 
         val osprefs = getOpenSubtitlesPrefs()
@@ -105,6 +110,17 @@ class SettingsActivity : AppCompatActivity() {
 
         binding.minDurationInput.setOnFocusChangeListener { _, hasFocus ->
             if (!hasFocus) saveMinDuration()
+        }
+
+        binding.castQualitySpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                val quality = CAST_QUALITY_VALUES.getOrElse(position) { "auto" }
+                getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+                    .putString(KEY_CAST_QUALITY, quality)
+                    .apply()
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
         }
 
         binding.saveCredentialsButton.setOnClickListener {

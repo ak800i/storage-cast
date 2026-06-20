@@ -132,6 +132,14 @@
     <string name="settings_filter_short_videos">Filter short videos</string>
     <string name="settings_min_duration_label">Minimum duration (minutes)</string>
     <string name="settings_section_video_filter">Video filter</string>
+    <string name="settings_section_casting">Casting</string>
+    <string name="cast_quality_title">Cast quality</string>
+    <string-array name="cast_quality_entries">
+        <item>Auto</item>
+        <item>1080p</item>
+        <item>720p</item>
+        <item>540p</item>
+    </string-array>
     <string name="settings_section_opensubtitles">OpenSubtitles</string>
     <string name="settings_save_credentials">Save</string>
 
