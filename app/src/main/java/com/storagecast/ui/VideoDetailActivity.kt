@@ -1929,7 +1929,17 @@ class VideoDetailActivity : AppCompatActivity() {
                 val hlsBasePath = service.registerHlsSession(video.title, hlsSession)
                 activeHlsSession = hlsSession
                 activeHlsBasePath = hlsBasePath
-                loadHlsOnReceiver(hlsBasePath, probeResult)
+                if (!loadHlsOnReceiver(hlsBasePath, probeResult)) {
+                    // Receiver/client vanished after prepare(): don't leave a registered pipeline running.
+                    hlsSession.release()
+                    activeHlsSession = null
+                    activeHlsBasePath = null
+                }
+            } catch (c: kotlinx.coroutines.CancellationException) {
+                // Activity teardown cancelled the scope mid-prepare: clean up the prepared session but
+                // preserve structured cancellation (no spurious cast-error toast).
+                hlsSession.release()
+                throw c
             } catch (t: Throwable) {
                 hidePreparingUi()
                 hlsSession.release()
@@ -1947,27 +1957,27 @@ class VideoDetailActivity : AppCompatActivity() {
         binding.progressBar.visibility = View.GONE
     }
 
-    private fun loadHlsOnReceiver(hlsBasePath: String, probeResult: MediaProbeResult) {
+    private fun loadHlsOnReceiver(hlsBasePath: String, probeResult: MediaProbeResult): Boolean {
         val service = mediaServerService
         if (service == null) {
             AppLogger.error(TAG, "loadHlsOnReceiver: media server service is null")
             Toast.makeText(this, R.string.server_not_ready, Toast.LENGTH_SHORT).show()
-            return
+            return false
         }
         val session = castSession
         if (session == null) {
             AppLogger.error(TAG, "loadHlsOnReceiver: cast session is null")
             Toast.makeText(this, R.string.not_connected, Toast.LENGTH_SHORT).show()
-            return
+            return false
         }
         val remoteMediaClient = session.remoteMediaClient
         if (remoteMediaClient == null) {
             AppLogger.error(TAG, "loadHlsOnReceiver: remoteMediaClient is null")
             Toast.makeText(this, R.string.error_cast, Toast.LENGTH_SHORT).show()
-            return
+            return false
         }
 
-        val video = videoItem ?: return
+        val video = videoItem ?: return false
         val hlsSession = activeHlsSession
         val serverIp = getDeviceIpAddress()
         val serverPort = service.getServerPort()
@@ -2022,6 +2032,7 @@ class VideoDetailActivity : AppCompatActivity() {
         }
         updateCastStatus(video.title)
         Toast.makeText(this, R.string.loading_video, Toast.LENGTH_SHORT).show()
+        return true
     }
 
     private fun handleNeedsRecast(video: VideoItem, probeResult: MediaProbeResult, recast: NeedsRecast) {
