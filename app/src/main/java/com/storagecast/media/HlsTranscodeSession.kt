@@ -319,8 +319,10 @@ class HlsTranscodeSession(
                 (ai.codec != rai.codec || !ai.codecData.contentEquals(rai.codecData) ||
                  ai.sampleRate != rai.sampleRate || ai.channels != rai.channels)
             if (videoBad || audioBad) {
-                draining = true
-                onNeedsRecast(NeedsRecast("init-mismatch", result.index.toLong() * SEGMENT_DURATION_US / 1000, quality))
+                if (!draining) {   // fire the recast once; later mismatches on this session are no-ops
+                    draining = true
+                    onNeedsRecast(NeedsRecast("init-mismatch", result.index.toLong() * SEGMENT_DURATION_US / 1000, quality))
+                }
                 return
             }
             segmentCache[result.index] = result.bytes
@@ -333,6 +335,7 @@ class HlsTranscodeSession(
     /** Returns the fMP4 media segment for [index] (cached). */
     fun segmentBytes(index: Int): ByteArray? {
         if (index < 0 || index >= segmentCount) return null
+        if (released) return null   // torn-down session serves nothing (avoids work on a released session)
         lock.lock()
         try {
             val coord = coordinator ?: return buildOneOff(index)
@@ -406,8 +409,10 @@ class HlsTranscodeSession(
                 (audioInit!!.codec != res.audio!!.codec || !audioInit!!.codecData.contentEquals(res.audio!!.codecData) ||
                  audioInit!!.sampleRate != res.audio!!.sampleRate || audioInit!!.channels != res.audio!!.channels)
             if (videoBad || audioBad) {
-                draining = true
-                onNeedsRecast(NeedsRecast("init-mismatch", index.toLong() * SEGMENT_DURATION_US / 1000, quality))
+                if (!draining) {
+                    draining = true
+                    onNeedsRecast(NeedsRecast("init-mismatch", index.toLong() * SEGMENT_DURATION_US / 1000, quality))
+                }
                 return@withLock null
             }
             segmentCache[index] = bytes

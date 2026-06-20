@@ -2053,7 +2053,8 @@ class VideoDetailActivity : AppCompatActivity() {
             recastMismatchCount >= 2
         } else false
 
-        activeHlsSession?.draining = true
+        val oldSession = activeHlsSession
+        oldSession?.draining = true
 
         val replacement = HlsTranscodeSession(
             video.path,
@@ -2084,6 +2085,7 @@ class VideoDetailActivity : AppCompatActivity() {
             } catch (t: Throwable) {
                 hidePreparingUi()
                 replacement.release()
+                oldSession?.draining = false   // recast failed before swap: let the old session keep serving
                 AppLogger.error(TAG, "handleNeedsRecast: re-cast failed: ${t.message}")
             }
         }

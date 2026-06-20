@@ -32,6 +32,7 @@ class MediaServerService : Service() {
     companion object {
         private const val NOTIFICATION_ID = 1
         private const val TAG = "MediaServerService"
+        private const val HLS_DRAIN_TTL_MS = 5_000L
         /** Stable ID so the subtitle URL never changes between offset adjustments. */
         private const val ACTIVE_SUBTITLE_ID = "active_subtitle"
 
@@ -157,13 +158,14 @@ class MediaServerService : Service() {
 
     fun registerHlsSessionWithoutEvict(label: String, session: com.storagecast.media.HlsTranscodeSession): String {
         val id = "hls_${label.hashCode().toUInt()}_${System.currentTimeMillis()}"
-        server?.registerHlsSessionWithoutEvict(id, session)
+        // Register without evicting; capture the SPECIFIC prior session ids to drain. Evicting by an
+        // explicit id list (not "all except newest") means a second recast within the TTL window can
+        // never release the newest session the receiver just loaded.
+        val drained = server?.registerHlsSessionWithoutEvict(id, session) ?: emptyList()
         AppLogger.info("MediaServer", "Register HLS session (no-evict): label=$label, id=$id")
-        // Drain old sessions after a short TTL so straggler requests against the old id don't 404.
-        val newId = id
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-            server?.evictHlsSessionsExcept(newId)
-        }, 5_000)
+            server?.evictHlsSessions(drained)
+        }, HLS_DRAIN_TTL_MS)
         return "/hls/$id"
     }
 
@@ -322,14 +324,17 @@ class MediaServerService : Service() {
             hlsMap[id] = session
         }
 
-        fun registerHlsSessionWithoutEvict(id: String, session: com.storagecast.media.HlsTranscodeSession) {
+        /** Register without evicting; returns the prior session ids (to be drained after a TTL). */
+        fun registerHlsSessionWithoutEvict(id: String, session: com.storagecast.media.HlsTranscodeSession): List<String> {
+            val prior = hlsMap.keys.toList()
             hlsMap[id] = session
+            return prior
         }
 
-        fun evictHlsSessionsExcept(keepId: String) {
-            val stale = hlsMap.keys.filter { it != keepId }
-            stale.forEach { key -> hlsMap.remove(key)?.release() }
-            if (stale.isNotEmpty()) AppLogger.info("MediaServer", "Drained/evicted ${stale.size} old HLS session(s)")
+        fun evictHlsSessions(ids: List<String>) {
+            var n = 0
+            ids.forEach { key -> hlsMap.remove(key)?.let { it.release(); n++ } }
+            if (n > 0) AppLogger.info("MediaServer", "Drained/evicted $n old HLS session(s)")
         }
 
         private fun addCorsHeaders(response: Response) {
