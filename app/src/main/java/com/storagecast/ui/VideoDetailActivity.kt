@@ -50,11 +50,15 @@ import com.storagecast.databinding.ActivityVideoDetailBinding
 import com.storagecast.log.AppLogger
 import com.storagecast.media.AudioTrackInfo
 import com.storagecast.media.CastCompatibility
+import com.storagecast.media.CastQuality
+import com.storagecast.media.CommittedEncoderConfig
+import com.storagecast.media.EncoderFormatFactory
 import com.storagecast.media.MediaProbeResult
 import com.storagecast.media.StreamingDecision
 import com.storagecast.media.ReceiverCapabilityStore
 import com.storagecast.media.MediaProber
 import com.storagecast.media.HlsTranscodeSession
+import com.storagecast.media.NeedsRecast
 import com.storagecast.media.TranscodeStreamer
 import com.storagecast.media.VideoTranscoder
 import com.storagecast.model.SubtitleTrack
@@ -143,6 +147,8 @@ class VideoDetailActivity : AppCompatActivity() {
     private val castCompatibility = CastCompatibility()
     private var videoTranscoder: VideoTranscoder? = null
     private var transcodeStreamer: TranscodeStreamer? = null
+    private var activeHlsSession: HlsTranscodeSession? = null
+    private var activeHlsBasePath: String? = null
     private var transcodedFile: File? = null
 
     private val progressHandler = Handler(Looper.getMainLooper())
@@ -1850,6 +1856,17 @@ class VideoDetailActivity : AppCompatActivity() {
      * server transcodes fMP4 segments on demand; the playlist's #EXT-X-ENDLIST makes
      * the receiver treat it as VOD, so seeking is native (no live mode, no crash).
      */
+    private fun configForQuality(probe: MediaProbeResult, q: CastQuality): CommittedEncoderConfig {
+        val v = probe.primaryVideo!!
+        val base = CommittedEncoderConfig.derive(v.width, v.height, v.bitrate, v.frameRate.toInt(), q)
+        val encoderName = EncoderFormatFactory.pickHardwareAvcEncoderName()
+        // Pin explicit profile/level (spec invariant: identical avcC across both encoders). High@4.1
+        // matches the playlist CODECS "avc1.640029" and covers every rung (<=1080p30). If the encoder
+        // doesn't advertise it, fall back to UNSET (defaults) + the avcConfigsMatch / NeedsRecast backstop.
+        val (profile, level) = EncoderFormatFactory.avcHighL41IfSupported(encoderName)
+        return base.copy(profile = profile, level = level, encoderName = encoderName)
+    }
+
     private fun castHls(video: VideoItem, probeResult: MediaProbeResult, copyAudio: Boolean) {
         val service = mediaServerService
         if (service == null) {
@@ -1887,13 +1904,78 @@ class VideoDetailActivity : AppCompatActivity() {
             }
         }
 
-        val hlsSession = HlsTranscodeSession(video.path, probeResult, selectedAudioTrack, copyAudio, subtitleVtt)
-        val hlsBasePath = service.registerHlsSession(video.title, hlsSession)
+        val quality = CastQuality.fromPref(SettingsActivity.getCastQuality(this))
+        activeHlsSession?.release()
+        activeHlsSession = null
+        activeHlsBasePath = null
+
+        val hlsSession = HlsTranscodeSession(
+            video.path,
+            probeResult,
+            selectedAudioTrack,
+            copyAudio,
+            subtitleVtt,
+            quality = quality,
+            configForQuality = { q -> configForQuality(probeResult, q) },
+            onNeedsRecast = { recast -> runOnUiThread { handleNeedsRecast(video, probeResult, recast) } },
+        )
+
+        showPreparingUi()
+        activityScope.launch {
+            try {
+                val initialSegmentIndex = (pendingSeekPositionMs / (HlsTranscodeSession.SEGMENT_DURATION_US / 1000)).toInt()
+                withContext(Dispatchers.IO) { hlsSession.prepare(initialSegmentIndex) }
+                hidePreparingUi()
+                val hlsBasePath = service.registerHlsSession(video.title, hlsSession)
+                activeHlsSession = hlsSession
+                activeHlsBasePath = hlsBasePath
+                loadHlsOnReceiver(hlsBasePath, probeResult)
+            } catch (t: Throwable) {
+                hidePreparingUi()
+                hlsSession.release()
+                AppLogger.error(TAG, "castHls: prepare failed: ${t.message}")
+                Toast.makeText(this@VideoDetailActivity, R.string.error_cast, Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun showPreparingUi() {
+        binding.progressBar.visibility = View.VISIBLE
+    }
+
+    private fun hidePreparingUi() {
+        binding.progressBar.visibility = View.GONE
+    }
+
+    private fun loadHlsOnReceiver(hlsBasePath: String, probeResult: MediaProbeResult) {
+        val service = mediaServerService
+        if (service == null) {
+            AppLogger.error(TAG, "loadHlsOnReceiver: media server service is null")
+            Toast.makeText(this, R.string.server_not_ready, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val session = castSession
+        if (session == null) {
+            AppLogger.error(TAG, "loadHlsOnReceiver: cast session is null")
+            Toast.makeText(this, R.string.not_connected, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val remoteMediaClient = session.remoteMediaClient
+        if (remoteMediaClient == null) {
+            AppLogger.error(TAG, "loadHlsOnReceiver: remoteMediaClient is null")
+            Toast.makeText(this, R.string.error_cast, Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val video = videoItem ?: return
+        val hlsSession = activeHlsSession
+        val serverIp = getDeviceIpAddress()
+        val serverPort = service.getServerPort()
         // Always cast the master playlist: it advertises the real audio CODECS
         // (ec-3/ac-3/mp4a) so the receiver picks the correct decoder, and carries the
         // in-manifest subtitle rendition when subtitles are present.
         val playlistUrl = "http://$serverIp:$serverPort$hlsBasePath/master.m3u8"
-        AppLogger.info(TAG, "castHls: url=$playlistUrl (subtitles=${hlsSession.hasSubtitles})")
+        AppLogger.info(TAG, "castHls: url=$playlistUrl (subtitles=${hlsSession?.hasSubtitles == true})")
 
         val metadata = MediaMetadata(MediaMetadata.MEDIA_TYPE_MOVIE).apply {
             putString(MediaMetadata.KEY_TITLE, video.title)
@@ -1907,7 +1989,7 @@ class VideoDetailActivity : AppCompatActivity() {
             .setMetadata(metadata)
             .apply {
                 if (probeResult.durationMs > 0) {
-                    setStreamDuration(probeResult.durationMs * 1000)
+                    setStreamDuration(probeResult.durationMs)
                 }
             }
             .build()
@@ -1918,7 +2000,7 @@ class VideoDetailActivity : AppCompatActivity() {
             .setCurrentTime(pendingSeekPositionMs)
             .build()
 
-        if (hlsSession.hasSubtitles) {
+        if (hlsSession?.hasSubtitles == true) {
             remoteMediaClient.setTextTrackStyle(createSubtitleStyle())
         }
 
@@ -1927,7 +2009,7 @@ class VideoDetailActivity : AppCompatActivity() {
             val status = result.status
             if (status.isSuccess) {
                 AppLogger.info(TAG, "castHls: load SUCCESS")
-                if (hlsSession.hasSubtitles) {
+                if (hlsSession?.hasSubtitles == true) {
                     remoteMediaClient.setTextTrackStyle(createSubtitleStyle())
                 }
             } else {
@@ -1940,6 +2022,10 @@ class VideoDetailActivity : AppCompatActivity() {
         }
         updateCastStatus(video.title)
         Toast.makeText(this, R.string.loading_video, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun handleNeedsRecast(video: VideoItem, probeResult: MediaProbeResult, recast: NeedsRecast) {
+        // TODO(Task 12): draining in-session re-cast at recast.startMs with recast.quality
     }
 
     private fun castTranscodedVideo(originalVideo: VideoItem, transcodedFile: File, contentType: String = "video/mp4") {

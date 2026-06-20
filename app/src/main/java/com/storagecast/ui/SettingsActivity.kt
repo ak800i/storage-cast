@@ -21,6 +21,7 @@ class SettingsActivity : AppCompatActivity() {
         const val KEY_REALTIME_TRANSCODE = "realtime_transcode"
         const val DEFAULT_REALTIME_TRANSCODE = false
         const val KEY_HLS_SEEKING = "hls_seeking"
+        private const val KEY_CAST_QUALITY = "cast_quality"
         // Off by default: the live progressive-fMP4 transcode path is the proven-working
         // one on real hardware (incl. first-gen Chromecast, which plays it but failed on
         // HLS fMP4/CMAF). HLS gives native seeking instead of seek-by-restart, but it is
@@ -56,6 +57,11 @@ class SettingsActivity : AppCompatActivity() {
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
                 .putBoolean(KEY_HLS_SEEKING, enabled)
                 .apply()
+        }
+
+        fun getCastQuality(context: Context): String {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getString(KEY_CAST_QUALITY, "auto") ?: "auto"
         }
     }
 
