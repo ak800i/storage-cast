@@ -102,9 +102,11 @@ class HlsSegmentTranscoder {
         encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         val surface = encoder.createInputSurface()
         encoder.start()
-        encoder.setParameters(Bundle().apply {
-            putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
-        })
+        try {
+            encoder.setParameters(Bundle().apply {
+                putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+            })
+        } catch (_: Exception) {}
 
         val decoder = MediaCodec.createDecoderByType(track.mime)
         decoder.configure(inputFormat, surface, null, 0)
