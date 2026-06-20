@@ -335,9 +335,10 @@ class HlsTranscodeSession(
     /** Returns the fMP4 media segment for [index] (cached). */
     fun segmentBytes(index: Int): ByteArray? {
         if (index < 0 || index >= segmentCount) return null
-        if (released) return null   // torn-down session serves nothing (avoids work on a released session)
+        if (released) return null   // fast path: torn-down session serves nothing
         lock.lock()
         try {
+            if (released) return null   // release() may have run between the pre-lock check and here
             val coord = coordinator ?: return buildOneOff(index)
             val frontier = if (producedSinceRebase) this.frontier else Int.MIN_VALUE / 2
             val low = coord.prevIndex - BACK_BUFFER
@@ -346,9 +347,10 @@ class HlsTranscodeSession(
                 is HlsSegmentCoordinator.Decision.WaitForProduction -> {
                     if (index in skipped) return buildOneOff(index)
                     val deadline = System.nanoTime() + 5_000_000_000L
-                    while (!segmentCache.containsKey(index) && index !in skipped && System.nanoTime() < deadline) {
+                    while (!segmentCache.containsKey(index) && index !in skipped && !released && System.nanoTime() < deadline) {
                         produced.await(250, TimeUnit.MILLISECONDS)
                     }
+                    if (released) return null
                     return segmentCache[index] ?: buildOneOff(index)
                 }
                 is HlsSegmentCoordinator.Decision.OneOff -> {
@@ -387,6 +389,7 @@ class HlsTranscodeSession(
         )
 
     private fun actuallyBuildOneOff(index: Int): ByteArray? = synchronized(oneOffLock) {
+        if (released) return@synchronized null   // session torn down: skip the (codec-allocating) build
         val cfg = committedConfig!!
         val res = try {
             runTranscode(index, cfg)
