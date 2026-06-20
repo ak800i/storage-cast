@@ -173,6 +173,7 @@ class TranscodeStreamer {
         var videoEncoder: MediaCodec? = null
         var videoExtractor: MediaExtractor? = null
         var videoInputSurface: android.view.Surface? = null
+        var videoScaler: SurfaceFrameScaler? = null
         var outWidth = 0
         var outHeight = 0
         // The actual time the video extractor lands on after seeking (a sync sample).
@@ -246,8 +247,14 @@ class TranscodeStreamer {
             // executing state and the framework errors/releases it.
             videoEncoder.start()
 
+            // GL scaler when the source is larger than the encode size (the encoder input surface
+            // can't downscale a 4K decoder output on Qualcomm); else render straight onto it.
+            videoScaler = if (inWidth != outWidth || inHeight != outHeight) {
+                SurfaceFrameScaler(videoInputSurface, outWidth, outHeight)
+            } else null
+
             videoDecoder = MediaCodec.createDecoderByType(videoTrackInfo.mime)
-            videoDecoder.configure(inputFormat, videoInputSurface, null, 0)
+            videoDecoder.configure(inputFormat, videoScaler?.decoderSurface ?: videoInputSurface, null, 0)
             videoDecoder.start()
 
             AppLogger.info(TAG, "Video transcode (surface): ${videoTrackInfo.codec} ${videoTrackInfo.width}x${videoTrackInfo.height} → H.264 ${outWidth}x${outHeight}")
@@ -310,7 +317,7 @@ class TranscodeStreamer {
         try {
             pumpTranscode(
                 writer,
-                videoExtractor, videoDecoder, videoEncoder, outWidth, outHeight,
+                videoExtractor, videoDecoder, videoEncoder, outWidth, outHeight, videoScaler,
                 audioStage,
                 durationUs, listener
             )
@@ -324,6 +331,7 @@ class TranscodeStreamer {
         } finally {
             safeStopRelease(videoDecoder)
             safeStopRelease(videoEncoder)
+            try { videoScaler?.release() } catch (_: Exception) {}
             try { videoInputSurface?.release() } catch (_: Exception) {}
             videoExtractor?.release()
             audioStage?.release()
@@ -342,6 +350,7 @@ class TranscodeStreamer {
         videoEncoder: MediaCodec?,
         outWidth: Int,
         outHeight: Int,
+        videoScaler: SurfaceFrameScaler?,
         audioStage: AudioStage?,
         durationUs: Long,
         listener: ProgressListener?
@@ -389,7 +398,13 @@ class TranscodeStreamer {
                     val isEos = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
                     // render = true pushes the decoded frame to the encoder's input surface.
                     val render = bufferInfo.size > 0 && (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0
-                    videoDecoder.releaseOutputBuffer(status, render)
+                    if (videoScaler != null && render) {
+                        // Decoder -> OES SurfaceTexture; GL-scale the frame onto the encoder surface.
+                        videoDecoder.releaseOutputBuffer(status, true)
+                        if (videoScaler.awaitFrame()) videoScaler.drawFrame(bufferInfo.presentationTimeUs * 1000)
+                    } else {
+                        videoDecoder.releaseOutputBuffer(status, render)
+                    }
                     if (isEos) {
                         videoDecoderDone = true
                         if (!videoEncoderEosSent) {

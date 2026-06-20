@@ -80,6 +80,7 @@ class HlsSegmentPipeline(
         var videoDecoder: MediaCodec? = null
         var videoEncoder: MediaCodec? = null
         var videoInputSurface: android.view.Surface? = null
+        var videoScaler: SurfaceFrameScaler? = null
         var audioStage: AudioStage? = null
 
         try {
@@ -109,8 +110,19 @@ class HlsSegmentPipeline(
             videoEncoder.start()
             requestSyncFrame(videoEncoder, "base segment $baseIndex")
 
+            // The hardware encoder's input surface can't scale a larger decoder output down (4K ->
+            // 1080p/720p) on Qualcomm; insert a GL scaler in that case. When the source already
+            // matches the encode size, render the decoder straight onto the encoder surface (the
+            // validated direct path).
+            val needsScale = videoTrack.width != committedConfig.width ||
+                videoTrack.height != committedConfig.height
+            val scaler = if (needsScale) {
+                SurfaceFrameScaler(videoInputSurface, committedConfig.width, committedConfig.height)
+            } else null
+            videoScaler = scaler
+
             videoDecoder = MediaCodec.createDecoderByType(videoTrack.mime)
-            videoDecoder.configure(inputFormat, videoInputSurface, null, 0)
+            videoDecoder.configure(inputFormat, scaler?.decoderSurface ?: videoInputSurface, null, 0)
             videoDecoder.start()
 
             audioStage = audioTrack?.let { createAudioStage(it, baseStartUs) }
@@ -127,12 +139,14 @@ class HlsSegmentPipeline(
                 videoExtractor = videoExtractor,
                 videoDecoder = videoDecoder,
                 videoEncoder = videoEncoder,
+                videoScaler = scaler,
                 audioStage = audioStage,
                 segments = segments,
             )
         } finally {
             safeStopRelease(videoDecoder)
             safeStopRelease(videoEncoder)
+            try { videoScaler?.release() } catch (_: Exception) {}
             try { videoInputSurface?.release() } catch (_: Exception) {}
             videoExtractor?.release()
             audioStage?.release()
@@ -144,6 +158,7 @@ class HlsSegmentPipeline(
         videoExtractor: MediaExtractor,
         videoDecoder: MediaCodec,
         videoEncoder: MediaCodec,
+        videoScaler: SurfaceFrameScaler?,
         audioStage: AudioStage?,
         segments: SegmentAccumulator,
     ) {
@@ -203,7 +218,13 @@ class HlsSegmentPipeline(
                         requestSyncFrame(videoEncoder, "boundary ${nextBoundaryUs / 1000}ms")
                         while (ptsUs >= nextBoundaryUs) nextBoundaryUs += segDurUs
                     }
-                    videoDecoder.releaseOutputBuffer(status, render)
+                    if (videoScaler != null && render) {
+                        // Decoder -> OES SurfaceTexture; GL-scale the frame onto the encoder surface.
+                        videoDecoder.releaseOutputBuffer(status, true)
+                        if (videoScaler.awaitFrame()) videoScaler.drawFrame(ptsUs * 1000)
+                    } else {
+                        videoDecoder.releaseOutputBuffer(status, render)
+                    }
                     if (render) prevRenderedPtsUs = ptsUs
                     if (eos) {
                         videoDecoderDone = true

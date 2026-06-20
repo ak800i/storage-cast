@@ -108,8 +108,14 @@ class HlsSegmentTranscoder {
             })
         } catch (_: Exception) {}
 
+        // GL scaler when the source is larger than the encode size (the encoder input surface can't
+        // downscale a 4K decoder output on Qualcomm); else render straight onto the encoder surface.
+        val scaler = if (track.width != committedConfig.width || track.height != committedConfig.height) {
+            SurfaceFrameScaler(surface, committedConfig.width, committedConfig.height)
+        } else null
+
         val decoder = MediaCodec.createDecoderByType(track.mime)
-        decoder.configure(inputFormat, surface, null, 0)
+        decoder.configure(inputFormat, scaler?.decoderSurface ?: surface, null, 0)
         decoder.start()
 
         val samples = ArrayList<HlsMp4Builder.Sample>()
@@ -145,7 +151,13 @@ class HlsSegmentTranscoder {
                         // Drop pre-roll frames before the segment start; stop feeding at end.
                         val isCfg = (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
                         val render = HlsTranscodeMath.shouldRenderVideoFrame(info.size, isCfg, pts, startUs, endUs)
-                        decoder.releaseOutputBuffer(status, render)
+                        if (scaler != null && render) {
+                            // Decoder -> OES SurfaceTexture; GL-scale the frame onto the encoder surface.
+                            decoder.releaseOutputBuffer(status, true)
+                            if (scaler.awaitFrame()) scaler.drawFrame(pts * 1000)
+                        } else {
+                            decoder.releaseOutputBuffer(status, render)
+                        }
                         if (HlsTranscodeMath.isVideoSegmentComplete(eos, pts, endUs)) {
                             decoderDone = true
                             if (!encoderEosSent) { encoder.signalEndOfInputStream(); encoderEosSent = true }
@@ -178,6 +190,7 @@ class HlsSegmentTranscoder {
         } finally {
             safeStopRelease(decoder)
             safeStopRelease(encoder)
+            try { scaler?.release() } catch (_: Exception) {}
             try { surface.release() } catch (_: Exception) {}
             extractor.release()
         }
