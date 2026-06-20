@@ -537,9 +537,9 @@ class ResolutionFallback(
     var committed: Boolean = false
         private set
 
-    /** @return true if it stepped down a rung; false if it committed [current]. */
+    /** @return true if it stepped down a rung; false if it committed [current]. Terminal once committed. */
     fun evaluate(buildRatio: Double): Boolean {
-        if (buildRatio <= threshold || atFloor) {
+        if (committed || buildRatio <= threshold || atFloor) {
             committed = true
             return false
         }
