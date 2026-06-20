@@ -155,6 +155,18 @@ class MediaServerService : Service() {
         return "/hls/$id"
     }
 
+    fun registerHlsSessionWithoutEvict(label: String, session: com.storagecast.media.HlsTranscodeSession): String {
+        val id = "hls_${label.hashCode().toUInt()}_${System.currentTimeMillis()}"
+        server?.registerHlsSessionWithoutEvict(id, session)
+        AppLogger.info("MediaServer", "Register HLS session (no-evict): label=$label, id=$id")
+        // Drain old sessions after a short TTL so straggler requests against the old id don't 404.
+        val newId = id
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            server?.evictHlsSessionsExcept(newId)
+        }, 5_000)
+        return "/hls/$id"
+    }
+
     fun getServerPort(): Int = server?.listeningPort ?: 8080
 
     private fun promoteToForeground() {
@@ -310,6 +322,16 @@ class MediaServerService : Service() {
             hlsMap[id] = session
         }
 
+        fun registerHlsSessionWithoutEvict(id: String, session: com.storagecast.media.HlsTranscodeSession) {
+            hlsMap[id] = session
+        }
+
+        fun evictHlsSessionsExcept(keepId: String) {
+            val stale = hlsMap.keys.filter { it != keepId }
+            stale.forEach { key -> hlsMap.remove(key)?.release() }
+            if (stale.isNotEmpty()) AppLogger.info("MediaServer", "Drained/evicted ${stale.size} old HLS session(s)")
+        }
+
         private fun addCorsHeaders(response: Response) {
             response.addHeader("Access-Control-Allow-Origin", "*")
             response.addHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
@@ -455,9 +477,13 @@ class MediaServerService : Service() {
                             resp
                         }
                     }
-                    resource == "init.mp4" -> serveBytes(hls.initBytes(), "video/mp4", rangeHeader)
+                    resource == "init.mp4" -> {
+                        if (hls.draining) return drainingResponse()
+                        serveBytes(hls.initBytes(), "video/mp4", rangeHeader)
+                    }
                     resource.startsWith("seg") && resource.endsWith(".m4s") -> {
                         val index = resource.removePrefix("seg").removeSuffix(".m4s").toIntOrNull()
+                        if (index != null && hls.draining) return drainingResponse()
                         val bytes = if (index != null) hls.segmentBytes(index) else null
                         if (bytes == null) {
                             newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "No segment")
@@ -471,6 +497,19 @@ class MediaServerService : Service() {
                 AppLogger.error("MediaServer", "HLS serve error for $uri: ${e.javaClass.simpleName}: ${e.message}")
                 newFixedLengthResponse(Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "Error: ${e.message}")
             }
+        }
+
+        private fun drainingResponse(): Response {
+            val resp = newFixedLengthResponse(
+                object : Response.IStatus {
+                    override fun getDescription() = "503 Service Unavailable"
+                    override fun getRequestStatus() = 503
+                },
+                MIME_PLAINTEXT, "draining"
+            )
+            resp.addHeader("Retry-After", "1")
+            addCorsHeaders(resp)
+            return resp
         }
 
         /** Serves an in-memory byte array, honoring a single Range request if present. */

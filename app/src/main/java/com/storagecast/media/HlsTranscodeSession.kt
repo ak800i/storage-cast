@@ -44,6 +44,7 @@ class HlsTranscodeSession(
      * (e.g. call release()/segmentBytes()); the production wiring posts to the UI thread.
      */
     private val onNeedsRecast: (NeedsRecast) -> Unit = {},
+    private val forcePerSegment: Boolean = false,
 ) {
     companion object {
         private const val TAG = "HlsTranscodeSession"
@@ -199,6 +200,17 @@ class HlsTranscodeSession(
             (selectedAudioTrack ?: probeResult.primaryAudio)?.mime,
             (selectedAudioTrack ?: probeResult.primaryAudio)?.channelCount ?: 2
         )
+
+        if (forcePerSegment) {
+            // Persistent-mismatch fallback: no pipeline, no coordinator. Every request is served by a
+            // one-off build; capture the committed init from a single one-off here.
+            committedConfig = configForQuality(quality)
+            lock.withLock { coordinator = null; pipeline = null }
+            buildOneOff(initialSegmentIndex)
+            lock.withLock { initSegment ?: error("init not ready after prepare (per-segment)") }
+            return
+        }
+
         val coord = HlsSegmentCoordinator(initialSegmentIndex, LEAD, READAHEAD, WAIT_MARGIN, BACK_BUFFER, RELOCATE_AFTER)
         lock.withLock { coordinator = coord }
 

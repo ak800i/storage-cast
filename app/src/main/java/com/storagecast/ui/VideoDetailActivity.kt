@@ -149,6 +149,10 @@ class VideoDetailActivity : AppCompatActivity() {
     private var transcodeStreamer: TranscodeStreamer? = null
     private var activeHlsSession: HlsTranscodeSession? = null
     private var activeHlsBasePath: String? = null
+    private var activeSelectedAudioTrack: AudioTrackInfo? = null
+    private var activeCopyAudio = false
+    private var activeSubtitleVtt: ByteArray? = null
+    private var recastMismatchCount = 0
     private var transcodedFile: File? = null
 
     private val progressHandler = Handler(Looper.getMainLooper())
@@ -1908,6 +1912,10 @@ class VideoDetailActivity : AppCompatActivity() {
         activeHlsSession?.release()
         activeHlsSession = null
         activeHlsBasePath = null
+        activeSelectedAudioTrack = selectedAudioTrack
+        activeCopyAudio = copyAudio
+        activeSubtitleVtt = subtitleVtt
+        recastMismatchCount = 0
 
         val hlsSession = HlsTranscodeSession(
             video.path,
@@ -2036,7 +2044,48 @@ class VideoDetailActivity : AppCompatActivity() {
     }
 
     private fun handleNeedsRecast(video: VideoItem, probeResult: MediaProbeResult, recast: NeedsRecast) {
-        // TODO(Task 12): draining in-session re-cast at recast.startMs with recast.quality
+        val service = mediaServerService ?: return
+        // Loop-breaker: a persistent same-config init-mismatch can re-mismatch forever. On the 2nd
+        // init-mismatch this run, fall back to per-segment mode (no pipeline) instead of recasting again.
+        val forcePerSegment = if (recast.reason == "init-mismatch") {
+            recastMismatchCount += 1
+            recastMismatchCount >= 2
+        } else false
+
+        activeHlsSession?.draining = true
+
+        val replacement = HlsTranscodeSession(
+            video.path,
+            probeResult,
+            activeSelectedAudioTrack,
+            activeCopyAudio,
+            activeSubtitleVtt,
+            quality = recast.quality,
+            configForQuality = { q -> configForQuality(probeResult, q) },
+            onNeedsRecast = { r -> runOnUiThread { handleNeedsRecast(video, probeResult, r) } },
+            forcePerSegment = forcePerSegment,
+        )
+        showPreparingUi()
+        activityScope.launch {
+            try {
+                val initialSegmentIndex = (recast.startMs / (HlsTranscodeSession.SEGMENT_DURATION_US / 1000)).toInt()
+                withContext(Dispatchers.IO) { replacement.prepare(initialSegmentIndex) }
+                hidePreparingUi()
+                val basePath = service.registerHlsSessionWithoutEvict(video.title, replacement)
+                activeHlsSession = replacement
+                activeHlsBasePath = basePath
+                if (!loadHlsOnReceiver(basePath, probeResult)) {
+                    replacement.release()
+                }
+            } catch (c: kotlinx.coroutines.CancellationException) {
+                replacement.release()
+                throw c
+            } catch (t: Throwable) {
+                hidePreparingUi()
+                replacement.release()
+                AppLogger.error(TAG, "handleNeedsRecast: re-cast failed: ${t.message}")
+            }
+        }
     }
 
     private fun castTranscodedVideo(originalVideo: VideoItem, transcodedFile: File, contentType: String = "video/mp4") {
