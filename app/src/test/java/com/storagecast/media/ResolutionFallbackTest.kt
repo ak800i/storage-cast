@@ -41,4 +41,13 @@ class ResolutionFallbackTest {
         assertEquals(CastQuality.P720, fb.current)
         assertTrue(fb.committed)
     }
+
+    @Test fun postCommit_evaluateIsTerminalNoOp() {
+        val fb = ResolutionFallback(CastQuality.autoRungs(), threshold = 0.85)
+        assertFalse(fb.evaluate(0.60))     // commit at P1080 (non-floor rung)
+        assertTrue(fb.committed)
+        assertFalse(fb.evaluate(0.99))     // already committed: no step-down, stays put
+        assertEquals(CastQuality.P1080, fb.current)
+        assertTrue(fb.committed)
+    }
 }

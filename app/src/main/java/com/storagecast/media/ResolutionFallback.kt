@@ -20,7 +20,7 @@ class ResolutionFallback(
 
     /** @return true if it stepped down a rung; false if it committed [current]. */
     fun evaluate(buildRatio: Double): Boolean {
-        if (buildRatio <= threshold || atFloor) {
+        if (committed || buildRatio <= threshold || atFloor) {
             committed = true
             return false
         }
