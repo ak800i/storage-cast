@@ -219,6 +219,9 @@ class HlsTranscodeSession(
             while (true) {
                 startPipelineGeneration(initialSegmentIndex, configForQuality(fallback.current))
                 val ratio = measureSteadyStateRatio(initialSegmentIndex, timeoutMs = 20_000)
+                // A dead pipeline (codec/GL setup failure) won't be fixed by a lower rung; stop
+                // probing and let waitForFrontier capture init via the one-off builder.
+                if (pipelineFailed()) break
                 if (!fallback.evaluate(ratio)) break
             }
         } else {
@@ -257,11 +260,15 @@ class HlsTranscodeSession(
         pipe.start(baseIndex)
     }
 
+    /** True once the current pipeline's worker has died with an error (not a cancellation). */
+    private fun pipelineFailed(): Boolean = pipeline?.failed == true
+
     /**
      * Wall time for the frontier to advance from segment [baseIndex]+1 to [baseIndex]+2 (steady state,
      * excluding the pre-roll-inflated first segment), divided by one segment's content seconds.
      * Returns a small ratio when there are too few segments to measure (commit), and a large ratio on
-     * timeout (too slow -> step down if a lower rung exists; at the floor evaluate() commits anyway).
+     * timeout OR pipeline death (too slow -> step down if a lower rung exists; at the floor evaluate()
+     * commits anyway).
      */
     private fun measureSteadyStateRatio(baseIndex: Int, timeoutMs: Long): Double {
         val secondIdx = (baseIndex + 1).coerceAtMost(segmentCount - 1)
@@ -270,14 +277,15 @@ class HlsTranscodeSession(
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
         lock.lock()
         try {
-            while (frontier < secondIdx && System.nanoTime() < deadline) {
+            while (frontier < secondIdx && !pipelineFailed() && System.nanoTime() < deadline) {
                 produced.await(250, TimeUnit.MILLISECONDS)
             }
+            if (pipelineFailed()) return Double.MAX_VALUE
             val t2 = System.nanoTime()
-            while (frontier < thirdIdx && System.nanoTime() < deadline) {
+            while (frontier < thirdIdx && !pipelineFailed() && System.nanoTime() < deadline) {
                 produced.await(250, TimeUnit.MILLISECONDS)
             }
-            if (frontier < thirdIdx) return Double.MAX_VALUE
+            if (pipelineFailed() || frontier < thirdIdx) return Double.MAX_VALUE
             val t3 = System.nanoTime()
             val wallSec = (t3 - t2).toDouble() / 1_000_000_000.0
             val contentSec = SEGMENT_DURATION_US.toDouble() / 1_000_000.0
@@ -292,7 +300,7 @@ class HlsTranscodeSession(
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
         lock.lock()
         try {
-            while (frontier < target && System.nanoTime() < deadline) {
+            while (frontier < target && !pipelineFailed() && System.nanoTime() < deadline) {
                 val remaining = deadline - System.nanoTime()
                 if (remaining <= 0) break
                 produced.await(remaining.coerceAtMost(TimeUnit.MILLISECONDS.toNanos(250)), TimeUnit.NANOSECONDS)

@@ -41,6 +41,9 @@ class HlsSegmentPipeline(
     )
 
     @Volatile private var cancelled = false
+    /** Set when the worker dies with an error (not a cancellation) so callers can fail fast. */
+    @Volatile var failed: Boolean = false
+        private set
     @Volatile var frontier: Int = -1
         private set
     @Volatile var capturedVideoInit: HlsMp4Builder.VideoInit? = null
@@ -59,7 +62,10 @@ class HlsSegmentPipeline(
             } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()
             } catch (e: Throwable) {
-                if (!cancelled) AppLogger.error(TAG, "HLS segment pipeline failed: ${describeError(e)}")
+                if (!cancelled) {
+                    failed = true
+                    AppLogger.error(TAG, "HLS segment pipeline failed: ${describeError(e)}")
+                }
             }
         }, "HlsSegmentPipeline-$baseIndex").apply {
             isDaemon = true
