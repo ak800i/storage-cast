@@ -2045,6 +2045,7 @@ class VideoDetailActivity : AppCompatActivity() {
 
     private fun handleNeedsRecast(video: VideoItem, probeResult: MediaProbeResult, recast: NeedsRecast) {
         val service = mediaServerService ?: return
+        pendingSeekPositionMs = recast.startMs
         // Loop-breaker: a persistent same-config init-mismatch can re-mismatch forever. On the 2nd
         // init-mismatch this run, fall back to per-segment mode (no pipeline) instead of recasting again.
         val forcePerSegment = if (recast.reason == "init-mismatch") {
