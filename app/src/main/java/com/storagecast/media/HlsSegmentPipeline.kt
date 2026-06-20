@@ -83,12 +83,12 @@ class HlsSegmentPipeline(
         var audioStage: AudioStage? = null
 
         try {
-            videoExtractor = MediaExtractor().apply {
-                setDataSource(inputPath)
-                selectTrack(videoTrack.trackIndex)
-                seekTo(baseStartUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
-            }
-            val inputFormat = videoExtractor.getTrackFormat(videoTrack.trackIndex)
+            val vExtractor = MediaExtractor()
+            videoExtractor = vExtractor
+            vExtractor.setDataSource(inputPath)
+            vExtractor.selectTrack(videoTrack.trackIndex)
+            vExtractor.seekTo(baseStartUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+            val inputFormat = vExtractor.getTrackFormat(videoTrack.trackIndex)
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
                 try {
                     inputFormat.setInteger(
@@ -336,18 +336,24 @@ class HlsSegmentPipeline(
     }
 
     private fun createTranscodeAudioStage(track: AudioTrackInfo, baseStartUs: Long): AudioStage {
-        val extractor = MediaExtractor().apply {
-            setDataSource(inputPath)
-            selectTrack(track.trackIndex)
-            seekTo(baseStartUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+        val extractor = MediaExtractor()
+        var decoder: MediaCodec? = null
+        try {
+            extractor.setDataSource(inputPath)
+            extractor.selectTrack(track.trackIndex)
+            extractor.seekTo(baseStartUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+            val inputFormat = extractor.getTrackFormat(track.trackIndex)
+            inputFormat.setInteger(MediaFormat.KEY_MAX_OUTPUT_CHANNEL_COUNT, OUTPUT_AUDIO_CHANNEL_COUNT)
+            decoder = MediaCodec.createDecoderByType(track.mime)
+            decoder.configure(inputFormat, null, null, 0)
+            decoder.start()
+            AppLogger.info(TAG, "Audio transcode pipeline: ${track.codec} -> AAC")
+            return TranscodeAudioStage(extractor, decoder, baseStartUs)
+        } catch (e: Exception) {
+            safeStopRelease(decoder)
+            try { extractor.release() } catch (_: Exception) {}
+            throw e
         }
-        val inputFormat = extractor.getTrackFormat(track.trackIndex)
-        inputFormat.setInteger(MediaFormat.KEY_MAX_OUTPUT_CHANNEL_COUNT, OUTPUT_AUDIO_CHANNEL_COUNT)
-        val decoder = MediaCodec.createDecoderByType(track.mime)
-        decoder.configure(inputFormat, null, null, 0)
-        decoder.start()
-        AppLogger.info(TAG, "Audio transcode pipeline: ${track.codec} -> AAC")
-        return TranscodeAudioStage(extractor, decoder, baseStartUs)
     }
 
     private fun peekFirstIncludedAudioFrame(extractor: MediaExtractor, baseStartUs: Long): ByteArray? {
@@ -412,7 +418,7 @@ class HlsSegmentPipeline(
         override fun release() { extractor.release() }
     }
 
-    private class TranscodeAudioStage(
+    private inner class TranscodeAudioStage(
         private val extractor: MediaExtractor,
         private val decoder: MediaCodec,
         private val baseStartUs: Long,
@@ -814,12 +820,6 @@ class HlsSegmentPipeline(
 
         private fun getIntSafe(format: MediaFormat, key: String, default: Int): Int {
             return try { if (format.containsKey(key)) format.getInteger(key) else default } catch (e: Exception) { default }
-        }
-
-        private fun safeStopRelease(codec: MediaCodec?) {
-            if (codec == null) return
-            try { codec.stop() } catch (_: Exception) {}
-            try { codec.release() } catch (_: Exception) {}
         }
     }
 }
