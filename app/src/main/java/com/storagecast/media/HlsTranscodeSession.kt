@@ -194,23 +194,85 @@ class HlsTranscodeSession(
     }
 
     fun prepare(initialSegmentIndex: Int) {
-        committedConfig = configForQuality(quality)
         effectiveCopyAudio = HlsTranscodeMath.effectiveCopyAudio(
             copyAudio,
             (selectedAudioTrack ?: probeResult.primaryAudio)?.mime,
             (selectedAudioTrack ?: probeResult.primaryAudio)?.channelCount ?: 2
         )
-        generation++
-        pipelineBase = initialSegmentIndex
-        frontier = initialSegmentIndex - 1
-        producedSinceRebase = false
-        skipped.clear()
         val coord = HlsSegmentCoordinator(initialSegmentIndex, LEAD, READAHEAD, WAIT_MARGIN, BACK_BUFFER, RELOCATE_AFTER)
         lock.withLock { coordinator = coord }
-        val pipe = newPipeline(initialSegmentIndex)
-        lock.withLock { pipeline = pipe }
-        pipe.start(initialSegmentIndex)
+
+        if (quality == CastQuality.AUTO) {
+            val fallback = ResolutionFallback(CastQuality.autoRungs(), RATIO_THRESHOLD)
+            while (true) {
+                startPipelineGeneration(initialSegmentIndex, configForQuality(fallback.current))
+                val ratio = measureSteadyStateRatio(initialSegmentIndex, timeoutMs = 20_000)
+                if (!fallback.evaluate(ratio)) break
+            }
+        } else {
+            startPipelineGeneration(initialSegmentIndex, configForQuality(quality))
+        }
+
         waitForFrontier(initialSegmentIndex + PREBUFFER - 1, timeoutMs = 20_000)
+    }
+
+    /**
+     * Cancel any existing pipeline (OUTSIDE the lock — cancel() joins the worker, which takes the
+     * lock) and start a fresh generation at [config]. A rung change means a NEW committed init, so
+     * the prior rung's cache/init are discarded here.
+     */
+    private fun startPipelineGeneration(baseIndex: Int, config: CommittedEncoderConfig) {
+        val old = lock.withLock {
+            val existing = pipeline
+            pipeline = null
+            existing
+        }
+        old?.cancel()
+        lock.withLock {
+            committedConfig = config
+            generation++
+            pipelineBase = baseIndex
+            frontier = baseIndex - 1
+            producedSinceRebase = false
+            skipped.clear()
+            segmentCache.clear()
+            videoInit = null
+            audioInit = null
+            initSegment = null
+        }
+        val pipe = newPipeline(baseIndex)
+        lock.withLock { pipeline = pipe }
+        pipe.start(baseIndex)
+    }
+
+    /**
+     * Wall time for the frontier to advance from segment [baseIndex]+1 to [baseIndex]+2 (steady state,
+     * excluding the pre-roll-inflated first segment), divided by one segment's content seconds.
+     * Returns a small ratio when there are too few segments to measure (commit), and a large ratio on
+     * timeout (too slow -> step down if a lower rung exists; at the floor evaluate() commits anyway).
+     */
+    private fun measureSteadyStateRatio(baseIndex: Int, timeoutMs: Long): Double {
+        val secondIdx = (baseIndex + 1).coerceAtMost(segmentCount - 1)
+        val thirdIdx = (baseIndex + 2).coerceAtMost(segmentCount - 1)
+        if (thirdIdx <= secondIdx) return 0.0
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
+        lock.lock()
+        try {
+            while (frontier < secondIdx && System.nanoTime() < deadline) {
+                produced.await(250, TimeUnit.MILLISECONDS)
+            }
+            val t2 = System.nanoTime()
+            while (frontier < thirdIdx && System.nanoTime() < deadline) {
+                produced.await(250, TimeUnit.MILLISECONDS)
+            }
+            if (frontier < thirdIdx) return Double.MAX_VALUE
+            val t3 = System.nanoTime()
+            val wallSec = (t3 - t2).toDouble() / 1_000_000_000.0
+            val contentSec = SEGMENT_DURATION_US.toDouble() / 1_000_000.0
+            return wallSec / contentSec
+        } finally {
+            lock.unlock()
+        }
     }
 
     private fun waitForFrontier(targetIndex: Int, timeoutMs: Long) {
