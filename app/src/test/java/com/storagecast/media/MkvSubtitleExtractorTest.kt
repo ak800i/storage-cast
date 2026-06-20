@@ -24,6 +24,7 @@ class MkvSubtitleExtractorTest {
     private val BLOCK_GROUP = 0xA0L
     private val BLOCK = 0xA1L
     private val BLOCK_DURATION = 0x9BL
+    private val DURATION = 0x4489L
 
     private fun id(value: Long): ByteArray {
         val len = when {
@@ -109,4 +110,105 @@ class MkvSubtitleExtractorTest {
     fun unknownTrackYieldsNoCues() {
         assertTrue(MkvSubtitleExtractor().extractCues(buildMkv(), 99).isEmpty())
     }
+
+    private fun floatBytes(v: Double): ByteArray =
+        java.nio.ByteBuffer.allocate(4).putFloat(v.toFloat()).array()
+
+    /**
+     * Builds an MKV with a Duration, a subtitle track (1), and large non-subtitle
+     * (video, track 2) SimpleBlocks interleaved across two clusters at t=0 and t=5000.
+     */
+    private fun buildMkvWithDurationAndOtherTrack(): File {
+        val info = elem(
+            INFO,
+            elem(TIMECODE_SCALE, uint(1_000_000, 3)) + elem(DURATION, floatBytes(10_000.0))
+        )
+        val trackEntry = elem(
+            TRACK_ENTRY,
+            elem(TRACK_NUMBER, uint(1, 1)) +
+                elem(TRACK_TYPE, uint(0x11, 1)) +
+                elem(CODEC_ID, "S_TEXT/UTF8".toByteArray(Charsets.US_ASCII)) +
+                elem(LANGUAGE, "eng".toByteArray(Charsets.US_ASCII))
+        )
+        val tracks = elem(TRACKS, trackEntry)
+
+        val video0 = elem(SIMPLE_BLOCK, block(2, 0, "X".repeat(4000)))
+        val sub0 = elem(SIMPLE_BLOCK, block(1, 0, "Cue0"))
+        val cluster0 = elem(CLUSTER, elem(CLUSTER_TIMECODE, uint(0, 1)) + video0 + sub0)
+
+        val video1 = elem(SIMPLE_BLOCK, block(2, 100, "Y".repeat(4000)))
+        val sub1 = elem(SIMPLE_BLOCK, block(1, 0, "Cue1"))
+        val cluster1 = elem(CLUSTER, elem(CLUSTER_TIMECODE, uint(5000, 2)) + video1 + sub1)
+
+        val segment = elem(SEGMENT, info + tracks + cluster0 + cluster1)
+        val header = elem(EBML_HEADER, byteArrayOf(0x42, 0x86.toByte(), 0x81.toByte(), 0x01))
+
+        val file = File.createTempFile("subs_dur", ".mkv")
+        file.deleteOnExit()
+        file.writeBytes(header + segment)
+        return file
+    }
+
+    @Test
+    fun skipsNonSubtitleBlocksButExtractsTargetTrack() {
+        val cues = MkvSubtitleExtractor().extractCues(buildMkvWithDurationAndOtherTrack(), 1)
+        assertEquals(2, cues.size)
+        assertEquals("Cue0", cues[0].text)
+        assertEquals("Cue1", cues[1].text)
+    }
+
+    @Test
+    fun reportsProgressFromClusterTimecodes() {
+        val fractions = mutableListOf<Float>()
+        val cues = MkvSubtitleExtractor()
+            .extractCues(buildMkvWithDurationAndOtherTrack(), 1) { f -> fractions.add(f) }
+        assertEquals(2, cues.size)
+        assertTrue("expected progress callbacks", fractions.isNotEmpty())
+        // Last cluster is at 5000ms of a 10000ms duration -> ~0.5.
+        assertEquals(0.5f, fractions.last(), 0.01f)
+    }
+
+    /** Builds an MKV whose video (track 2) is stored as BlockGroup, like some remuxes. */
+    private fun buildMkvWithBlockGroupVideo(): File {
+        val info = elem(
+            INFO,
+            elem(TIMECODE_SCALE, uint(1_000_000, 3)) + elem(DURATION, floatBytes(10_000.0))
+        )
+        val trackEntry = elem(
+            TRACK_ENTRY,
+            elem(TRACK_NUMBER, uint(1, 1)) +
+                elem(TRACK_TYPE, uint(0x11, 1)) +
+                elem(CODEC_ID, "S_TEXT/UTF8".toByteArray(Charsets.US_ASCII)) +
+                elem(LANGUAGE, "eng".toByteArray(Charsets.US_ASCII))
+        )
+        val tracks = elem(TRACKS, trackEntry)
+
+        val videoGroup = elem(
+            BLOCK_GROUP,
+            elem(BLOCK, block(2, 0, "V".repeat(4000))) + elem(BLOCK_DURATION, uint(40, 1))
+        )
+        val subGroup = elem(
+            BLOCK_GROUP,
+            elem(BLOCK, block(1, 500, "Hello")) + elem(BLOCK_DURATION, uint(2000, 2))
+        )
+        val cluster = elem(CLUSTER, elem(CLUSTER_TIMECODE, uint(0, 1)) + videoGroup + subGroup)
+
+        val segment = elem(SEGMENT, info + tracks + cluster)
+        val header = elem(EBML_HEADER, byteArrayOf(0x42, 0x86.toByte(), 0x81.toByte(), 0x01))
+
+        val file = File.createTempFile("subs_bg", ".mkv")
+        file.deleteOnExit()
+        file.writeBytes(header + segment)
+        return file
+    }
+
+    @Test
+    fun skipsNonSubtitleBlockGroupsButExtractsTargetTrack() {
+        val cues = MkvSubtitleExtractor().extractCues(buildMkvWithBlockGroupVideo(), 1)
+        assertEquals(1, cues.size)
+        assertEquals("Hello", cues[0].text)
+        assertEquals(500L, cues[0].startMs)
+        assertEquals(2500L, cues[0].endMs)
+    }
 }
+

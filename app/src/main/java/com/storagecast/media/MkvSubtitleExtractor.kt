@@ -57,25 +57,46 @@ class MkvSubtitleExtractor {
      * Extracts every cue for [trackNumber] (a Matroska track number, 1-based). Cleans stray
      * control bytes, converts SSA/ASS dialogue lines to plain text, and fills end times from
      * BlockDuration or the next cue.
+     *
+     * [onProgress] (if given) is invoked with a 0..1 fraction as clusters are parsed, derived
+     * from each cluster's timecode against the file's Duration. It is throttled to ~1% steps.
+     * Progress is only reported when the file declares a Duration.
      */
-    fun extractCues(file: File, trackNumber: Int): List<Cue> {
+    fun extractCues(file: File, trackNumber: Int, onProgress: ((Float) -> Unit)? = null): List<Cue> {
         if (!file.exists()) return emptyList()
         val raw = mutableListOf<RawCue>()
         var timecodeScaleNs = DEFAULT_TIMECODE_SCALE_NS
+        var totalDurationMs = 0L
         var codecId = ""
         try {
             reader(file).use { input ->
                 if (!enterSegment(input)) return emptyList()
+                // The reporter is created lazily because Duration usually precedes the
+                // clusters; if it doesn't, progress simply stays silent.
+                var lastReported = -1f
+                val reportProgress: ((Long) -> Unit) = { currentMs ->
+                    if (onProgress != null && totalDurationMs > 0) {
+                        val f = (currentMs.toFloat() / totalDurationMs).coerceIn(0f, 1f)
+                        if (f - lastReported >= 0.01f) {
+                            lastReported = f
+                            onProgress(f)
+                        }
+                    }
+                }
                 while (true) {
                     val id = readId(input) ?: break
                     val size = readSize(input)
                     when (id) {
-                        INFO -> timecodeScaleNs = parseTimecodeScale(readBytes(input, size))
+                        INFO -> {
+                            val (scaleNs, durationMs) = parseInfo(readBytes(input, size))
+                            timecodeScaleNs = scaleNs
+                            totalDurationMs = durationMs
+                        }
                         TRACKS -> {
                             codecId = parseTrackEntries(readBytes(input, size))
                                 .firstOrNull { it.trackNumber == trackNumber }?.codecId ?: codecId
                         }
-                        CLUSTER -> parseCluster(input, size, trackNumber, timecodeScaleNs, raw)
+                        CLUSTER -> parseCluster(input, size, trackNumber, timecodeScaleNs, raw, reportProgress)
                         else -> skip(input, size)
                     }
                 }
@@ -93,7 +114,8 @@ class MkvSubtitleExtractor {
         clusterSize: Long,
         trackNumber: Int,
         scaleNs: Long,
-        out: MutableList<RawCue>
+        out: MutableList<RawCue>,
+        reportProgress: ((Long) -> Unit)? = null
     ) {
         var clusterTimecode = 0L
         var remaining = clusterSize
@@ -104,43 +126,121 @@ class MkvSubtitleExtractor {
             if (unknownSize && (id == CLUSTER || id == TRACKS || id == INFO || id == CUES)) break
             val size = readSize(input)
             when (id) {
-                CLUSTER_TIMECODE -> clusterTimecode = readUint(input, size.toInt()).toLong()
-                SIMPLE_BLOCK -> parseBlock(readBytes(input, size), clusterTimecode, scaleNs, trackNumber, null, out)
-                BLOCK_GROUP -> parseBlockGroup(readBytes(input, size), clusterTimecode, scaleNs, trackNumber, out)
+                CLUSTER_TIMECODE -> {
+                    clusterTimecode = readUint(input, size.toInt()).toLong()
+                    reportProgress?.invoke(clusterTimecode * scaleNs / 1_000_000L)
+                }
+                SIMPLE_BLOCK -> readOrSkipSimpleBlock(input, size, clusterTimecode, scaleNs, trackNumber, out)
+                BLOCK_GROUP -> readOrSkipBlockGroup(input, size, clusterTimecode, scaleNs, trackNumber, out)
                 else -> skip(input, size)
             }
             if (!unknownSize) remaining -= elementFootprint(id, size)
         }
     }
 
-    private fun parseBlockGroup(
-        data: ByteArray,
+    /**
+     * Reads a SimpleBlock only if it belongs to [trackNumber]; otherwise skips its payload.
+     * Most blocks in a file are video/audio, so peeking the leading track-number VINT and
+     * seeking past non-matching blocks (instead of reading gigabytes into memory) makes
+     * extraction roughly I/O-free for the bulk of the file.
+     */
+    private fun readOrSkipSimpleBlock(
+        input: DataInputStream,
+        size: Long,
         clusterTimecode: Long,
         scaleNs: Long,
         trackNumber: Int,
         out: MutableList<RawCue>
     ) {
-        var blockData: ByteArray? = null
-        var durationTc = -1L
-        val input = DataInputStream(data.inputStream())
-        var pos = 0
-        while (pos < data.size) {
-            val (id, idLen) = readIdCounted(input) ?: break
-            pos += idLen
-            val (size, sizeLen) = readSizeCounted(input)
-            pos += sizeLen
-            when (id) {
-                BLOCK -> { blockData = ByteArray(size.toInt()); input.readFully(blockData) }
-                BLOCK_DURATION -> { durationTc = readUint(input, size.toInt()).toLong() }
-                else -> input.skipBytesFully(size)
-            }
-            pos += size.toInt()
+        if (size <= 0) {
+            skip(input, size)
+            return
         }
-        if (blockData != null) {
-            parseBlock(
-                blockData, clusterTimecode, scaleNs, trackNumber,
-                if (durationTc >= 0) durationTc else null, out
-            )
+        val (blockTrack, vintBytes) = readBlockTrackVint(input)
+        val rest = size - vintBytes.size
+        if (blockTrack != trackNumber) {
+            skip(input, rest)
+            return
+        }
+        val payload = vintBytes + readBytes(input, rest)
+        parseBlock(payload, clusterTimecode, scaleNs, trackNumber, null, out)
+    }
+
+    /** Reads the leading track-number VINT of a (Simple)Block: (trackNumber, raw VINT bytes). */
+    private fun readBlockTrackVint(input: DataInputStream): Pair<Int, ByteArray> {
+        val first = input.readUnsignedByte()
+        val numBytes = when {
+            first and 0x80 != 0 -> 1
+            first and 0x40 != 0 -> 2
+            first and 0x20 != 0 -> 3
+            first and 0x10 != 0 -> 4
+            else -> 1
+        }
+        val mask = when (numBytes) {
+            1 -> 0x7F; 2 -> 0x3F; 3 -> 0x1F; 4 -> 0x0F; else -> 0x7F
+        }
+        val bytes = ByteArray(numBytes)
+        bytes[0] = first.toByte()
+        var value = (first and mask).toLong()
+        for (i in 1 until numBytes) {
+            val b = input.readUnsignedByte()
+            bytes[i] = b.toByte()
+            value = (value shl 8) or b.toLong()
+        }
+        return Pair(value.toInt(), bytes)
+    }
+
+    /**
+     * Reads a BlockGroup only if its Block belongs to [trackNumber]; otherwise skips the rest
+     * of the group. Some files store video as BlockGroups, so peeking the inner Block's track
+     * and seeking past non-matching groups avoids reading the bulk of the file into memory.
+     */
+    private fun readOrSkipBlockGroup(
+        input: DataInputStream,
+        groupSize: Long,
+        clusterTimecode: Long,
+        scaleNs: Long,
+        trackNumber: Int,
+        out: MutableList<RawCue>
+    ) {
+        if (groupSize <= 0) {
+            skip(input, groupSize)
+            return
+        }
+        var remaining = groupSize
+        var blockPayload: ByteArray? = null
+        var durationTc = -1L
+        while (remaining > 0) {
+            val (id, idLen) = readIdCounted(input) ?: break
+            remaining -= idLen
+            val (size, sizeLen) = readSizeCounted(input)
+            remaining -= sizeLen
+            when (id) {
+                BLOCK -> {
+                    val (blockTrack, vintBytes) = readBlockTrackVint(input)
+                    val rest = size - vintBytes.size
+                    if (blockTrack != trackNumber) {
+                        // Not our track: skip the remainder of this block and the whole group.
+                        skip(input, rest)
+                        remaining -= size
+                        skip(input, remaining)
+                        return
+                    }
+                    blockPayload = vintBytes + readBytes(input, rest)
+                    remaining -= size
+                }
+                BLOCK_DURATION -> {
+                    durationTc = readUint(input, size.toInt()).toLong()
+                    remaining -= size
+                }
+                else -> {
+                    skip(input, size)
+                    remaining -= size
+                }
+            }
+        }
+        blockPayload?.let {
+            parseBlock(it, clusterTimecode, scaleNs, trackNumber, if (durationTc >= 0) durationTc else null, out)
         }
     }
 
@@ -237,21 +337,32 @@ class MkvSubtitleExtractor {
         return SubTrack(trackNumber, language.ifEmpty { "und" }, name, codecId)
     }
 
-    private fun parseTimecodeScale(data: ByteArray): Long {
+    private fun parseInfo(data: ByteArray): Pair<Long, Long> {
         val input = DataInputStream(data.inputStream())
         var pos = 0
+        var scaleNs = DEFAULT_TIMECODE_SCALE_NS
+        var durationUnits = 0.0
         while (pos < data.size) {
             val (id, idLen) = readIdCounted(input) ?: break
             pos += idLen
             val (size, sizeLen) = readSizeCounted(input)
             pos += sizeLen
-            if (id == TIMECODE_SCALE) {
-                return readUint(input, size.toInt()).toLong().takeIf { it > 0 } ?: DEFAULT_TIMECODE_SCALE_NS
+            when (id) {
+                TIMECODE_SCALE ->
+                    scaleNs = readUint(input, size.toInt()).toLong().takeIf { it > 0 } ?: DEFAULT_TIMECODE_SCALE_NS
+                DURATION -> durationUnits = readFloat(input, size.toInt())
+                else -> input.skipBytesFully(size)
             }
-            input.skipBytesFully(size)
             pos += size.toInt()
         }
-        return DEFAULT_TIMECODE_SCALE_NS
+        val durationMs = (durationUnits * scaleNs / 1_000_000.0).toLong()
+        return Pair(scaleNs, durationMs)
+    }
+
+    private fun readFloat(input: DataInputStream, size: Int): Double = when (size) {
+        4 -> { val b = ByteArray(4); input.readFully(b); java.nio.ByteBuffer.wrap(b).float.toDouble() }
+        8 -> { val b = ByteArray(8); input.readFully(b); java.nio.ByteBuffer.wrap(b).double }
+        else -> { input.skipBytesFully(size.toLong()); 0.0 }
     }
 
     // ── Text conversion ───────────────────────────────────────────────────────
@@ -273,7 +384,7 @@ class MkvSubtitleExtractor {
     // ── EBML I/O ──────────────────────────────────────────────────────────────
 
     private fun reader(file: File): DataInputStream =
-        DataInputStream(BufferedInputStream(file.inputStream(), 1 shl 16))
+        DataInputStream(BufferedInputStream(file.inputStream(), READ_BUFFER_BYTES))
 
     /** Reads the EBML header + opens the Segment, leaving the stream at the Segment's body. */
     private fun enterSegment(input: DataInputStream): Boolean {
@@ -415,10 +526,16 @@ class MkvSubtitleExtractor {
         private const val MAX_CUE_DURATION_MS = 7_000L
         private const val MIN_CUE_DURATION_MS = 200L
 
+        // Small read buffer: the parser reads tiny element headers and seeks (skips) past
+        // large video/audio payloads, so a big buffer would just refill data we immediately
+        // skip again. A small buffer keeps post-skip refills cheap.
+        private const val READ_BUFFER_BYTES = 4 shl 10 // 4 KiB
+
         private const val EBML_HEADER = 0x1A45DFA3L
         private const val SEGMENT = 0x18538067L
         private const val INFO = 0x1549A966L
         private const val TIMECODE_SCALE = 0x2AD7B1L
+        private const val DURATION = 0x4489L
         private const val TRACKS = 0x1654AE6BL
         private const val TRACK_ENTRY = 0xAEL
         private const val TRACK_NUMBER = 0xD7L

@@ -111,20 +111,38 @@ class SubtitleExtractor {
         return ext == "mkv" || ext == "webm"
     }
 
-    fun extractSubtitleAsVtt(videoPath: String, track: SubtitleTrack, outputDir: File): File? {
-        val outputFile = File(outputDir, "subtitle_${track.index}.vtt")
-        if (outputFile.exists()) outputFile.delete()
+    fun extractSubtitleAsVtt(
+        videoPath: String,
+        track: SubtitleTrack,
+        outputDir: File,
+        onProgress: ((Float) -> Unit)? = null
+    ): File? {
+        // Extracting an embedded subtitle scans the whole file (subtitles aren't indexed in
+        // Matroska), which is slow for large files. Cache the result keyed by the source's
+        // identity (path + size + mtime + track) so re-selecting the same track is instant.
+        val source = File(videoPath)
+        val cacheKey = "${videoPath.hashCode().toUInt()}_${source.length()}_${source.lastModified()}_${track.index}"
+        val outputFile = File(outputDir, "sub_$cacheKey.vtt")
+        if (outputFile.exists() && outputFile.length() > 0) {
+            onProgress?.invoke(1f)
+            return outputFile
+        }
         return if (track.mkvTrackNumber != null) {
-            extractViaEbml(videoPath, track.mkvTrackNumber, outputFile)
+            extractViaEbml(videoPath, track.mkvTrackNumber, outputFile, onProgress)
         } else {
             extractViaMediaExtractor(videoPath, track.index, outputFile)
         }
     }
 
     /** Extracts a subtitle track parsed from the MKV's EBML structure (BlockDuration gives ends). */
-    private fun extractViaEbml(videoPath: String, mkvTrackNumber: Int, outputFile: File): File? {
+    private fun extractViaEbml(
+        videoPath: String,
+        mkvTrackNumber: Int,
+        outputFile: File,
+        onProgress: ((Float) -> Unit)? = null
+    ): File? {
         return try {
-            val cues = mkvSubtitleExtractor.extractCues(File(videoPath), mkvTrackNumber)
+            val cues = mkvSubtitleExtractor.extractCues(File(videoPath), mkvTrackNumber, onProgress)
             if (cues.isEmpty()) return null
             writeVtt(cues.map { SubtitleCue(it.startMs * 1000, it.endMs * 1000, it.text) }, outputFile)
             outputFile

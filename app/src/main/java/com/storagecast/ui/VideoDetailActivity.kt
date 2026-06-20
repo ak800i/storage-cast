@@ -919,7 +919,13 @@ class VideoDetailActivity : AppCompatActivity() {
             val subtitleFile = withContext(Dispatchers.IO) {
                 val outputDir = File(cacheDir, "subtitles")
                 outputDir.mkdirs()
-                subtitleExtractor.extractSubtitleAsVtt(videoPath, track, outputDir)
+                subtitleExtractor.extractSubtitleAsVtt(videoPath, track, outputDir) { fraction ->
+                    val percent = (fraction * 100).toInt().coerceIn(0, 99)
+                    runOnUiThread {
+                        binding.subtitleStatus.text =
+                            getString(R.string.subtitle_extracting_progress, percent)
+                    }
+                }
             }
             binding.progressBar.visibility = View.GONE
             if (subtitleFile != null) {
