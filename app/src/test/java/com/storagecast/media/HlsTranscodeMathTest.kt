@@ -208,4 +208,27 @@ class HlsTranscodeMathTest {
         assertFalse(HlsTranscodeMath.segmentDrained(6_000_000L, 5_990_000L, 6_000_000L)) // audio short
         assertFalse(HlsTranscodeMath.segmentDrained(5_990_000L, 6_010_000L, 6_000_000L)) // video short
     }
+
+    @Test fun effectiveCopyAudio_trueOnlyForAacMonoStereoWhenPlanAllows() {
+        assertTrue(HlsTranscodeMath.effectiveCopyAudio(true, "audio/mp4a-latm", 2))
+        assertTrue(HlsTranscodeMath.effectiveCopyAudio(true, "audio/mp4a-latm", 1))
+    }
+
+    @Test fun effectiveCopyAudio_falseForMultichannelAac() {
+        assertFalse(HlsTranscodeMath.effectiveCopyAudio(true, "audio/mp4a-latm", 6))
+    }
+
+    @Test fun effectiveCopyAudio_falseForMp3_evenWhenPlanAllows() {
+        // plan.copyAudio may be true for audio/mpeg, but HlsMp4Builder can't mux MP3 -> transcode
+        assertFalse(HlsTranscodeMath.effectiveCopyAudio(true, "audio/mpeg", 2))
+    }
+
+    @Test fun effectiveCopyAudio_falseWhenPlanDisallows() {
+        assertFalse(HlsTranscodeMath.effectiveCopyAudio(false, "audio/mp4a-latm", 2))
+    }
+
+    @Test fun hlsAudioCodecAttr_isAlwaysAacOnHls() {
+        // HLS audio is always AAC (copy AAC, or transcode everything else to AAC)
+        assertEquals("mp4a.40.2", HlsTranscodeMath.hlsAudioCodecAttr())
+    }
 }

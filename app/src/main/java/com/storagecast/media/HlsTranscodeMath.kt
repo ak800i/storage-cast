@@ -89,4 +89,15 @@ object HlsTranscodeMath {
      */
     fun segmentDrained(videoMaxPtsUs: Long, audioMaxPtsUs: Long, endUs: Long): Boolean =
         videoMaxPtsUs >= endUs && audioMaxPtsUs >= endUs
+
+    /**
+     * HLS copy is allowed only when the PLAN allows it AND the EFFECTIVE (selected) track is AAC
+     * mono/stereo — the only thing HlsMp4Builder can mux. Everything else (incl. MP3, multichannel)
+     * is decoded and (down)mixed to stereo AAC. Keys off the effective track, not primaryAudio.
+     */
+    fun effectiveCopyAudio(planCopyAudio: Boolean, effectiveMime: String?, effectiveChannels: Int): Boolean =
+        planCopyAudio && effectiveMime == "audio/mp4a-latm" && effectiveChannels in 1..2
+
+    /** HLS audio is always AAC-LC stereo/mono (copied AAC or transcoded-to-AAC). */
+    fun hlsAudioCodecAttr(): String = "mp4a.40.2"
 }
