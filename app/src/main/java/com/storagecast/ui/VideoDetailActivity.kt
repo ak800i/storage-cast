@@ -909,6 +909,12 @@ class VideoDetailActivity : AppCompatActivity() {
 
     private fun extractSubtitle(videoPath: String, track: SubtitleTrack) {
         binding.progressBar.visibility = View.VISIBLE
+        // Embedded extraction demuxes the whole file and can take a while
+        // (especially while the same file is being streamed for direct play),
+        // so surface a clear, persistent status instead of just the thin top bar.
+        binding.subtitleStatus.text = getString(R.string.subtitle_extracting)
+        binding.subtitleStatus.visibility = View.VISIBLE
+        Toast.makeText(this, R.string.subtitle_extracting_toast, Toast.LENGTH_SHORT).show()
         activityScope.launch {
             val subtitleFile = withContext(Dispatchers.IO) {
                 val outputDir = File(cacheDir, "subtitles")
@@ -919,7 +925,8 @@ class VideoDetailActivity : AppCompatActivity() {
             if (subtitleFile != null) {
                 selectedSubtitleFile = subtitleFile
                 downloadedSubtitleFile = null
-                binding.subtitleStatus.text = getString(R.string.subtitle_selected, track.language)
+                val trackLabel = if (track.title.isNotBlank()) "${track.language} - ${track.title}" else track.language
+                binding.subtitleStatus.text = getString(R.string.subtitle_selected, trackLabel)
                 binding.subtitleStatus.visibility = View.VISIBLE
                 subtitleSyncOffsetMs = 0L
                 updateSubtitleSyncUi()
@@ -927,6 +934,7 @@ class VideoDetailActivity : AppCompatActivity() {
                 applyLiveSubtitleChange(subtitleFile)
                 invalidateOptionsMenu()
             } else {
+                binding.subtitleStatus.visibility = View.GONE
                 Toast.makeText(this@VideoDetailActivity, R.string.error_subtitle, Toast.LENGTH_SHORT).show()
                 AppLogger.error(TAG, "Failed to extract subtitle for track ${track.index}")
             }

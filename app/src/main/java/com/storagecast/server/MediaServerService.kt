@@ -128,8 +128,35 @@ class MediaServerService : Service() {
     fun registerSubtitle(subtitleFile: File): String {
         val id = ACTIVE_SUBTITLE_ID
         server?.registerFile(id, subtitleFile, "text/vtt", null)
-        AppLogger.info("MediaServer", "Register subtitle: ${subtitleFile.name}, id=$id, exists=${subtitleFile.exists()}")
-        return "/media/$id"
+        // The Cast receiver caches text tracks by their contentId URL. The server
+        // id is intentionally stable (so the file mapping is reused), but a stable
+        // URL makes the receiver keep showing the previously cached subtitle when a
+        // different subtitle or sync offset is applied. Append a content-based
+        // version token so changed content yields a fresh URL (forcing a re-fetch)
+        // while identical content reuses the same URL. The server resolves the id
+        // from the path only (NanoHTTPD strips the query), so serving is unaffected.
+        val version = subtitleContentVersion(subtitleFile)
+        AppLogger.info("MediaServer", "Register subtitle: ${subtitleFile.name}, id=$id, v=$version, exists=${subtitleFile.exists()}")
+        return "/media/$id?v=$version"
+    }
+
+    /** A stable token that changes whenever the subtitle file content changes. */
+    private fun subtitleContentVersion(file: File): String {
+        return try {
+            val crc = java.util.zip.CRC32()
+            file.inputStream().use { input ->
+                val buffer = ByteArray(8192)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    crc.update(buffer, 0, read)
+                }
+            }
+            crc.value.toString()
+        } catch (e: Exception) {
+            // Fall back to a time-based token so the URL is still unique.
+            System.currentTimeMillis().toString()
+        }
     }
 
     /**

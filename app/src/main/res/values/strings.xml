@@ -9,6 +9,8 @@
     <string name="select_cast_device">Select a Cast device</string>
     <string name="loading_video">Loading video…</string>
     <string name="extracting_subtitles">Extracting subtitles…</string>
+    <string name="subtitle_extracting">Extracting embedded subtitle…</string>
+    <string name="subtitle_extracting_toast">Extracting subtitle — this can take a moment for large files…</string>
     <string name="error_cast">Failed to cast video</string>
     <string name="error_subtitle">Failed to extract subtitles</string>
     <string name="no_subtitles">No embedded subtitles found</string>
