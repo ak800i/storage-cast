@@ -60,11 +60,12 @@ class StreamingDecisionTest {
     }
 
     @Test
-    fun hevc8bitAac_hlsCopyAudio() {
-        // 8-bit HEVC isn't in the direct set, so transcode video; copy AAC over HLS.
+    fun hevc8bit_directPlay() {
+        // 8-bit HEVC is now in the direct set (modern Cast receivers decode it; a receiver that
+        // can't is caught reactively and escalated to transcode).
         val p = decide(video("video/hevc", "Main"), audio("audio/mp4a-latm"))
-        assertEquals(StreamingDecision.Path.HLS, p.path)
-        assertTrue(p.copyAudio)
+        assertEquals(StreamingDecision.Path.DIRECT, p.path)
+        assertFalse(p.transcodeVideo)
     }
 
     @Test
@@ -121,6 +122,29 @@ class StreamingDecisionTest {
             StreamingDecision.Path.LIVE,
             decide(video("video/hevc", "Main 10"), audio("audio/eac3", ch = 6), force = true).path
         )
+    }
+
+    // ── Force-direct-play override ────────────────────────────────────────────
+
+    @Test
+    fun forceDirectPlay_transcodeNeededVideoGoesDirect() {
+        // 10-bit HEVC would normally transcode, but the user override sends it directly.
+        val p = StreamingDecision.decide(
+            probe(video("video/hevc", "Main 10"), audio("audio/eac3", ch = 6)),
+            forceDirectPlay = true
+        )
+        assertEquals(StreamingDecision.Path.DIRECT, p.path)
+        assertFalse(p.transcodeVideo)
+        assertTrue(p.copyAudio)
+    }
+
+    @Test
+    fun forceDirectPlay_beatsForceTranscode() {
+        val p = StreamingDecision.decide(
+            probe(video("video/avc"), audio("audio/mp4a-latm")),
+            forceTranscode = true, forceDirectPlay = true
+        )
+        assertEquals(StreamingDecision.Path.DIRECT, p.path)
     }
 
     @Test

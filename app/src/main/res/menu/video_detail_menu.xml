@@ -23,6 +23,10 @@
                 android:title="@string/hls_seeking"
                 android:checkable="true" />
             <item
+                android:id="@+id/action_force_direct_play"
+                android:title="@string/force_direct_play"
+                android:checkable="true" />
+            <item
                 android:id="@+id/action_reset_receiver_learning"
                 android:title="@string/reset_receiver_learning" />
         </menu>

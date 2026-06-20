@@ -1609,6 +1609,7 @@ class VideoDetailActivity : AppCompatActivity() {
                 probeResult,
                 forceTranscode = SettingsActivity.getRealtimeTranscode(this@VideoDetailActivity),
                 preferHls = SettingsActivity.getHlsSeeking(this@VideoDetailActivity),
+                forceDirectPlay = SettingsActivity.getForceDirectPlay(this@VideoDetailActivity),
                 hints = receiverCaps.hints(deviceId)
             )
             AppLogger.info(TAG, "Streaming plan: ${plan.path} — ${plan.reason}")
@@ -2376,6 +2377,8 @@ class VideoDetailActivity : AppCompatActivity() {
             SettingsActivity.getRealtimeTranscode(this)
         menu.findItem(R.id.action_hls_seeking)?.isChecked =
             SettingsActivity.getHlsSeeking(this)
+        menu.findItem(R.id.action_force_direct_play)?.isChecked =
+            SettingsActivity.getForceDirectPlay(this)
         return super.onPrepareOptionsMenu(menu)
     }
 
@@ -2431,6 +2434,18 @@ class VideoDetailActivity : AppCompatActivity() {
                     Toast.LENGTH_SHORT
                 ).show()
                 AppLogger.info(TAG, "HLS seeking toggled: $enabled")
+                true
+            }
+            R.id.action_force_direct_play -> {
+                val enabled = !item.isChecked
+                item.isChecked = enabled
+                SettingsActivity.setForceDirectPlay(this, enabled)
+                Toast.makeText(
+                    this,
+                    if (enabled) R.string.force_direct_play_on else R.string.force_direct_play_off,
+                    Toast.LENGTH_SHORT
+                ).show()
+                AppLogger.info(TAG, "Force direct-play toggled: $enabled")
                 true
             }
             else -> super.onOptionsItemSelected(item)

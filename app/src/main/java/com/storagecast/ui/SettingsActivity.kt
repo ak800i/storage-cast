@@ -23,6 +23,8 @@ class SettingsActivity : AppCompatActivity() {
         const val KEY_REALTIME_TRANSCODE = "realtime_transcode"
         const val DEFAULT_REALTIME_TRANSCODE = false
         const val KEY_HLS_SEEKING = "hls_seeking"
+        const val KEY_FORCE_DIRECT_PLAY = "force_direct_play"
+        const val DEFAULT_FORCE_DIRECT_PLAY = false
         private const val KEY_CAST_QUALITY = "cast_quality"
         // Off by default: the live progressive-fMP4 transcode path is the proven-working
         // one on real hardware (incl. first-gen Chromecast, which plays it but failed on
@@ -59,6 +61,17 @@ class SettingsActivity : AppCompatActivity() {
         fun setHlsSeeking(context: Context, enabled: Boolean) {
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
                 .putBoolean(KEY_HLS_SEEKING, enabled)
+                .apply()
+        }
+
+        fun getForceDirectPlay(context: Context): Boolean {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getBoolean(KEY_FORCE_DIRECT_PLAY, DEFAULT_FORCE_DIRECT_PLAY)
+        }
+
+        fun setForceDirectPlay(context: Context, enabled: Boolean) {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+                .putBoolean(KEY_FORCE_DIRECT_PLAY, enabled)
                 .apply()
         }
 

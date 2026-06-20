@@ -37,9 +37,14 @@ object StreamingDecision {
         val reason: String
     )
 
-    /** 8-bit video codecs the receiver can typically decode directly. */
+    /**
+     * 8-bit video codecs modern Cast receivers (Android TV / Google TV / Chromecast Ultra+)
+     * decode directly. HEVC is included for those receivers; a receiver that actually can't
+     * decode it (older Chromecast) is caught reactively (direct-play error -> learned hint ->
+     * transcode next time). 10-bit profiles are excluded separately via the `tenBit` check.
+     */
     private val DIRECT_VIDEO = setOf(
-        "video/avc", "video/x-vnd.on2.vp8", "video/x-vnd.on2.vp9", "video/av01"
+        "video/avc", "video/hevc", "video/x-vnd.on2.vp8", "video/x-vnd.on2.vp9", "video/av01"
     )
 
     /** Audio the receiver can play directly (includes Dolby via passthrough). */
@@ -55,6 +60,9 @@ object StreamingDecision {
      * @param forceTranscode user/advanced override: never direct-play (always transcode).
      * @param preferHls user/advanced override: prefer seekable HLS even for Dolby audio,
      *   accepting an audio transcode to AAC (loses 5.1) instead of falling back to live.
+     * @param forceDirectPlay user/advanced override: always direct-play (never transcode), for a
+     *   receiver the user knows can decode the source. Wins over [forceTranscode]; the reactive
+     *   learner can still escalate on a real receiver error.
      * @param hints learned per-receiver capability; codecs in [ReceiverHints.unsupportedDirect]
      *   are treated as not directly playable (forces transcode) even if in the optimistic baseline.
      */
@@ -62,6 +70,7 @@ object StreamingDecision {
         probe: MediaProbeResult,
         forceTranscode: Boolean = false,
         preferHls: Boolean = false,
+        forceDirectPlay: Boolean = false,
         hints: ReceiverHints = ReceiverHints()
     ): Plan {
         val v = probe.primaryVideo
@@ -81,6 +90,15 @@ object StreamingDecision {
             (aMime in HLS_FRIENDLY_AUDIO && a.channelCount in 1..2)
         val audioDolby = aMime.contains("ac3") || aMime.contains("ac-3") ||
             aMime.contains("eac3") || aMime.contains("ec3")
+
+        // User override: the receiver is known to handle these codecs — send the file as-is
+        // with no transcode (the inverse of forceTranscode). Wins over forceTranscode.
+        if (forceDirectPlay) {
+            return Plan(
+                Path.DIRECT, transcodeVideo = false, copyAudio = true,
+                reason = "force direct-play (user override)"
+            )
+        }
 
         // If the platform can't demux the audio (e.g. AC-3/E-AC-3 in MKV on some Xiaomi
         // devices, recovered only via the EBML fallback), the transcoder can't read or

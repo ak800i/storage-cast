@@ -63,6 +63,9 @@
     <string name="hls_seeking">Prefer seekable HLS</string>
     <string name="hls_seeking_on">Prefer seekable HLS on — Dolby downmixed to stereo</string>
     <string name="hls_seeking_off">Prefer seekable HLS off — auto-deciding</string>
+    <string name="force_direct_play">Force direct play</string>
+    <string name="force_direct_play_on">Force direct play on — sending source as-is (no transcode)</string>
+    <string name="force_direct_play_off">Force direct play off — auto-deciding</string>
     <string name="reset_receiver_learning">Reset receiver learning</string>
     <string name="reset_receiver_learning_done">Forgot what this receiver can play</string>
     <string name="select_audio_track">Audio</string>
