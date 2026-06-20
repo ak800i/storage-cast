@@ -2,9 +2,9 @@ package com.storagecast.media
 
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
-import android.media.MediaCodecList
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import android.os.Bundle
 import com.storagecast.log.AppLogger
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
@@ -22,15 +22,10 @@ class HlsSegmentTranscoder {
 
     companion object {
         private const val TAG = "HlsSegmentTranscoder"
-        private const val OUTPUT_VIDEO_MIME = "video/avc"
         private const val OUTPUT_AUDIO_MIME = "audio/mp4a-latm"
-        private const val OUTPUT_VIDEO_BITRATE = 8_000_000
-        private const val OUTPUT_VIDEO_FRAME_RATE = 30
         private const val OUTPUT_AUDIO_BITRATE = 192_000
         private const val OUTPUT_AUDIO_CHANNEL_COUNT = 2
         private const val TIMEOUT_US = 10_000L
-        private const val MAX_WIDTH = 1920
-        private const val MAX_HEIGHT = 1080
     }
 
     class Result(
@@ -50,13 +45,14 @@ class HlsSegmentTranscoder {
         selectedAudioTrack: AudioTrackInfo?,
         startUs: Long,
         endUs: Long,
-        copyAudio: Boolean
+        copyAudio: Boolean,
+        committedConfig: CommittedEncoderConfig,
     ): Result {
         val videoTrack = probeResult.primaryVideo
         val audioTrack = selectedAudioTrack ?: probeResult.primaryAudio
 
         val videoOut = if (videoTrack != null) {
-            transcodeVideoRange(inputPath, videoTrack, startUs, endUs)
+            transcodeVideoRange(inputPath, videoTrack, startUs, endUs, committedConfig)
         } else null
 
         val audioOut = if (audioTrack != null) {
@@ -83,7 +79,8 @@ class HlsSegmentTranscoder {
         inputPath: String,
         track: VideoTrackInfo,
         startUs: Long,
-        endUs: Long
+        endUs: Long,
+        committedConfig: CommittedEncoderConfig,
     ): TrackOut<HlsMp4Builder.VideoInit> {
         val extractor = MediaExtractor()
         extractor.setDataSource(inputPath)
@@ -99,30 +96,15 @@ class HlsSegmentTranscoder {
             } catch (_: Exception) {}
         }
 
-        val inW = track.width
-        val inH = track.height
-        val (outW, outH) = HlsTranscodeMath.outputSize(inW, inH, MAX_WIDTH, MAX_HEIGHT)
+        val format = EncoderFormatFactory.buildAvcEncoderFormat(committedConfig)
 
-        val outBitrate = HlsTranscodeMath.clampBitrate(track.bitrate, OUTPUT_VIDEO_BITRATE)
-        val outFps = HlsTranscodeMath.clampFrameRate(track.frameRate.toDouble(), OUTPUT_VIDEO_FRAME_RATE)
-
-        val outFormat = MediaFormat.createVideoFormat(OUTPUT_VIDEO_MIME, outW, outH).apply {
-            setInteger(MediaFormat.KEY_BIT_RATE, outBitrate)
-            setInteger(MediaFormat.KEY_FRAME_RATE, outFps)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
-            setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
-                try { setInteger(MediaFormat.KEY_LATENCY, 1) } catch (_: Exception) {}
-            }
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-                try { setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0) } catch (_: Exception) {}
-            }
-        }
-
-        val encoder = createVideoEncoder()
-        encoder.configure(outFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+        val encoder = EncoderFormatFactory.createCommittedEncoder(committedConfig)
+        encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         val surface = encoder.createInputSurface()
         encoder.start()
+        encoder.setParameters(Bundle().apply {
+            putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+        })
 
         val decoder = MediaCodec.createDecoderByType(track.mime)
         decoder.configure(inputFormat, surface, null, 0)
@@ -198,7 +180,7 @@ class HlsSegmentTranscoder {
             extractor.release()
         }
 
-        val init = avcC?.let { HlsMp4Builder.VideoInit(it, outW, outH) }
+        val init = avcC?.let { HlsMp4Builder.VideoInit(it, committedConfig.width, committedConfig.height) }
         AppLogger.info(TAG, "Segment video [${startUs / 1000}..${if (endUs == Long.MAX_VALUE) "end" else (endUs / 1000).toString()}]ms: ${samples.size} frames")
         return TrackOut(init, samples)
     }
@@ -229,11 +211,11 @@ class HlsSegmentTranscoder {
         var sampleRate = 48000
         var channels = OUTPUT_AUDIO_CHANNEL_COUNT
         var asc: ByteArray? = null
+        var feeder: HlsAudioEncoderFeeder? = null
         val samples = ArrayList<HlsMp4Builder.Sample>()
         val info = MediaCodec.BufferInfo()
         var inputDone = false
         var decoderDone = false
-        var encoderEosSent = false
         var encoderDone = false
 
         fun ensureEncoder() {
@@ -249,6 +231,7 @@ class HlsSegmentTranscoder {
                 configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
                 start()
             }
+            feeder = HlsAudioEncoderFeeder(encoder!!, sampleRate, channels)
         }
 
         try {
@@ -275,41 +258,25 @@ class HlsSegmentTranscoder {
                     } else if (status >= 0) {
                         val eos = (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
                         val pts = info.presentationTimeUs
-                        val enc = if (info.size > 0 && pts >= startUs && pts < endUs) {
-                            ensureEncoder(); encoder
-                        } else null
-                        if (enc != null) {
+                        if (info.size > 0 && pts >= startUs && pts < endUs) {
+                            ensureEncoder()
                             val decoded = decoder.getOutputBuffer(status)
                             if (decoded != null) {
-                                val encIdx = enc.dequeueInputBuffer(TIMEOUT_US)
-                                if (encIdx >= 0) {
-                                    val encBuf = enc.getInputBuffer(encIdx)
-                                    if (encBuf != null) {
-                                        encBuf.clear()
-                                        val limit = minOf(decoded.remaining(), encBuf.remaining())
-                                        val tmp = ByteArray(limit)
-                                        decoded.get(tmp, 0, limit)
-                                        encBuf.put(tmp, 0, limit)
-                                        enc.queueInputBuffer(encIdx, 0, limit, pts, 0)
-                                    }
-                                }
+                                val data = ByteArray(info.size)
+                                decoded.position(info.offset)
+                                decoded.get(data, 0, info.size)
+                                feeder?.enqueuePcm(data, pts)
                             }
                         }
                         decoder.releaseOutputBuffer(status, false)
                         if (eos || pts >= endUs) {
                             decoderDone = true
                             ensureEncoder()
-                            val enc2 = encoder
-                            if (enc2 != null && !encoderEosSent) {
-                                val encIdx = enc2.dequeueInputBuffer(TIMEOUT_US)
-                                if (encIdx >= 0) {
-                                    enc2.queueInputBuffer(encIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                                    encoderEosSent = true
-                                }
-                            }
                         }
                     }
                 }
+
+                feeder?.pump(decoderDone)
 
                 val enc = encoder
                 if (enc != null) {
@@ -331,9 +298,6 @@ class HlsSegmentTranscoder {
                         }
                         enc.releaseOutputBuffer(es, false)
                         if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) encoderDone = true
-                    } else if (encoderEosSent && es == MediaCodec.INFO_TRY_AGAIN_LATER) {
-                        // No more output coming.
-                        encoderDone = true
                     }
                 } else if (decoderDone) {
                     encoderDone = true
@@ -420,18 +384,6 @@ class HlsSegmentTranscoder {
     // ──────────────────────────────────────────────────────────────────────────
     //  Helpers (local copies; isolated from TranscodeStreamer)
     // ──────────────────────────────────────────────────────────────────────────
-
-    private fun createVideoEncoder(): MediaCodec {
-        return try {
-            val name = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
-                .filter { it.isEncoder && it.isHardwareAccelerated }
-                .firstOrNull { info -> info.supportedTypes.any { it.equals(OUTPUT_VIDEO_MIME, true) } }?.name
-            if (name != null) MediaCodec.createByCodecName(name)
-            else MediaCodec.createEncoderByType(OUTPUT_VIDEO_MIME)
-        } catch (e: Exception) {
-            MediaCodec.createEncoderByType(OUTPUT_VIDEO_MIME)
-        }
-    }
 
     private fun safeStopRelease(codec: MediaCodec?) {
         if (codec == null) return

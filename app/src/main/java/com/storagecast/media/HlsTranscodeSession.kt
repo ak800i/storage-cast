@@ -183,7 +183,13 @@ class HlsTranscodeSession(
 
     private fun buildAndCacheSegment(index: Int): ByteArray {
         val (startUs, endUs) = rangeFor(index)
-        val result = transcoder.transcodeRange(inputPath, probeResult, selectedAudioTrack, startUs, endUs, copyAudio)
+        val video = probeResult.primaryVideo!!
+        val tmpConfig = CommittedEncoderConfig.derive(
+            video.width, video.height, video.bitrate, video.frameRate.toInt(), CastQuality.AUTO,
+        )
+        val result = transcoder.transcodeRange(
+            inputPath, probeResult, selectedAudioTrack, startUs, endUs, copyAudio, tmpConfig
+        )
         // Capture configs from the first segment we build (used for the shared init).
         if (videoInit == null) videoInit = result.video
         if (audioInit == null) audioInit = result.audio
